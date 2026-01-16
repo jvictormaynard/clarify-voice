@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>ClarifyVoice</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: rgba(0, 0, 0, 0); /* Transparent background */
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    #container {
+      display: flex;
+      flex-direction: column;
+      background-color: #1a1a1a;
+      color: white;
+      border-radius: 12px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 0 2px #4CAF50;
+      border: 2px solid #333;
+      margin: 5px;
+      overflow: visible;
+      transition: all 0.3s ease;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 16px;
+      -webkit-app-region: drag;
+      position: relative;
+      overflow: visible;
+    }
+
+    .status-group {
+      display: flex;
+      align-items: center;
+      flex: 1;
+    }
+
+    .status-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background-color: #555;
+      margin-right: 12px;
+      transition: all 0.3s ease;
+    }
+
+    .status-text {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .button-group {
+      display: flex;
+      gap: 8px;
+      -webkit-app-region: no-drag;
+      position: relative;
+    }
+
+    /* States */
+    .ready .status-dot { 
+      background-color: #4CAF50; 
+      box-shadow: 0 0 10px #4CAF50, 0 0 20px rgba(76, 175, 80, 0.5);
+    }
+    .recording .status-dot { 
+      background-color: #F44336; 
+      box-shadow: 0 0 12px #F44336, 0 0 24px rgba(244, 67, 54, 0.6);
+      animation: pulse 1.2s infinite;
+    }
+    .processing .status-dot { 
+      background-color: #2196F3; 
+      box-shadow: 0 0 10px #2196F3;
+      animation: spin 1s infinite;
+    }
+
+    .recording #container {
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 0 2px #F44336;
+    }
+
+    .processing #container {
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 0 2px #2196F3;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.6; transform: scale(1.1); }
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    /* Dropdown */
+    .dropdown {
+      position: relative;
+      display: inline-block;
+      -webkit-app-region: no-drag;
+    }
+
+    .dropdown-content {
+      display: none;
+      position: absolute;
+      right: 0;
+      background-color: #252525;
+      min-width: 120px;
+      box-shadow: 0 8px 16px 0 rgba(0,0,0,0.2);
+      z-index: 1000;
+      border-radius: 6px;
+      border: 1px solid #444;
+      margin-top: 5px;
+    }
+
+    .dropdown-content a {
+      color: #e0e0e0;
+      padding: 8px 12px;
+      text-decoration: none;
+      display: block;
+      font-size: 13px;
+    }
+
+    .dropdown-content a:hover {background-color: #333;}
+    
+    .dropdown-content a.active {
+        background-color: #4CAF50;
+        color: white;
+    }
+
+    .show {display:block;}
+    
+    .mode-display {
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        padding: 4px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        white-space: nowrap;
+        -webkit-app-region: no-drag;
+    }
+    
+    .mode-display:hover {
+        background-color: #45a049;
+        transform: translateY(-1px);
+        box-shadow: 0 2px 8px rgba(76, 175, 80, 0.4);
+    }
+
+    /* Video checkbox */
+    .video-checkbox-container {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      -webkit-app-region: no-drag;
+    }
+
+    .video-checkbox-container.hidden {
+      display: none;
+    }
+
+    .test-btn {
+      background-color: #4CAF50;
+    }
+
+    .test-btn:hover {
+      background-color: #45a049;
+      transform: scale(1.15);
+    }
+
+    .test-btn.hidden {
+      display: none;
+    }
+
+    #include-video-checkbox {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+      accent-color: #4CAF50;
+    }
+
+    .video-checkbox-container label {
+      font-size: 16px;
+      cursor: pointer;
+      user-select: none;
+      opacity: 0.7;
+      transition: opacity 0.2s;
+    }
+
+    #include-video-checkbox:checked + label {
+      opacity: 1;
+    }
+
+    /* Buttons */
+    .btn {
+      width: 24px;
+      height: 24px;
+      border: none;
+      border-radius: 50%;
+      color: white;
+      font-size: 12px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+    }
+
+    .cancel-btn {
+      background-color: #F44336;
+      display: none;
+    }
+
+    .cancel-btn:hover {
+      background-color: #D32F2F;
+      transform: scale(1.15);
+    }
+
+    .recording .cancel-btn {
+      display: flex;
+    }
+
+    .close-btn {
+      background-color: #666;
+    }
+
+    .close-btn:hover {
+      background-color: #888;
+      transform: scale(1.15);
+    }
+
+    .btn:active {
+      transform: scale(0.9);
+    }
+
+    /* Transcription result box */
+    .transcription-box {
+      display: none;
+      background-color: #252525;
+      padding: 12px 16px;
+      border-top: 1px solid #444;
+      max-height: 300px;
+      overflow-y: auto;
+      -webkit-app-region: no-drag;
+      user-select: text;
+    }
+
+    .transcription-box.visible {
+      display: block;
+    }
+
+    .transcription-text {
+      font-size: 13px;
+      line-height: 1.6;
+      color: #e0e0e0;
+      word-wrap: break-word;
+    }
+
+    .transcription-actions {
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
+    }
+
+    .action-btn {
+      padding: 6px 12px;
+      border: none;
+      border-radius: 6px;
+      background-color: #4CAF50;
+      color: white;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+
+    .action-btn:hover {
+      background-color: #45a049;
+    }
+
+    .action-btn.secondary {
+      background-color: #555;
+    }
+
+    .action-btn.secondary:hover {
+      background-color: #666;
+    }
+
+    /* Scrollbar styling */
+    .transcription-box::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .transcription-box::-webkit-scrollbar-track {
+      background: #1a1a1a;
+    }
+
+    .transcription-box::-webkit-scrollbar-thumb {
+      background: #555;
+      border-radius: 4px;
+    }
+
+    .transcription-box::-webkit-scrollbar-thumb:hover {
+      background: #666;
+    }
+  </style>
+</head>
+<body>
+  <div id="container" class="ready">
+    <div class="header">
+      <div class="status-group">
+        <div class="status-dot"></div>
+        <div class="status-text" id="status-text">Ready (Alt+L)</div>
+      </div>
+      <div class="button-group">
+        <div class="dropdown">
+            <button class="mode-display" id="settings-btn" title="Click to change mode">Prompt</button>
+            <div class="dropdown-content" id="dropdown-content">
+                <a href="#" data-value="prompt" class="active">Prompt</a>
+                <a href="#" data-value="transcription">Transcription</a>
+            </div>
+        </div>
+        <div class="video-checkbox-container" id="video-checkbox-container">
+            <input type="checkbox" id="include-video-checkbox" />
+            <label for="include-video-checkbox">🎥</label>
+        </div>
+        <button class="btn test-btn" id="test-video-btn" title="Test video capture">T</button>
+        <button class="btn cancel-btn" id="cancel-btn" title="Cancel recording">✕</button>
+        <button class="btn close-btn" id="close-btn" title="Close">×</button>
+      </div>
+    </div>
+    <div class="transcription-box" id="transcription-box">
+      <div class="transcription-text" id="transcription-text"></div>
+      <div class="transcription-actions">
+        <button class="action-btn" id="copy-btn">Copy to Clipboard</button>
+        <button class="action-btn secondary" id="hide-btn">Hide</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { ipcRenderer } = require('electron');
+    const container = document.getElementById('container');
+    const settingsBtn = document.getElementById('settings-btn');
+    const dropdownContent = document.getElementById('dropdown-content');
+    const dropdownOptions = dropdownContent.querySelectorAll('a');
+    const statusText = document.getElementById('status-text');
+    const cancelBtn = document.getElementById('cancel-btn');
+    const closeBtn = document.getElementById('close-btn');
+    const transcriptionBox = document.getElementById('transcription-box');
+    const transcriptionText = document.getElementById('transcription-text');
+    const copyBtn = document.getElementById('copy-btn');
+    const hideBtn = document.getElementById('hide-btn');
+    const videoCheckboxContainer = document.getElementById('video-checkbox-container');
+    const includeVideoCheckbox = document.getElementById('include-video-checkbox');
+    const testVideoBtn = document.getElementById('test-video-btn');
+
+    let audioContext = null;
+    let currentTranscription = '';
+    let currentMode = 'prompt';
+    let videoStream = null;
+    let mediaRecorder = null;
+    let recordedChunks = [];
+    let videoCanvas = null;
+    let videoContext = null;
+    let videoElement = null;
+    let frameExtractionInterval = null;
+
+    function notifyVideoError(message) {
+      console.error('Video recording error:', message);
+      statusText.innerText = 'Video capture blocked';
+      ipcRenderer.send('video-recording-error', message);
+    }
+
+    // Initialize video canvas for frame capture
+    function initVideoCanvas() {
+      if (!videoCanvas) {
+        videoCanvas = document.createElement('canvas');
+        videoContext = videoCanvas.getContext('2d');
+      }
+    }
+
+    // Start video recording with audio
+    async function startVideoRecording() {
+      try {
+        console.log('Attempting to start video+audio recording...');
+        recordedChunks = [];
+        ipcRenderer.send('video-recording-error', ''); // clear any prior error state
+
+        // Request screen capture via getDisplayMedia; the main process
+        // routes this through desktopCapturer using setDisplayMediaRequestHandler.
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          audio: false,
+          video: {
+            frameRate: { ideal: 10, max: 15 }
+          }
+        }).catch(err => {
+          notifyVideoError('Screen capture denied or failed. Please allow screen recording.');
+          throw err;
+        });
+
+        console.log('Got screen stream');
+
+        // Use the screen stream directly for recording (may include audio
+        // depending on OS / permissions configuration).
+        const combinedStream = screenStream;
+
+        videoStream = combinedStream;
+
+        ipcRenderer.send('video-recording-started', {
+          screen: 'display-media',
+          audioTracks: combinedStream.getAudioTracks().map(t => t.label)
+        });
+
+        // Set up MediaRecorder to record the combined stream
+        let recorderOptions = {};
+        try {
+          if (window.MediaRecorder && MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')) {
+            recorderOptions = { mimeType: 'video/webm;codecs=vp9,opus' };
+          } else if (window.MediaRecorder && MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')) {
+            recorderOptions = { mimeType: 'video/webm;codecs=vp8,opus' };
+          } else if (window.MediaRecorder && MediaRecorder.isTypeSupported('video/webm')) {
+            recorderOptions = { mimeType: 'video/webm' };
+          }
+        } catch (e) {
+          console.warn('MediaRecorder.isTypeSupported check failed, using default options:', e);
+        }
+
+        mediaRecorder = new MediaRecorder(combinedStream, recorderOptions);
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            recordedChunks.push(event.data);
+            console.log('Recorded chunk:', event.data.size, 'bytes');
+          }
+        };
+
+        mediaRecorder.onstop = () => {
+          console.log('MediaRecorder stopped, total chunks:', recordedChunks.length);
+          // Video will be processed when stopVideoRecording is called
+        };
+
+        mediaRecorder.onerror = (error) => {
+          notifyVideoError(`MediaRecorder error: ${error.message || error}`);
+        };
+
+        // Start recording; data will be emitted on stop
+        mediaRecorder.start();
+        console.log('MediaRecorder started');
+
+        // Also extract frames for Gemini (separate from video file)
+        initVideoCanvas();
+        videoElement = document.createElement('video');
+        videoElement.srcObject = combinedStream;
+        videoElement.autoplay = true;
+        videoElement.muted = true;
+
+        await new Promise((resolve) => {
+          videoElement.onloadedmetadata = resolve;
+          setTimeout(resolve, 1000);
+        });
+
+        videoCanvas.width = videoElement.videoWidth || 1920;
+        videoCanvas.height = videoElement.videoHeight || 1080;
+
+        // Extract frames at 1 FPS for Gemini analysis
+        frameExtractionInterval = setInterval(() => {
+          if (videoElement && videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+            try {
+              videoContext.drawImage(videoElement, 0, 0, videoCanvas.width, videoCanvas.height);
+              const frameData = videoCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+              ipcRenderer.send('video-frame', frameData);
+            } catch (err) {
+              console.error('Error capturing frame:', err);
+            }
+          }
+        }, 1000);
+
+        console.log('Video+audio recording started successfully');
+      } catch (error) {
+        console.error('Failed to start video recording:', error);
+        notifyVideoError(error.message || 'Failed to start video recording.');
+      }
+    }
+
+    // Stop video recording
+    async function stopVideoRecording() {
+      console.log('Stopping video+audio recording...');
+      
+      // Stop frame extraction
+      if (frameExtractionInterval) {
+        clearInterval(frameExtractionInterval);
+        frameExtractionInterval = null;
+      }
+
+      // Stop MediaRecorder
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+        
+        // Wait for final chunks
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Create blob and send to main process
+        if (recordedChunks.length > 0) {
+          const blob = new Blob(recordedChunks, { type: 'video/webm' });
+          console.log('Created video blob, size:', blob.size);
+          
+          // Convert to base64 and send to main process
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64data = reader.result.split(',')[1];
+            ipcRenderer.send('video-file-complete', base64data);
+            console.log('Video file sent to main process');
+          };
+          reader.readAsDataURL(blob);
+        }
+        
+        recordedChunks = [];
+        mediaRecorder = null;
+      }
+
+      // Stop streams
+      if (videoStream) {
+        videoStream.getTracks().forEach(track => {
+          track.stop();
+          console.log('Stopped track:', track.kind);
+        });
+        videoStream = null;
+      }
+
+      if (videoElement) {
+        videoElement.srcObject = null;
+        videoElement = null;
+      }
+
+      console.log('Video recording stopped');
+    }
+
+    // Listen for video recording commands from main process
+    ipcRenderer.on('start-video-recording', () => {
+      startVideoRecording();
+    });
+
+    ipcRenderer.on('stop-video-recording', () => {
+      stopVideoRecording();
+    });
+
+    // Settings button click handler
+    settingsBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        dropdownContent.classList.toggle('show');
+    });
+
+    // Close dropdown when clicking outside
+    window.addEventListener('click', (e) => {
+        if (!e.target.matches('.settings-btn') && !e.target.matches('.settings-btn *')) {
+            if (dropdownContent.classList.contains('show')) {
+                dropdownContent.classList.remove('show');
+            }
+        }
+    });
+
+    // Dropdown options click handler
+    dropdownOptions.forEach(option => {
+        option.addEventListener('click', (e) => {
+            e.preventDefault();
+            const mode = e.target.getAttribute('data-value');
+            
+            // Update active class
+            dropdownOptions.forEach(opt => opt.classList.remove('active'));
+            e.target.classList.add('active');
+            
+            // Update button text
+            const modeName = mode.charAt(0).toUpperCase() + mode.slice(1);
+            settingsBtn.textContent = modeName;
+            
+            // Update current mode
+            currentMode = mode;
+            
+            // Show/hide video checkbox based on mode
+            if (mode === 'prompt') {
+                videoCheckboxContainer.classList.remove('hidden');
+              if (testVideoBtn) testVideoBtn.classList.remove('hidden');
+            } else {
+                videoCheckboxContainer.classList.add('hidden');
+                includeVideoCheckbox.checked = false;
+              if (testVideoBtn) testVideoBtn.classList.add('hidden');
+            }
+            
+            // Send mode to main process
+            ipcRenderer.send('set-mode', mode);
+            
+            // Close dropdown
+            dropdownContent.classList.remove('show');
+        });
+    });
+
+    // Checkbox change handler - send state to main process
+    includeVideoCheckbox.addEventListener('change', () => {
+        ipcRenderer.send('set-include-video', includeVideoCheckbox.checked);
+    });
+
+    // Test video capture button handler
+    if (testVideoBtn) {
+      testVideoBtn.addEventListener('click', () => {
+        if (testVideoBtn.disabled) return;
+        testVideoBtn.disabled = true;
+        const originalText = testVideoBtn.textContent;
+        testVideoBtn.textContent = '...';
+        ipcRenderer.send('test-video-capture');
+
+        // Fallback timeout to re-enable in case no response
+        setTimeout(() => {
+          if (testVideoBtn.disabled) {
+            testVideoBtn.disabled = false;
+            testVideoBtn.textContent = originalText;
+          }
+        }, 10000);
+      });
+    }
+
+    // Initialize audio context for beep sounds
+    function initAudio() {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+    }
+
+    // Play beep sound
+    function playBeep(frequency, duration) {
+      initAudio();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      oscillator.frequency.value = frequency;
+      oscillator.type = 'sine';
+      
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration / 1000);
+      
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + duration / 1000);
+    }
+
+    // Cancel button click handler
+    cancelBtn.addEventListener('click', () => {
+      ipcRenderer.send('cancel-recording');
+    });
+
+    // Close button click handler
+    closeBtn.addEventListener('click', () => {
+      ipcRenderer.send('close-app');
+    });
+
+    // Copy button click handler
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(currentTranscription);
+      copyBtn.textContent = 'Copied!';
+      setTimeout(() => {
+        copyBtn.textContent = 'Copy to Clipboard';
+      }, 2000);
+    });
+
+    // Hide button click handler
+    hideBtn.addEventListener('click', () => {
+      transcriptionBox.classList.remove('visible');
+      ipcRenderer.send('hide-transcription');
+    });
+
+    // Update status
+    ipcRenderer.on('update-status', (event, status) => {
+      container.className = ''; // Reset classes
+      
+      if (status === 'recording') {
+        container.classList.add('recording');
+        statusText.innerText = 'Recording...';
+        transcriptionBox.classList.remove('visible');
+      } else if (status === 'processing') {
+        container.classList.add('processing');
+        statusText.innerText = 'Processing...';
+      } else {
+        container.classList.add('ready');
+        statusText.innerText = 'Ready (Alt+L)';
+      }
+    });
+
+    // Play sound
+    ipcRenderer.on('play-sound', (event, { frequency, duration }) => {
+      playBeep(frequency, duration);
+    });
+
+    // Show transcription result
+    ipcRenderer.on('show-transcription', (event, text) => {
+      currentTranscription = text;
+      transcriptionText.textContent = text;
+      transcriptionBox.classList.add('visible');
+    });
+
+    // Video test completion handler
+    ipcRenderer.on('video-test-complete', (event, result) => {
+      if (testVideoBtn) {
+        testVideoBtn.disabled = false;
+        testVideoBtn.textContent = 'T';
+      }
+      if (!result || !result.success) {
+        statusText.innerText = 'Video test failed';
+      }
+    });
+  </script>
+</body>
+</html>

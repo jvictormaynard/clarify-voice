@@ -1,0 +1,3 @@
+@echo off
+echo Starting ClarifyVoice...
+start "" "release\win-unpacked\ClarifyVoice.exe"
