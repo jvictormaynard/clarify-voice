@@ -15,6 +15,7 @@ interface ElectronAPI {
   testVideoCapture: () => void;
   cancelRecording: () => void;
   closeApp: () => void;
+  minimizeApp: () => void;
   hideTranscription: () => void;
   onStartVideoRecording: (callback: () => void) => () => void;
   onStopVideoRecording: (callback: () => void) => () => void;

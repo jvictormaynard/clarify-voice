@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   testVideoCapture: () => ipcRenderer.send('test-video-capture'),
   cancelRecording: () => ipcRenderer.send('cancel-recording'),
   closeApp: () => ipcRenderer.send('close-app'),
+  minimizeApp: () => ipcRenderer.send('minimize-app'),
   hideTranscription: () => ipcRenderer.send('hide-transcription'),
 
   // Listener methods
