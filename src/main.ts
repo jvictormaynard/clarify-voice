@@ -27,16 +27,26 @@ dotenv.config({ path: envPath });
 const API_KEY = process.env.API_KEY;
 const AUDIO_FILE_PATH = path.join(app.getPath('userData'), "temp_recording.wav");
 
-// Set up SoX path
-const soxDir = app.isPackaged
-  ? path.join(process.resourcesPath, 'extra', 'sox-14.4.2')
-  : path.join(appRoot, 'extra', 'sox-14.4.2');
+// Set up SoX path - platform specific
+const isWindows = process.platform === 'win32';
+const isLinux = process.platform === 'linux';
+const isMac = process.platform === 'darwin';
 
-// Add sox directory to PATH
-process.env.PATH = soxDir + path.delimiter + (process.env.PATH || '');
+// On Linux/macOS, SoX should be installed via package manager (apt, brew)
+// On Windows, we bundle SoX in extra/sox-14.4.2
+const soxDir = isWindows
+  ? (app.isPackaged
+      ? path.join(process.resourcesPath, 'extra', 'sox-14.4.2')
+      : path.join(appRoot, 'extra', 'sox-14.4.2'))
+  : ''; // Linux/macOS use system sox
 
-console.log("SoX Directory:", soxDir);
-console.log("SoX exists:", fs.existsSync(path.join(soxDir, 'sox.exe')));
+// Add sox directory to PATH only on Windows
+if (isWindows && soxDir) {
+  process.env.PATH = soxDir + path.delimiter + (process.env.PATH || '');
+}
+
+console.log("Platform:", process.platform);
+console.log("SoX Directory:", soxDir || "(system)");
 console.log("API_KEY loaded:", API_KEY ? "Yes" : "No");
 console.log("Is Packaged:", app.isPackaged);
 
@@ -52,10 +62,64 @@ let recordedVideoFrames: string[] = []; // Base64 encoded frames
 const VIDEO_FILE_PATH = path.join(app.getPath('userData'), "temp_recording.webm");
 let videoRecordingConfirmed = false;
 
-// Full path to sox executable
-const soxExe = path.join(soxDir, 'sox.exe');
+// Full path to sox executable - platform specific
+const soxExe = isWindows ? path.join(soxDir, 'sox.exe') : 'sox';
 console.log("SoX executable:", soxExe);
 console.log("Has desktopCapturer in main:", !!desktopCapturer);
+
+// Detect available Linux audio backend
+let detectedLinuxAudio: string | null = null;
+
+function detectLinuxAudioBackend(): Promise<string> {
+  return new Promise((resolve) => {
+    if (detectedLinuxAudio) {
+      resolve(detectedLinuxAudio);
+      return;
+    }
+
+    // Try PipeWire first (modern Ubuntu 22.04+)
+    exec('pactl info 2>/dev/null | grep -i pipewire', (err, stdout) => {
+      if (!err && stdout.includes('PipeWire')) {
+        console.log('Detected PipeWire audio backend');
+        detectedLinuxAudio = 'pulseaudio'; // PipeWire is compatible with pulseaudio interface
+        resolve('pulseaudio');
+        return;
+      }
+
+      // Try PulseAudio
+      exec('pactl info 2>/dev/null', (err2) => {
+        if (!err2) {
+          console.log('Detected PulseAudio backend');
+          detectedLinuxAudio = 'pulseaudio';
+          resolve('pulseaudio');
+          return;
+        }
+
+        // Fallback to ALSA
+        console.log('Falling back to ALSA backend');
+        detectedLinuxAudio = 'alsa';
+        resolve('alsa');
+      });
+    });
+  });
+}
+
+// Get platform-specific audio input type for SoX
+async function getSoxAudioInputArgs(): Promise<string[]> {
+  if (isWindows) {
+    return ['-t', 'waveaudio', '-d'];  // Windows audio driver
+  } else if (isMac) {
+    return ['-t', 'coreaudio', 'default'];  // macOS CoreAudio
+  } else {
+    // Linux - detect available audio backend
+    const backend = await detectLinuxAudioBackend();
+    if (backend === 'pulseaudio') {
+      return ['-t', 'pulseaudio', 'default'];
+    } else {
+      return ['-t', 'alsa', 'default'];
+    }
+  }
+}
 
 if (API_KEY) {
   ai = new GoogleGenAI({ apiKey: API_KEY });
@@ -115,8 +179,9 @@ function createWindow() {
     focusable: false, // Don't steal focus
     hasShadow: false,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false, // For simple IPC in this small app
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
     }
   });
 
@@ -130,8 +195,10 @@ function createWindow() {
   console.log("Loading HTML from:", htmlPath);
   mainWindow.loadFile(htmlPath);
   
-  // Open DevTools for debugging video capture issues
-  mainWindow.webContents.openDevTools({ mode: 'detach' });
+  // Only open DevTools in development mode
+  if (!app.isPackaged) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  }
 }
 
 app.whenReady().then(() => {
@@ -195,12 +262,33 @@ app.whenReady().then(() => {
   }
 
   // Check if SoX is available
-  exec('sox --version', (err) => {
+  const soxCheckCmd = isWindows ? `"${soxExe}" --version` : 'sox --version';
+  exec(soxCheckCmd, (err) => {
       if (err) {
-          console.error("SoX not found!");
-          // Ideally notify user in UI
+          console.error("SoX not found! Please install SoX:");
+          if (isLinux) {
+              console.error("  Ubuntu/Debian: sudo apt install sox libsox-fmt-all");
+          } else if (isMac) {
+              console.error("  macOS: brew install sox");
+          } else {
+              console.error("  SoX should be bundled with this application");
+          }
+      } else {
+          console.log("SoX is available");
       }
   });
+
+  // Check for xdotool on Linux (needed for paste functionality)
+  if (isLinux) {
+    exec('which xdotool', (err) => {
+      if (err) {
+        console.error("xdotool not found! Paste functionality will not work.");
+        console.error("  Install with: sudo apt install xdotool");
+      } else {
+        console.log("xdotool is available");
+      }
+    });
+  }
 });
 
 // IPC handler for cancel recording from renderer
@@ -288,7 +376,7 @@ async function toggleRecording() {
   if (isRecording) {
     await stopRecording();
   } else {
-    startRecording();
+    await startRecording();
   }
 }
 
@@ -319,7 +407,7 @@ function showTranscriptionResult(text: string) {
   }
 }
 
-function startRecording() {
+async function startRecording() {
   console.log("Starting recording...");
   console.log("Include video:", includeVideo);
   isRecording = true;
@@ -327,29 +415,39 @@ function startRecording() {
   videoRecordingConfirmed = false;
   updateStatus('recording');
   playSound(800, 100); // Play start sound
-  
+
   // If video is enabled, also start video recording from renderer
   if (includeVideo && mainWindow) {
     console.log('Starting video recording from renderer');
     mainWindow.webContents.send('start-video-recording');
   }
-  
+
   // Always use sox for audio recording to ensure high quality
   try {
-    // Use sox directly with Windows audio input
-    // -d = default audio device, -t waveaudio = Windows audio driver
+    // Use sox with platform-specific audio input
     // Output: 16-bit signed, 16kHz, mono WAV
-    soxProcess = spawn(soxExe, [
-      '-t', 'waveaudio', '-d',  // Input from Windows default audio device
-      '-r', '16000',            // Sample rate 16kHz
-      '-c', '1',                // Mono
-      '-b', '16',               // 16-bit
-      '-e', 'signed-integer',   // Signed integer encoding
-      AUDIO_FILE_PATH           // Output file
-    ], {
+    const audioInputArgs = await getSoxAudioInputArgs();
+    const soxArgs = [
+      ...audioInputArgs,          // Platform-specific input device
+      '-r', '16000',              // Sample rate 16kHz
+      '-c', '1',                  // Mono
+      '-b', '16',                 // 16-bit
+      '-e', 'signed-integer',     // Signed integer encoding
+      AUDIO_FILE_PATH             // Output file
+    ];
+
+    console.log("Starting sox with args:", soxArgs.join(' '));
+
+    const spawnOptions: any = {
       windowsHide: true,
-      cwd: soxDir  // Set working directory to sox folder for DLL access
-    });
+    };
+
+    // On Windows, set cwd to sox folder for DLL access
+    if (isWindows && soxDir) {
+      spawnOptions.cwd = soxDir;
+    }
+
+    soxProcess = spawn(soxExe, soxArgs, spawnOptions);
 
     soxProcess.stderr?.on('data', (data) => {
       console.log('sox stderr:', data.toString());

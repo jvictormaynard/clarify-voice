@@ -1,722 +1,398 @@
 <!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>ClarifyVoice</title>
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      background-color: rgba(0, 0, 0, 0); /* Transparent background */
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      overflow: hidden;
-      user-select: none;
-    }
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ClarifyVoice</title>
+    <style>
+      :root {
+        --bg: rgba(0, 0, 0, 0);
+        --surface: #0b1220;
+        --surface-2: #101a30;
+        --border: rgba(255, 255, 255, 0.08);
+        --text: rgba(255, 255, 255, 0.92);
+        --muted: rgba(255, 255, 255, 0.68);
+        --muted-2: rgba(255, 255, 255, 0.45);
+        --accent: #62d0ff;
+        --danger: #ff5a67;
+        --warn: #ffb020;
+        --shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+        --radius: 12px;
+        --radius-sm: 10px;
+        --font: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica,
+          Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      }
 
-    #container {
-      display: flex;
-      flex-direction: column;
-      background-color: #1a1a1a;
-      color: white;
-      border-radius: 12px;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 0 2px #4CAF50;
-      border: 2px solid #333;
-      margin: 5px;
-      overflow: visible;
-      transition: all 0.3s ease;
-    }
+      html,
+      body {
+        height: 100%;
+      }
 
-    .header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 10px 16px;
-      -webkit-app-region: drag;
-      position: relative;
-      overflow: visible;
-    }
+      body {
+        margin: 0;
+        background: var(--bg);
+        font-family: var(--font);
+        overflow: hidden;
+        user-select: none;
+        color: var(--text);
+      }
 
-    .status-group {
-      display: flex;
-      align-items: center;
-      flex: 1;
-    }
+      #container {
+        margin: 6px;
+        border-radius: var(--radius);
+        background: linear-gradient(180deg, var(--surface) 0%, #070b13 100%);
+        border: 1px solid var(--border);
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
 
-    .status-dot {
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      background-color: #555;
-      margin-right: 12px;
-      transition: all 0.3s ease;
-    }
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        -webkit-app-region: drag;
+      }
 
-    .status-text {
-      font-size: 15px;
-      font-weight: 600;
-    }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
 
-    .button-group {
-      display: flex;
-      gap: 8px;
-      -webkit-app-region: no-drag;
-      position: relative;
-    }
+      .status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.22);
+        box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+        flex: 0 0 auto;
+      }
 
-    /* States */
-    .ready .status-dot { 
-      background-color: #4CAF50; 
-      box-shadow: 0 0 10px #4CAF50, 0 0 20px rgba(76, 175, 80, 0.5);
-    }
-    .recording .status-dot { 
-      background-color: #F44336; 
-      box-shadow: 0 0 12px #F44336, 0 0 24px rgba(244, 67, 54, 0.6);
-      animation: pulse 1.2s infinite;
-    }
-    .processing .status-dot { 
-      background-color: #2196F3; 
-      box-shadow: 0 0 10px #2196F3;
-      animation: spin 1s infinite;
-    }
+      .status-text {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.1;
+        min-width: 0;
+      }
 
-    .recording #container {
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 0 2px #F44336;
-    }
-
-    .processing #container {
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 0 2px #2196F3;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.6; transform: scale(1.1); }
-    }
-
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-
-    /* Dropdown */
-    .dropdown {
-      position: relative;
-      display: inline-block;
-      -webkit-app-region: no-drag;
-    }
-
-    .dropdown-content {
-      display: none;
-      position: absolute;
-      right: 0;
-      background-color: #252525;
-      min-width: 120px;
-      box-shadow: 0 8px 16px 0 rgba(0,0,0,0.2);
-      z-index: 1000;
-      border-radius: 6px;
-      border: 1px solid #444;
-      margin-top: 5px;
-    }
-
-    .dropdown-content a {
-      color: #e0e0e0;
-      padding: 8px 12px;
-      text-decoration: none;
-      display: block;
-      font-size: 13px;
-    }
-
-    .dropdown-content a:hover {background-color: #333;}
-    
-    .dropdown-content a.active {
-        background-color: #4CAF50;
-        color: white;
-    }
-
-    .show {display:block;}
-    
-    .mode-display {
-        background-color: #4CAF50;
-        color: white;
-        border: none;
-        border-radius: 6px;
-        padding: 4px 10px;
-        font-size: 12px;
-        font-weight: 600;
-        cursor: pointer;
-        transition: all 0.2s ease;
+      .status-text .label {
+        font-size: 13px;
+        font-weight: 650;
+        letter-spacing: 0.2px;
         white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .status-text .hint {
+        font-size: 11px;
+        color: var(--muted-2);
+        margin-top: 2px;
+        white-space: nowrap;
+      }
+
+      .controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
         -webkit-app-region: no-drag;
-    }
-    
-    .mode-display:hover {
-        background-color: #45a049;
+      }
+
+      .segmented {
+        display: inline-flex;
+        padding: 3px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--border);
+      }
+
+      .segmented button {
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+        padding: 6px 10px;
+        border-radius: 999px;
+        cursor: pointer;
+      }
+
+      .segmented button[aria-pressed="true"] {
+        background: rgba(98, 208, 255, 0.18);
+        color: var(--text);
+        box-shadow: inset 0 0 0 1px rgba(98, 208, 255, 0.25);
+      }
+
+      .icon-btn {
+        width: 30px;
+        height: 30px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: transform 0.12s ease, background 0.12s ease,
+          border-color 0.12s ease;
+      }
+
+      .icon-btn:hover {
+        background: rgba(255, 255, 255, 0.09);
+        border-color: rgba(255, 255, 255, 0.12);
         transform: translateY(-1px);
-        box-shadow: 0 2px 8px rgba(76, 175, 80, 0.4);
-    }
+      }
 
-    /* Video checkbox */
-    .video-checkbox-container {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      -webkit-app-region: no-drag;
-    }
+      .icon-btn:active {
+        transform: translateY(0px);
+      }
 
-    .video-checkbox-container.hidden {
-      display: none;
-    }
+      .icon-btn.danger {
+        background: rgba(255, 90, 103, 0.14);
+        border-color: rgba(255, 90, 103, 0.25);
+      }
 
-    .test-btn {
-      background-color: #4CAF50;
-    }
+      .icon-btn.danger:hover {
+        background: rgba(255, 90, 103, 0.2);
+      }
 
-    .test-btn:hover {
-      background-color: #45a049;
-      transform: scale(1.15);
-    }
+      .icon-btn[aria-pressed="true"] {
+        background: rgba(98, 208, 255, 0.18);
+        border-color: rgba(98, 208, 255, 0.25);
+      }
 
-    .test-btn.hidden {
-      display: none;
-    }
+      .result {
+        display: none;
+        border-top: 1px solid var(--border);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%,
+          rgba(255, 255, 255, 0.015) 100%);
+      }
 
-    #include-video-checkbox {
-      width: 16px;
-      height: 16px;
-      cursor: pointer;
-      accent-color: #4CAF50;
-    }
+      .result.visible {
+        display: block;
+      }
 
-    .video-checkbox-container label {
-      font-size: 16px;
-      cursor: pointer;
-      user-select: none;
-      opacity: 0.7;
-      transition: opacity 0.2s;
-    }
+      .result-inner {
+        padding: 12px;
+      }
 
-    #include-video-checkbox:checked + label {
-      opacity: 1;
-    }
+      .result-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
 
-    /* Buttons */
-    .btn {
-      width: 24px;
-      height: 24px;
-      border: none;
-      border-radius: 50%;
-      color: white;
-      font-size: 12px;
-      font-weight: bold;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0;
-    }
+      .result-title {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 650;
+      }
 
-    .cancel-btn {
-      background-color: #F44336;
-      display: none;
-    }
+      .text-box {
+        background: rgba(0, 0, 0, 0.25);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 10px;
+        max-height: 280px;
+        overflow: auto;
+        user-select: text;
+        -webkit-app-region: no-drag;
+      }
 
-    .cancel-btn:hover {
-      background-color: #D32F2F;
-      transform: scale(1.15);
-    }
+      #transcription-text {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.55;
+        color: rgba(255, 255, 255, 0.88);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
 
-    .recording .cancel-btn {
-      display: flex;
-    }
+      .actions {
+        margin-top: 10px;
+        display: flex;
+        gap: 8px;
+      }
 
-    .close-btn {
-      background-color: #666;
-    }
+      .btn {
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+        border-radius: 10px;
+        padding: 8px 10px;
+        font-size: 12px;
+        font-weight: 650;
+        cursor: pointer;
+        transition: transform 0.12s ease, background 0.12s ease,
+          border-color 0.12s ease;
+      }
 
-    .close-btn:hover {
-      background-color: #888;
-      transform: scale(1.15);
-    }
+      .btn:hover {
+        background: rgba(255, 255, 255, 0.09);
+        border-color: rgba(255, 255, 255, 0.12);
+        transform: translateY(-1px);
+      }
 
-    .btn:active {
-      transform: scale(0.9);
-    }
+      .btn:active {
+        transform: translateY(0);
+      }
 
-    /* Transcription result box */
-    .transcription-box {
-      display: none;
-      background-color: #252525;
-      padding: 12px 16px;
-      border-top: 1px solid #444;
-      max-height: 300px;
-      overflow-y: auto;
-      -webkit-app-region: no-drag;
-      user-select: text;
-    }
+      .btn.primary {
+        background: rgba(98, 208, 255, 0.18);
+        border-color: rgba(98, 208, 255, 0.25);
+      }
 
-    .transcription-box.visible {
-      display: block;
-    }
+      .btn.primary:hover {
+        background: rgba(98, 208, 255, 0.24);
+      }
 
-    .transcription-text {
-      font-size: 13px;
-      line-height: 1.6;
-      color: #e0e0e0;
-      word-wrap: break-word;
-    }
+      button:focus-visible {
+        outline: 2px solid rgba(98, 208, 255, 0.85);
+        outline-offset: 2px;
+      }
 
-    .transcription-actions {
-      margin-top: 10px;
-      display: flex;
-      gap: 8px;
-    }
+      /* State colors */
+      #container[data-state="ready"] .status-dot {
+        background: #41e2a6;
+        box-shadow: 0 0 0 3px rgba(65, 226, 166, 0.15);
+      }
 
-    .action-btn {
-      padding: 6px 12px;
-      border: none;
-      border-radius: 6px;
-      background-color: #4CAF50;
-      color: white;
-      font-size: 12px;
-      cursor: pointer;
-      transition: background-color 0.2s;
-    }
+      #container[data-state="recording"] .status-dot {
+        background: var(--danger);
+        box-shadow: 0 0 0 3px rgba(255, 90, 103, 0.18);
+        animation: pulse 1.2s ease-in-out infinite;
+      }
 
-    .action-btn:hover {
-      background-color: #45a049;
-    }
+      #container[data-state="processing"] .status-dot {
+        background: var(--accent);
+        box-shadow: 0 0 0 3px rgba(98, 208, 255, 0.18);
+        animation: spin 1s linear infinite;
+      }
 
-    .action-btn.secondary {
-      background-color: #555;
-    }
+      #container[data-state="error"] .status-dot {
+        background: var(--warn);
+        box-shadow: 0 0 0 3px rgba(255, 176, 32, 0.18);
+      }
 
-    .action-btn.secondary:hover {
-      background-color: #666;
-    }
+      @keyframes pulse {
+        0%,
+        100% {
+          transform: scale(1);
+          opacity: 1;
+        }
+        50% {
+          transform: scale(1.18);
+          opacity: 0.65;
+        }
+      }
 
-    /* Scrollbar styling */
-    .transcription-box::-webkit-scrollbar {
-      width: 8px;
-    }
+      @keyframes spin {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
 
-    .transcription-box::-webkit-scrollbar-track {
-      background: #1a1a1a;
-    }
-
-    .transcription-box::-webkit-scrollbar-thumb {
-      background: #555;
-      border-radius: 4px;
-    }
-
-    .transcription-box::-webkit-scrollbar-thumb:hover {
-      background: #666;
-    }
-  </style>
-</head>
-<body>
-  <div id="container" class="ready">
-    <div class="header">
-      <div class="status-group">
-        <div class="status-dot"></div>
-        <div class="status-text" id="status-text">Ready (Alt+L)</div>
-      </div>
-      <div class="button-group">
-        <div class="dropdown">
-            <button class="mode-display" id="settings-btn" title="Click to change mode">Prompt</button>
-            <div class="dropdown-content" id="dropdown-content">
-                <a href="#" data-value="prompt" class="active">Prompt</a>
-                <a href="#" data-value="transcription">Transcription</a>
-            </div>
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="container" data-state="ready" role="application" aria-label="ClarifyVoice">
+      <header class="topbar">
+        <div class="status" aria-live="polite">
+          <div class="status-dot" role="status"></div>
+          <div class="status-text">
+            <div class="label" id="status-text">Ready</div>
+            <div class="hint" id="status-hint">Alt+L</div>
+          </div>
         </div>
-        <div class="video-checkbox-container" id="video-checkbox-container">
-            <input type="checkbox" id="include-video-checkbox" />
-            <label for="include-video-checkbox">🎥</label>
+
+        <div class="controls" aria-label="Controls">
+          <div class="segmented" role="group" aria-label="Mode">
+            <button id="mode-prompt" type="button" aria-pressed="true">Prompt</button>
+            <button id="mode-transcription" type="button" aria-pressed="false">Transcription</button>
+          </div>
+
+          <button
+            id="video-toggle"
+            type="button"
+            class="icon-btn"
+            aria-pressed="false"
+            title="Include screen recording"
+            aria-label="Include screen recording"
+          >
+            🎥
+          </button>
+
+          <button
+            id="test-video-btn"
+            type="button"
+            class="icon-btn"
+            title="Test screen recording permissions"
+            aria-label="Test screen recording permissions"
+          >
+            T
+          </button>
+
+          <button
+            id="cancel-btn"
+            type="button"
+            class="icon-btn danger"
+            title="Cancel recording"
+            aria-label="Cancel recording"
+            hidden
+          >
+            ✕
+          </button>
+
+          <button
+            id="close-btn"
+            type="button"
+            class="icon-btn"
+            title="Close"
+            aria-label="Close application"
+          >
+            ×
+          </button>
         </div>
-        <button class="btn test-btn" id="test-video-btn" title="Test video capture">T</button>
-        <button class="btn cancel-btn" id="cancel-btn" title="Cancel recording">✕</button>
-        <button class="btn close-btn" id="close-btn" title="Close">×</button>
-      </div>
+      </header>
+
+      <section class="result" id="transcription-box" role="region" aria-label="Result">
+        <div class="result-inner">
+          <div class="result-head">
+            <div class="result-title">Result</div>
+            <button id="hide-btn" class="btn" type="button">Hide</button>
+          </div>
+
+          <div class="text-box">
+            <pre id="transcription-text" aria-live="polite"></pre>
+          </div>
+
+          <div class="actions">
+            <button id="copy-btn" class="btn primary" type="button">
+              Copy
+            </button>
+          </div>
+        </div>
+      </section>
     </div>
-    <div class="transcription-box" id="transcription-box">
-      <div class="transcription-text" id="transcription-text"></div>
-      <div class="transcription-actions">
-        <button class="action-btn" id="copy-btn">Copy to Clipboard</button>
-        <button class="action-btn secondary" id="hide-btn">Hide</button>
-      </div>
-    </div>
-  </div>
 
-  <script>
-    const { ipcRenderer } = require('electron');
-    const container = document.getElementById('container');
-    const settingsBtn = document.getElementById('settings-btn');
-    const dropdownContent = document.getElementById('dropdown-content');
-    const dropdownOptions = dropdownContent.querySelectorAll('a');
-    const statusText = document.getElementById('status-text');
-    const cancelBtn = document.getElementById('cancel-btn');
-    const closeBtn = document.getElementById('close-btn');
-    const transcriptionBox = document.getElementById('transcription-box');
-    const transcriptionText = document.getElementById('transcription-text');
-    const copyBtn = document.getElementById('copy-btn');
-    const hideBtn = document.getElementById('hide-btn');
-    const videoCheckboxContainer = document.getElementById('video-checkbox-container');
-    const includeVideoCheckbox = document.getElementById('include-video-checkbox');
-    const testVideoBtn = document.getElementById('test-video-btn');
-
-    let audioContext = null;
-    let currentTranscription = '';
-    let currentMode = 'prompt';
-    let videoStream = null;
-    let mediaRecorder = null;
-    let recordedChunks = [];
-    let videoCanvas = null;
-    let videoContext = null;
-    let videoElement = null;
-    let frameExtractionInterval = null;
-
-    function notifyVideoError(message) {
-      console.error('Video recording error:', message);
-      statusText.innerText = 'Video capture blocked';
-      ipcRenderer.send('video-recording-error', message);
-    }
-
-    // Initialize video canvas for frame capture
-    function initVideoCanvas() {
-      if (!videoCanvas) {
-        videoCanvas = document.createElement('canvas');
-        videoContext = videoCanvas.getContext('2d');
-      }
-    }
-
-    // Start video recording with audio
-    async function startVideoRecording() {
-      try {
-        console.log('Attempting to start video+audio recording...');
-        recordedChunks = [];
-        ipcRenderer.send('video-recording-error', ''); // clear any prior error state
-
-        // Request screen capture via getDisplayMedia; the main process
-        // routes this through desktopCapturer using setDisplayMediaRequestHandler.
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          audio: false,
-          video: {
-            frameRate: { ideal: 10, max: 15 }
-          }
-        }).catch(err => {
-          notifyVideoError('Screen capture denied or failed. Please allow screen recording.');
-          throw err;
-        });
-
-        console.log('Got screen stream');
-
-        // Use the screen stream directly for recording (may include audio
-        // depending on OS / permissions configuration).
-        const combinedStream = screenStream;
-
-        videoStream = combinedStream;
-
-        ipcRenderer.send('video-recording-started', {
-          screen: 'display-media',
-          audioTracks: combinedStream.getAudioTracks().map(t => t.label)
-        });
-
-        // Set up MediaRecorder to record the combined stream
-        let recorderOptions = {};
-        try {
-          if (window.MediaRecorder && MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')) {
-            recorderOptions = { mimeType: 'video/webm;codecs=vp9,opus' };
-          } else if (window.MediaRecorder && MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')) {
-            recorderOptions = { mimeType: 'video/webm;codecs=vp8,opus' };
-          } else if (window.MediaRecorder && MediaRecorder.isTypeSupported('video/webm')) {
-            recorderOptions = { mimeType: 'video/webm' };
-          }
-        } catch (e) {
-          console.warn('MediaRecorder.isTypeSupported check failed, using default options:', e);
-        }
-
-        mediaRecorder = new MediaRecorder(combinedStream, recorderOptions);
-
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            recordedChunks.push(event.data);
-            console.log('Recorded chunk:', event.data.size, 'bytes');
-          }
-        };
-
-        mediaRecorder.onstop = () => {
-          console.log('MediaRecorder stopped, total chunks:', recordedChunks.length);
-          // Video will be processed when stopVideoRecording is called
-        };
-
-        mediaRecorder.onerror = (error) => {
-          notifyVideoError(`MediaRecorder error: ${error.message || error}`);
-        };
-
-        // Start recording; data will be emitted on stop
-        mediaRecorder.start();
-        console.log('MediaRecorder started');
-
-        // Also extract frames for Gemini (separate from video file)
-        initVideoCanvas();
-        videoElement = document.createElement('video');
-        videoElement.srcObject = combinedStream;
-        videoElement.autoplay = true;
-        videoElement.muted = true;
-
-        await new Promise((resolve) => {
-          videoElement.onloadedmetadata = resolve;
-          setTimeout(resolve, 1000);
-        });
-
-        videoCanvas.width = videoElement.videoWidth || 1920;
-        videoCanvas.height = videoElement.videoHeight || 1080;
-
-        // Extract frames at 1 FPS for Gemini analysis
-        frameExtractionInterval = setInterval(() => {
-          if (videoElement && videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
-            try {
-              videoContext.drawImage(videoElement, 0, 0, videoCanvas.width, videoCanvas.height);
-              const frameData = videoCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
-              ipcRenderer.send('video-frame', frameData);
-            } catch (err) {
-              console.error('Error capturing frame:', err);
-            }
-          }
-        }, 1000);
-
-        console.log('Video+audio recording started successfully');
-      } catch (error) {
-        console.error('Failed to start video recording:', error);
-        notifyVideoError(error.message || 'Failed to start video recording.');
-      }
-    }
-
-    // Stop video recording
-    async function stopVideoRecording() {
-      console.log('Stopping video+audio recording...');
-      
-      // Stop frame extraction
-      if (frameExtractionInterval) {
-        clearInterval(frameExtractionInterval);
-        frameExtractionInterval = null;
-      }
-
-      // Stop MediaRecorder
-      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
-        
-        // Wait for final chunks
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Create blob and send to main process
-        if (recordedChunks.length > 0) {
-          const blob = new Blob(recordedChunks, { type: 'video/webm' });
-          console.log('Created video blob, size:', blob.size);
-          
-          // Convert to base64 and send to main process
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const base64data = reader.result.split(',')[1];
-            ipcRenderer.send('video-file-complete', base64data);
-            console.log('Video file sent to main process');
-          };
-          reader.readAsDataURL(blob);
-        }
-        
-        recordedChunks = [];
-        mediaRecorder = null;
-      }
-
-      // Stop streams
-      if (videoStream) {
-        videoStream.getTracks().forEach(track => {
-          track.stop();
-          console.log('Stopped track:', track.kind);
-        });
-        videoStream = null;
-      }
-
-      if (videoElement) {
-        videoElement.srcObject = null;
-        videoElement = null;
-      }
-
-      console.log('Video recording stopped');
-    }
-
-    // Listen for video recording commands from main process
-    ipcRenderer.on('start-video-recording', () => {
-      startVideoRecording();
-    });
-
-    ipcRenderer.on('stop-video-recording', () => {
-      stopVideoRecording();
-    });
-
-    // Settings button click handler
-    settingsBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        dropdownContent.classList.toggle('show');
-    });
-
-    // Close dropdown when clicking outside
-    window.addEventListener('click', (e) => {
-        if (!e.target.matches('.settings-btn') && !e.target.matches('.settings-btn *')) {
-            if (dropdownContent.classList.contains('show')) {
-                dropdownContent.classList.remove('show');
-            }
-        }
-    });
-
-    // Dropdown options click handler
-    dropdownOptions.forEach(option => {
-        option.addEventListener('click', (e) => {
-            e.preventDefault();
-            const mode = e.target.getAttribute('data-value');
-            
-            // Update active class
-            dropdownOptions.forEach(opt => opt.classList.remove('active'));
-            e.target.classList.add('active');
-            
-            // Update button text
-            const modeName = mode.charAt(0).toUpperCase() + mode.slice(1);
-            settingsBtn.textContent = modeName;
-            
-            // Update current mode
-            currentMode = mode;
-            
-            // Show/hide video checkbox based on mode
-            if (mode === 'prompt') {
-                videoCheckboxContainer.classList.remove('hidden');
-              if (testVideoBtn) testVideoBtn.classList.remove('hidden');
-            } else {
-                videoCheckboxContainer.classList.add('hidden');
-                includeVideoCheckbox.checked = false;
-              if (testVideoBtn) testVideoBtn.classList.add('hidden');
-            }
-            
-            // Send mode to main process
-            ipcRenderer.send('set-mode', mode);
-            
-            // Close dropdown
-            dropdownContent.classList.remove('show');
-        });
-    });
-
-    // Checkbox change handler - send state to main process
-    includeVideoCheckbox.addEventListener('change', () => {
-        ipcRenderer.send('set-include-video', includeVideoCheckbox.checked);
-    });
-
-    // Test video capture button handler
-    if (testVideoBtn) {
-      testVideoBtn.addEventListener('click', () => {
-        if (testVideoBtn.disabled) return;
-        testVideoBtn.disabled = true;
-        const originalText = testVideoBtn.textContent;
-        testVideoBtn.textContent = '...';
-        ipcRenderer.send('test-video-capture');
-
-        // Fallback timeout to re-enable in case no response
-        setTimeout(() => {
-          if (testVideoBtn.disabled) {
-            testVideoBtn.disabled = false;
-            testVideoBtn.textContent = originalText;
-          }
-        }, 10000);
-      });
-    }
-
-    // Initialize audio context for beep sounds
-    function initAudio() {
-      if (!audioContext) {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      }
-    }
-
-    // Play beep sound
-    function playBeep(frequency, duration) {
-      initAudio();
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-      
-      oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-      
-      oscillator.frequency.value = frequency;
-      oscillator.type = 'sine';
-      
-      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration / 1000);
-      
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + duration / 1000);
-    }
-
-    // Cancel button click handler
-    cancelBtn.addEventListener('click', () => {
-      ipcRenderer.send('cancel-recording');
-    });
-
-    // Close button click handler
-    closeBtn.addEventListener('click', () => {
-      ipcRenderer.send('close-app');
-    });
-
-    // Copy button click handler
-    copyBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(currentTranscription);
-      copyBtn.textContent = 'Copied!';
-      setTimeout(() => {
-        copyBtn.textContent = 'Copy to Clipboard';
-      }, 2000);
-    });
-
-    // Hide button click handler
-    hideBtn.addEventListener('click', () => {
-      transcriptionBox.classList.remove('visible');
-      ipcRenderer.send('hide-transcription');
-    });
-
-    // Update status
-    ipcRenderer.on('update-status', (event, status) => {
-      container.className = ''; // Reset classes
-      
-      if (status === 'recording') {
-        container.classList.add('recording');
-        statusText.innerText = 'Recording...';
-        transcriptionBox.classList.remove('visible');
-      } else if (status === 'processing') {
-        container.classList.add('processing');
-        statusText.innerText = 'Processing...';
-      } else {
-        container.classList.add('ready');
-        statusText.innerText = 'Ready (Alt+L)';
-      }
-    });
-
-    // Play sound
-    ipcRenderer.on('play-sound', (event, { frequency, duration }) => {
-      playBeep(frequency, duration);
-    });
-
-    // Show transcription result
-    ipcRenderer.on('show-transcription', (event, text) => {
-      currentTranscription = text;
-      transcriptionText.textContent = text;
-      transcriptionBox.classList.add('visible');
-    });
-
-    // Video test completion handler
-    ipcRenderer.on('video-test-complete', (event, result) => {
-      if (testVideoBtn) {
-        testVideoBtn.disabled = false;
-        testVideoBtn.textContent = 'T';
-      }
-      if (!result || !result.success) {
-        statusText.innerText = 'Video test failed';
-      }
-    });
-  </script>
-</body>
+    <script src="../dist/renderer.js"></script>
+  </body>
 </html>

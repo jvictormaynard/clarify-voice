@@ -14,5 +14,6 @@
     "allowSyntheticDefaultImports": true
   },
   "include": ["src/**/*.ts"],
+  "files": ["src/main.ts", "src/preload.ts", "src/renderer.ts"],
   "exclude": ["node_modules"]
 }
