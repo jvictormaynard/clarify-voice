@@ -53,7 +53,10 @@
     "ai",
     "electron"
   ],
-  "author": "ClarifyVoice",
+  "author": {
+    "name": "Victor Maynard",
+    "email": "victormaynard1106@gmail.com"
+  },
   "license": "MIT",
   "dependencies": {
     "@google/genai": "^1.37.0",

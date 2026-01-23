@@ -40,5 +40,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onVideoTestComplete: (callback: (result: { success: boolean } | null) => void) => {
     ipcRenderer.on('video-test-complete', (_event, result) => callback(result));
     return () => ipcRenderer.removeAllListeners('video-test-complete');
+  },
+  onSetModeShortcut: (callback: (mode: 'prompt' | 'transcription') => void) => {
+    ipcRenderer.on('set-mode-shortcut', (_event, mode) => callback(mode));
+    return () => ipcRenderer.removeAllListeners('set-mode-shortcut');
+  },
+  onToggleVideoShortcut: (callback: (enabled: boolean) => void) => {
+    ipcRenderer.on('toggle-video-shortcut', (_event, enabled) => callback(enabled));
+    return () => ipcRenderer.removeAllListeners('toggle-video-shortcut');
   }
 });

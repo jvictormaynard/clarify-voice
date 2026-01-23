@@ -28,13 +28,13 @@ export function createMainWindow() {
   const { width } = screen.getPrimaryDisplay().workAreaSize;
 
   const window = new BrowserWindow({
-    width: 380,
+    width: 530,
     height: 50,
     minWidth: 300,
     maxWidth: 700,
     minHeight: 50,
     maxHeight: 500,
-    x: width - 400,
+    x: width - 550,
     y: 20,
     frame: false,
     transparent: false,

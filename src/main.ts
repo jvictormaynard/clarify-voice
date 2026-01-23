@@ -1,4 +1,5 @@
-import { app, globalShortcut, session, desktopCapturer } from 'electron';
+import { app, globalShortcut, session, desktopCapturer, ipcMain } from 'electron';
+import { mainWindow, currentMode, includeVideo, setIncludeVideo } from './state';
 import { exec } from 'child_process';
 
 // Enable legacy screen-capture support (must be before app ready)
@@ -73,6 +74,28 @@ app.whenReady().then(() => {
   // Register global hotkeys
   globalShortcut.register('Alt+L', toggleRecording);
   globalShortcut.register('Alt+R', toggleMainWindow);
+
+  // Mode selection shortcuts
+  globalShortcut.register('Alt+1', () => {
+    if (mainWindow) {
+      mainWindow.webContents.send('set-mode-shortcut', 'prompt');
+    }
+  });
+
+  globalShortcut.register('Alt+2', () => {
+    if (mainWindow) {
+      mainWindow.webContents.send('set-mode-shortcut', 'transcription');
+    }
+  });
+
+  // Video toggle shortcut (only works in prompt mode)
+  globalShortcut.register('Alt+V', () => {
+    if (mainWindow && currentMode === 'prompt') {
+      const newValue = !includeVideo;
+      setIncludeVideo(newValue);
+      mainWindow.webContents.send('toggle-video-shortcut', newValue);
+    }
+  });
 
   // Check SoX availability
   const soxCheckCmd = isWindows ? `"${soxExe}" --version` : 'sox --version';

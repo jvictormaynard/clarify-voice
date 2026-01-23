@@ -294,4 +294,14 @@
       setTimeout(() => setStatus('ready', 'Ready'), 1200);
     }
   });
+
+  // Keyboard shortcut handlers
+  api.onSetModeShortcut((mode: 'prompt' | 'transcription') => {
+    setMode(mode);
+  });
+
+  api.onToggleVideoShortcut((enabled: boolean) => {
+    includeVideo = enabled;
+    setPressed(videoToggleBtn, includeVideo);
+  });
 })();

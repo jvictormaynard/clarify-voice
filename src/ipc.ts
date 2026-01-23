@@ -91,7 +91,7 @@ export function registerIpcHandlers() {
       mainWindow.setBounds({
         ...currentBounds,
         height: 50,
-        width: 380
+        width: 530
       });
     }
   });
