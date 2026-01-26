@@ -14,6 +14,42 @@ import {
 } from './windows';
 import { processAudioWithGemini, processVideoWithGemini } from './gemini';
 import { pasteTextToActiveWindow } from './clipboard';
+import { pauseMedia, resumeMedia } from './media';
+
+/**
+ * Safely delete a file with retries (handles Windows file locking)
+ */
+async function safeDeleteFile(filePath: string, maxRetries = 5, delayMs = 300): Promise<void> {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+      return;
+    } catch (err: any) {
+      if (err.code === 'EBUSY' || err.code === 'EPERM') {
+        if (i < maxRetries - 1) {
+          await new Promise(resolve => setTimeout(resolve, delayMs * (i + 1)));
+        }
+      } else {
+        throw err;
+      }
+    }
+  }
+  console.warn(`Could not delete file after ${maxRetries} retries:`, filePath);
+}
+
+/**
+ * Clean up temporary recording files
+ */
+async function cleanupTempFiles(): Promise<void> {
+  try {
+    await safeDeleteFile(AUDIO_FILE_PATH);
+    await safeDeleteFile(VIDEO_FILE_PATH);
+  } catch (err) {
+    console.warn('Error during temp file cleanup:', err);
+  }
+}
 
 /**
  * Toggle recording state
@@ -32,6 +68,9 @@ export async function toggleRecording() {
 export async function startRecording() {
   console.log('Starting recording...');
   console.log('Include video:', includeVideo);
+
+  // Pause any media playing in the background
+  await pauseMedia();
 
   setIsRecording(true);
   clearVideoFrames();
@@ -111,6 +150,9 @@ export async function cancelRecording() {
   console.log('Cancelling recording...');
   setIsRecording(false);
 
+  // Resume any media that was paused
+  await resumeMedia();
+
   updateTrayIcon(false);
   hideRecordingIndicator();
 
@@ -132,23 +174,9 @@ export async function cancelRecording() {
     });
   }
 
-  // Wait for file handles to release
+  // Wait for file handles to release, then delete temp files
   await new Promise(resolve => setTimeout(resolve, 200));
-
-  // Delete temp files
-  try {
-    if (fs.existsSync(AUDIO_FILE_PATH)) fs.unlinkSync(AUDIO_FILE_PATH);
-    if (fs.existsSync(VIDEO_FILE_PATH)) fs.unlinkSync(VIDEO_FILE_PATH);
-  } catch (err) {
-    setTimeout(() => {
-      try {
-        if (fs.existsSync(AUDIO_FILE_PATH)) fs.unlinkSync(AUDIO_FILE_PATH);
-        if (fs.existsSync(VIDEO_FILE_PATH)) fs.unlinkSync(VIDEO_FILE_PATH);
-      } catch (e) {
-        console.warn('Could not delete temp files:', e);
-      }
-    }, 500);
-  }
+  await cleanupTempFiles();
 
   updateStatus('ready');
 }
@@ -183,6 +211,9 @@ export async function stopRecording() {
       setTimeout(resolve, 2000);
     });
   }
+
+  // Resume any media that was paused (immediately after recording stops)
+  await resumeMedia();
 
   // Wait for video file if needed
   if (includeVideo) {
@@ -235,12 +266,7 @@ export async function stopRecording() {
     clearVideoFrames();
     setVideoRecordingConfirmed(false);
 
-    try {
-      if (fs.existsSync(AUDIO_FILE_PATH)) fs.unlinkSync(AUDIO_FILE_PATH);
-      if (fs.existsSync(VIDEO_FILE_PATH)) fs.unlinkSync(VIDEO_FILE_PATH);
-    } catch (err) {
-      console.error('Failed to cleanup temp files:', err);
-    }
+    await cleanupTempFiles();
 
     updateStatus('ready');
   }
