@@ -1,0 +1,6 @@
+keyboard
+requests
+sounddevice
+numpy
+customtkinter
+Pillow
