@@ -88,6 +88,21 @@ TRANSCRIPTION_INSTRUCTION = (
 
 LANG_NAMES = {"en": "English", "pt": "Brazilian Portuguese"}
 
+STRINGS = {
+    "en": {
+        "ready": "Ready", "processing": "Processing\u2026", "too_short": "Too short",
+        "no_audio": "No audio", "error": "Error", "prompt": "Prompt",
+        "transcribe": "Transcribe", "copy": "Copy", "copied": "OK!",
+        "dismiss": "Dismiss", "hint": "Alt+L", "hint_stop": "Alt+L stop",
+    },
+    "pt": {
+        "ready": "Pronto", "processing": "Processando\u2026", "too_short": "Muito curto",
+        "no_audio": "Sem \u00e1udio", "error": "Erro", "prompt": "Reescrever",
+        "transcribe": "Transcrever", "copy": "Copiar", "copied": "OK!",
+        "dismiss": "Fechar", "hint": "Alt+L", "hint_stop": "Alt+L parar",
+    },
+}
+
 def call_gemini(audio_path: Path, mode: str, lang: str = "en") -> str:
     if not API_KEY:
         return "[Error: No API_KEY]"
@@ -353,9 +368,10 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=11), command=self._copy)
         self.copy_btn.pack(side="left", padx=(0, 4))
 
-        ctk.CTkButton(brow, text="Dismiss", width=56, height=26, corner_radius=13,
+        self.dismiss_btn = ctk.CTkButton(brow, text="Dismiss", width=56, height=26, corner_radius=13,
             fg_color="transparent", hover_color="#151515", text_color=DIM,
-            font=ctk.CTkFont(size=11), command=self._hide_result).pack(side="left")
+            font=ctk.CTkFont(size=11), command=self._hide_result)
+        self.dismiss_btn.pack(side="left")
 
         # === RECORDING CARD (hidden by default) ===
         self.rec_card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=24,
@@ -404,8 +420,8 @@ class App(ctk.CTk):
             # Switch to idle card
             self.rec_card.pack_forget()
             self.idle_card.pack(fill="both", expand=True, padx=2, pady=2)
-            self.lbl.configure(text=t or "Ready", text_color=TEXT)
-            self.sub.configure(text="Alt+L")
+            self.lbl.configure(text=t or self._t("ready"), text_color=TEXT)
+            self.sub.configure(text=self._t("hint"))
             self.dot_lbl.configure(text_color=GREEN)
             # Restore position
             if self._saved_pos:
@@ -435,7 +451,7 @@ class App(ctk.CTk):
             self._timer_running = False
             self.rec_card.pack_forget()
             self.idle_card.pack(fill="both", expand=True, padx=2, pady=2)
-            self.lbl.configure(text="Processing\u2026", text_color=ACCENT)
+            self.lbl.configure(text=self._t("processing"), text_color=ACCENT)
             self.sub.configure(text="")
             self.dot_lbl.configure(text_color=ACCENT)
             if self._saved_pos:
@@ -469,11 +485,28 @@ class App(ctk.CTk):
     # -- Actions --
     def _toggle_mode(self):
         self.mode = "transcription" if self.mode == "prompt" else "prompt"
-        self.mode_btn.configure(text="Transcribe" if self.mode == "transcription" else "Prompt")
+        self.mode_btn.configure(text=self._t("transcribe") if self.mode == "transcription" else self._t("prompt"))
+
+    def _t(self, key):
+        return STRINGS.get(self.lang, STRINGS["en"]).get(key, key)
 
     def _toggle_lang(self):
         self.lang = "pt" if self.lang == "en" else "en"
         self.lang_btn.configure(image=self._flag_br if self.lang == "pt" else self._flag_en)
+        self._refresh_ui_text()
+
+    def _refresh_ui_text(self):
+        self.mode_btn.configure(text=self._t("transcribe") if self.mode == "transcription" else self._t("prompt"))
+        self.copy_btn.configure(text=self._t("copy"))
+        self.dismiss_btn.configure(text=self._t("dismiss"))
+        if self.app_state == "ready":
+            if self.lbl.cget("text") not in ("", ):
+                self.lbl.configure(text=self._t("ready"))
+            self.sub.configure(text=self._t("hint"))
+        elif self.app_state == "processing":
+            self.lbl.configure(text=self._t("processing"))
+        elif self.app_state == "recording":
+            self.sub.configure(text=self._t("hint_stop"))
 
     def _cancel(self, e=None):
         if self.app_state == "recording":
@@ -487,8 +520,8 @@ class App(ctk.CTk):
     def _copy(self):
         if self.result_text:
             threading.Thread(target=lambda: copy_and_paste(self.result_text), daemon=True).start()
-            self.copy_btn.configure(text="OK!")
-            self.after(1200, lambda: self.copy_btn.configure(text="Copy"))
+            self.copy_btn.configure(text=self._t("copied"))
+            self.after(1200, lambda: self.copy_btn.configure(text=self._t("copy")))
 
     def _hide_result(self):
         self.result_frame.pack_forget()
@@ -523,7 +556,7 @@ class App(ctk.CTk):
     def _stop_recording(self):
         elapsed = time.time() - self._rec_start
         if elapsed < 3:
-            self._set_state("ready", "Too short")
+            self._set_state("ready", self._t("too_short"))
             threading.Thread(target=self.recorder.cancel, daemon=True).start()
             return
         self._set_state("processing")
@@ -531,13 +564,13 @@ class App(ctk.CTk):
             self.recorder.stop()
             time.sleep(0.3)
             if not AUDIO_PATH.exists() or AUDIO_PATH.stat().st_size < 1000:
-                self.after(0, lambda: self._set_state("ready", "No audio")); return
+                self.after(0, lambda: self._set_state("ready", self._t("no_audio"))); return
             text = call_gemini(AUDIO_PATH, self.mode, self.lang)
             Recorder._safe_delete(AUDIO_PATH)
             if text and not text.startswith("[Error"):
                 self.after(0, lambda: self._on_result(text))
             else:
-                self.after(0, lambda: self._set_state("ready", "Error"))
+                self.after(0, lambda: self._set_state("ready", self._t("error")))
         threading.Thread(target=run, daemon=True).start()
 
     def _on_result(self, text):
