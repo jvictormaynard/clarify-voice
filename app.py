@@ -97,7 +97,7 @@ STRINGS = {
     },
     "pt": {
         "ready": "Pronto", "processing": "Processando\u2026", "too_short": "Muito curto",
-        "no_audio": "Sem \u00e1udio", "error": "Erro", "prompt": "Reescrever",
+        "no_audio": "Sem \u00e1udio", "error": "Erro", "prompt": "Prompt",
         "transcribe": "Transcrever", "copy": "Copiar", "copied": "OK!",
         "dismiss": "Fechar", "hint": "Alt+L", "hint_stop": "Alt+L parar",
     },
