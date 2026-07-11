@@ -1,0 +1,7 @@
+{
+  "name": "clarify-voice",
+  "private": true,
+  "scripts": {
+    "deploy": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/deploy.ps1"
+  }
+}
