@@ -38,11 +38,12 @@ except Exception:
     sd = None
 
 try:
-    from PIL import Image, ImageChops, ImageDraw, ImageTk
+    from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageTk
 except Exception:
     Image = None
     ImageChops = None
     ImageDraw = None
+    ImageFont = None
     ImageTk = None
 
 # ---------------------------------------------------------------------------
@@ -68,6 +69,10 @@ AUDIO_PATH = DATA_DIR / "temp_recording.wav"
 CONFIG_PATH = DATA_DIR / "config.json"
 STATS_PATH = DATA_DIR / "usage_stats.json"
 _STATS_LOCK = threading.Lock()
+PILL_FADE_IN_SECONDS = 0.12
+PILL_FADE_OUT_SECONDS = 0.14
+MICROPHONE_ALERT_SECONDS = 1.5
+MICROPHONE_PILL_WIDTH = 100
 
 DEFAULT_CONFIG = {
     "transcription_provider": "gemini",
@@ -787,21 +792,36 @@ TRANSCRIPTION_INSTRUCTION = (
     "Output MUST be in {lang}."
 )
 SELECTION_REWRITE_INSTRUCTION = (
-    "You are an expert text editor. The input is existing text, not audio. "
-    + FAITHFUL_REWRITE_INSTRUCTION +
-    "Correct spelling, grammar, and "
-    "punctuation, capitalization, and sentence boundaries; remove repetition; "
-    "and improve paragraph or list structure when useful. Expand informal or "
-    "chat-style abbreviations whenever their standard form is unambiguous, such "
-    "as Portuguese 'vc' to 'você'. Preserving the tone does NOT mean preserving "
-    "mistakes, missing accents, shorthand, or missing punctuation. Never return "
-    "the input unchanged when it contains an objective writing error. Preserve "
-    "the original language, meaning, facts, intent, tone, and any Markdown that "
-    "remains useful. For short messages, make the smallest edits needed for "
-    "correct, polished writing. Example: 'oi tudo bem com vc?' must become "
-    "'Oi, tudo bem com você?'. Do not add requirements, claims, or information "
-    "that are not present in the source. Return ONLY the rewritten text, with "
-    "no explanation or surrounding quotation marks."
+    "You are a substantive editor. The input is existing text, not audio. "
+    "Rewrite it at the sentence and paragraph level to improve coherence, "
+    "cohesion, logical progression, clarity, concision, and natural flow. "
+    "Do not behave like a spellchecker and do not limit the edit to grammar, "
+    "punctuation, or isolated word substitutions. Identify the central point, "
+    "put ideas in the clearest order, combine fragments and overlapping "
+    "sentences, eliminate tautologies and false starts, and make relationships "
+    "between ideas explicit when the source already supports them. You may "
+    "substantially restructure sentences whenever that produces stronger prose. "
+    "Preserve the original language, meaning, facts, requirements, constraints, "
+    "examples, names, technical identifiers, degree of certainty, perspective, "
+    "and tone. Keep informal text natural instead of making it unnecessarily "
+    "formal. Never invent details, strengthen a claim, or replace a specific "
+    "concept with a different one. Correct spelling, grammar, punctuation, "
+    "capitalization, and sentence boundaries. Expand informal abbreviations "
+    "when their standard form is unambiguous, such as Portuguese 'vc' to "
+    "'você'. Preserve useful Markdown. For a genuinely simple sentence that "
+    "only has objective writing errors, a light edit is enough; for a disjointed "
+    "or repetitive passage, perform a real structural rewrite. Example: "
+    "'Acredito que não precisamos fixar esses preços. Cada freela é diferente. "
+    "A proposta depende do projeto e do preço oferecido.' can become "
+    "'Não acho que devamos trabalhar com preços fixos, porque cada freela tem "
+    "suas particularidades. A proposta deve ser definida caso a caso, "
+    "considerando o projeto e o valor oferecido.' Return ONLY the rewritten "
+    "text, with no explanation or surrounding quotation marks. Before "
+    "answering, silently check whether the result merely fixes surface errors "
+    "while retaining avoidable repetition or a weak sequence of ideas; if it "
+    "does, rewrite it once more at the structural level. Never return "
+    "the input unchanged when it has an objective writing error or a clear "
+    "structural weakness."
 )
 
 LANG_NAMES = {"en": "English", "pt": "Brazilian Portuguese"}
@@ -1227,6 +1247,25 @@ def call_transcription_provider(audio_path: Path, mode: str, lang: str = "en") -
 # Recorder
 # ---------------------------------------------------------------------------
 
+class MicrophoneUnavailableError(RuntimeError):
+    """Raised when Windows has no active microphone input to record."""
+
+
+def _has_active_microphone():
+    """Return whether PortAudio can see a usable default input device.
+
+    ``None`` means the lightweight meter is unavailable, so SoX remains the
+    source of truth instead of rejecting a recording pre-emptively.
+    """
+    if sd is None:
+        return None
+    try:
+        device = sd.query_devices(kind="input")
+        return int(device.get("max_input_channels", 0)) > 0
+    except Exception:
+        return False
+
+
 class Recorder:
     def __init__(self):
         self.proc = None
@@ -1241,6 +1280,8 @@ class Recorder:
         self.stop()
         self._stop_stale_windows_recorders()
         self._safe_delete(AUDIO_PATH)
+        if _has_active_microphone() is False:
+            raise MicrophoneUnavailableError("No active microphone")
         args = [SOX_EXE]
         if IS_WIN:
             args += ["-t", "waveaudio", "-d"]
@@ -1263,6 +1304,14 @@ class Recorder:
             self.mic_stream.start()
         except Exception:
             pass
+        # WaveAudio can accept process creation and then exit immediately when
+        # the Windows input endpoint is disabled. Give it a brief opportunity
+        # to report that failure before treating the pill as a live recording.
+        time.sleep(0.18)
+        if self.proc.poll() is not None:
+            self.proc = None
+            self._close_process_job()
+            raise MicrophoneUnavailableError("No active microphone")
 
     def _audio_cb(self, indata, frames, time_info, status):
         samples = memoryview(indata).cast("h")
@@ -1801,6 +1850,84 @@ def _make_checkmark_image(size=20, color=(5, 5, 5, 255)):
     return image.resize((size, size), Image.Resampling.LANCZOS)
 
 
+def _pill_status_font(pixel_size):
+    """Load a compact native-looking font for the layered pill."""
+    if ImageFont is None:
+        return None
+    windir = Path(os.environ.get("WINDIR", "C:/Windows"))
+    candidates = (
+        windir / "Fonts" / "segoeui.ttf",
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    )
+    for path in candidates:
+        try:
+            return ImageFont.truetype(str(path), pixel_size)
+        except (OSError, ValueError):
+            continue
+    return ImageFont.load_default()
+
+
+def _draw_microphone_unavailable(
+        draw, width, height, scale, include_icon=True):
+    """Draw the pill's red attention icon and concise microphone status."""
+    label = "Mic off"
+    font = _pill_status_font(round(14 * scale))
+    text_box = draw.textbbox((0, 0), label, font=font)
+    text_width = text_box[2] - text_box[0]
+    text_height = text_box[3] - text_box[1]
+    center_y = height / 2
+    if include_icon:
+        _draw_rounded_warning_icon(
+            draw, 20 * scale, center_y, 14 * scale, scale)
+        text_x = 37 * scale
+    else:
+        text_x = (width - text_width) / 2
+    text_y = center_y - text_height / 2 - text_box[1]
+    draw.text(
+        (text_x, text_y), label, font=font,
+        fill=(242, 242, 242, 255))
+
+
+def _draw_rounded_warning_icon(draw, center_x, center_y, size, scale):
+    """Draw a filled warning triangle with deliberately softened corners."""
+    red = (255, 69, 58, 255)
+    corner_radius = min(size * 0.09, 1.25 * scale)
+    top = (center_x, center_y - size / 2 + corner_radius * 0.55)
+    left = (
+        center_x - size / 2 + corner_radius * 0.7,
+        center_y + size / 2 - corner_radius * 0.65)
+    right = (
+        center_x + size / 2 - corner_radius * 0.7,
+        center_y + size / 2 - corner_radius * 0.65)
+    points = (top, left, right)
+    draw.polygon(points, fill=red)
+    draw.line(
+        (*points, top), fill=red, width=max(1, round(corner_radius * 2)),
+        joint="curve")
+
+    mark_width = max(1.0 * scale, size * 0.09)
+    draw.rounded_rectangle(
+        (center_x - mark_width / 2, center_y - size * 0.21,
+         center_x + mark_width / 2, center_y + size * 0.05),
+        radius=mark_width / 2, fill=(18, 18, 18, 255))
+    dot_radius = max(0.55 * scale, size * 0.045)
+    dot_y = center_y + size * 0.25
+    draw.ellipse(
+        (center_x - dot_radius, dot_y - dot_radius,
+         center_x + dot_radius, dot_y + dot_radius),
+        fill=(18, 18, 18, 255))
+
+
+def _make_microphone_warning_image(size=24):
+    supersample = 4
+    pixels = size * supersample
+    image = Image.new("RGBA", (pixels, pixels), (0, 0, 0, 0))
+    _draw_rounded_warning_icon(
+        ImageDraw.Draw(image), pixels / 2, pixels / 2,
+        (size - 2) * supersample, supersample)
+    return image.resize((size, size), Image.Resampling.LANCZOS)
+
+
 class LayeredRecordingOverlay:
     """Small Win32 status pill with true per-pixel alpha composition."""
 
@@ -1904,7 +2031,10 @@ class LayeredRecordingOverlay:
         self.blend = BLENDFUNCTION(
             0, 0, max(0, min(255, round(initial_opacity))), 1)
         self._build_base()
-        self.render(0.0, time.perf_counter())
+        # The first state-specific frame is rendered by the existing animation
+        # tick. Uploading only the base here also permits compact status pills
+        # whose width is intentionally smaller than the recording waveform.
+        self._upload(self.base)
         self.user32.SetWindowPos(
             self.hwnd, -1, x, y, width, height, 0x0010 | 0x0040)  # NOACTIVATE|SHOWWINDOW
 
@@ -1917,6 +2047,8 @@ class LayeredRecordingOverlay:
             (1 * scale, 1 * scale, width - 1 * scale - 1, height - 1 * scale - 1),
             radius=(self.height / 2 - 1) * scale,
             fill=CARD, outline=BORDER, width=scale)
+        self.plain_base = base.resize(
+            (self.width, self.height), Image.Resampling.LANCZOS)
         if self.icon is not None:
             icon_size = 24 * scale
             icon = self.icon.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
@@ -2019,6 +2151,20 @@ class LayeredRecordingOverlay:
         layer = layer.resize((self.width, self.height), Image.Resampling.LANCZOS)
         frame.alpha_composite(layer)
 
+        self._upload(frame)
+
+    def render_microphone_unavailable(self):
+        """Replace the waveform with a static alert, preserving pill layout."""
+        scale = self.scale
+        frame = self.plain_base.copy()
+        layer = Image.new(
+            "RGBA", (self.width * scale, self.height * scale), (0, 0, 0, 0))
+        _draw_microphone_unavailable(
+            ImageDraw.Draw(layer), self.width * scale,
+            self.height * scale, scale)
+        layer = layer.resize(
+            (self.width, self.height), Image.Resampling.LANCZOS)
+        frame.alpha_composite(layer)
         self._upload(frame)
 
     def _upload(self, frame):
@@ -2204,6 +2350,7 @@ class App(ctk.CTk):
         self._pill_fade_started = 0.0
         self._pill_pending_ready = None
         self._success_job = None
+        self._microphone_alert_job = None
 
         sw = self.winfo_screenwidth()
         self.geometry(f"380x48+{sw - 400}+16")
@@ -2368,6 +2515,10 @@ class App(ctk.CTk):
         self._fallback_app_icon_image = fallback
         self._fallback_app_icon = ctk.CTkImage(
             light_image=fallback, dark_image=fallback, size=(22, 22))
+        microphone_warning = _make_microphone_warning_image(24)
+        self._microphone_warning_icon = ctk.CTkImage(
+            light_image=microphone_warning, dark_image=microphone_warning,
+            size=(24, 24))
         self.app_icon_lbl = ctk.CTkLabel(rec_inner, text="", width=24, height=24,
             image=self._fallback_app_icon)
         self.app_icon_lbl.pack(side="left", padx=(0, 6))
@@ -2398,9 +2549,17 @@ class App(ctk.CTk):
 
     # -- State --
     def _set_state(self, s, t="", after_ready=None, _skip_pill_fade=False):
+        if s != "microphone_unavailable" and getattr(
+                self, "_microphone_alert_job", None) is not None:
+            try:
+                self.after_cancel(self._microphone_alert_job)
+            except tk.TclError:
+                pass
+            self._microphone_alert_job = None
         if (s == "ready" and not _skip_pill_fade
                 and self.app_state in (
-                    "recording", "processing", "rewriting", "success")
+                    "recording", "processing", "rewriting", "success",
+                    "microphone_unavailable")
                 and self._wave_running):
             self._pill_pending_ready = (t, after_ready)
             self.app_state = "dismissing"
@@ -2422,6 +2581,10 @@ class App(ctk.CTk):
                 pass
             # Switch to idle card
             self.rec_card.pack_forget()
+            if hasattr(self, "app_icon_lbl"):
+                self.app_icon_lbl.configure(image=(
+                    getattr(self, "_focused_icon", None)
+                    or self._fallback_app_icon))
             self.idle_card.pack(
                 fill="both", expand=True, padx=self._idle_card_pad,
                 pady=self._idle_card_pad)
@@ -2441,11 +2604,15 @@ class App(ctk.CTk):
                 self._show_without_activation()
             if after_ready is not None:
                 after_ready()
-        elif s in ("recording", "processing", "rewriting", "success"):
+        elif s in (
+                "recording", "processing", "rewriting", "success",
+                "microphone_unavailable"):
             starting_pill = not self._wave_running
             if self._saved_pos is None:
                 self._saved_pos = (self.winfo_x(), self.winfo_y())
-            rw, rh = 142, 42
+            rw = MICROPHONE_PILL_WIDTH if (
+                s == "microphone_unavailable" and IS_WIN) else 142
+            rh = 42
             if self._primary_mon:
                 sw, sh = self._primary_mon
             else:
@@ -2455,6 +2622,10 @@ class App(ctk.CTk):
             ry = sh - rh - 80
             if IS_WIN:
                 self.withdraw()
+                if (self._recording_overlay is not None
+                        and self._recording_overlay.width != rw):
+                    self._recording_overlay.destroy()
+                    self._recording_overlay = None
                 if self._recording_overlay is None:
                     try:
                         self._recording_overlay = LayeredRecordingOverlay(
@@ -2464,7 +2635,13 @@ class App(ctk.CTk):
                         self._pill_fade_started = time.perf_counter()
                     except Exception:
                         self._recording_overlay = None
-                        self.geometry(f"{rw}x{rh}+{rx}+{ry}")
+                        # The Tk fallback still contains the fixed-width wave
+                        # canvas, so retain its original width if native layered
+                        # window creation is unavailable.
+                        fallback_width = 142
+                        fallback_x = (sw - fallback_width) // 2
+                        self.geometry(
+                            f"{fallback_width}x{rh}+{fallback_x}+{ry}")
                         self.idle_card.pack_forget()
                         self.rec_card.pack(fill="both", expand=True, padx=2, pady=2)
                         self._show_without_activation()
@@ -2488,6 +2665,30 @@ class App(ctk.CTk):
                 self._focused_icon_tick()
             else:
                 self._timer_running = False
+            if s == "microphone_unavailable":
+                if hasattr(self, "app_icon_lbl"):
+                    self.app_icon_lbl.configure(
+                        image=self._microphone_warning_icon)
+                # A recorder failure can arrive after the recording pill has
+                # already appeared. Restart alpha from zero so the error itself
+                # always gets a clean fade in.
+                self._set_pill_opacity(0.0)
+                self._pill_fade_started = now
+                if self._microphone_alert_job is not None:
+                    try:
+                        self.after_cancel(self._microphone_alert_job)
+                    except tk.TclError:
+                        pass
+                visible_ms = round(max(
+                    0.0, MICROPHONE_ALERT_SECONDS
+                    - PILL_FADE_OUT_SECONDS) * 1000)
+                self._microphone_alert_job = self.after(
+                    visible_ms, self._dismiss_microphone_alert)
+            else:
+                if hasattr(self, "app_icon_lbl"):
+                    self.app_icon_lbl.configure(image=(
+                        getattr(self, "_focused_icon", None)
+                        or self._fallback_app_icon))
             self._pill_transition_started = now
             self._last_wave_time = now
             self._next_wave_frame = self._last_wave_time
@@ -2512,6 +2713,11 @@ class App(ctk.CTk):
             "ready", pending[0], after_ready=pending[1],
             _skip_pill_fade=True)
 
+    def _dismiss_microphone_alert(self):
+        self._microphone_alert_job = None
+        if self.app_state == "microphone_unavailable":
+            self._set_state("ready")
+
     def _show_success_then(self, callback, delay=850):
         """Show a completed check long enough to register before restoring UI."""
         self._set_state("success")
@@ -2532,7 +2738,8 @@ class App(ctk.CTk):
 
         if self.app_state == "dismissing":
             progress = min(
-                1.0, (now - self._pill_transition_started) / 0.14)
+                1.0, (now - self._pill_transition_started)
+                / PILL_FADE_OUT_SECONDS)
             eased = progress * progress * (3.0 - 2.0 * progress)
             self._set_pill_opacity(1.0 - eased)
             if progress >= 1.0:
@@ -2542,7 +2749,9 @@ class App(ctk.CTk):
             return
 
         if self._pill_fade_started:
-            progress = min(1.0, (now - self._pill_fade_started) / 0.12)
+            progress = min(
+                1.0, (now - self._pill_fade_started)
+                / PILL_FADE_IN_SECONDS)
             eased = progress * progress * (3.0 - 2.0 * progress)
             self._set_pill_opacity(eased)
             if progress >= 1.0:
@@ -2564,6 +2773,8 @@ class App(ctk.CTk):
             elif self.app_state == "success":
                 transition = (now - self._pill_transition_started) / 0.32
                 self._recording_overlay.render_success(transition)
+            elif self.app_state == "microphone_unavailable":
+                self._recording_overlay.render_microphone_unavailable()
 
             frame_time = 1.0 / 60.0
             self._next_wave_frame += frame_time
@@ -2573,7 +2784,9 @@ class App(ctk.CTk):
             self.after(delay, self._wave_tick)
             return
 
-        if self.app_state in ("processing", "rewriting", "success"):
+        if self.app_state in (
+                "processing", "rewriting", "success",
+                "microphone_unavailable"):
             self._render_tk_status()
             self.after(33, self._wave_tick)
             return
@@ -2624,7 +2837,10 @@ class App(ctk.CTk):
         eased = 1.0 - (1.0 - transition) ** 3
         cy = height / 2
 
-        if self.app_state in ("processing", "rewriting"):
+        if self.app_state == "microphone_unavailable":
+            _draw_microphone_unavailable(
+                draw, width, height, scale, include_icon=False)
+        elif self.app_state in ("processing", "rewriting"):
             left, right = 7 * scale, (self._wave_w - 7) * scale
             line_width = (right - left) * (0.28 + 0.72 * eased)
             line_left = (left + right - line_width) / 2
@@ -2878,6 +3094,7 @@ class App(ctk.CTk):
         if self._rewrite_active:
             return
         if self.app_state == "recording": self._stop_recording()
+        elif self.app_state == "microphone_unavailable": self._set_state("ready")
         elif self.app_state == "ready": self._start_recording(target_executable)
 
     def _start_recording(self, target_executable=None):
@@ -2887,14 +3104,25 @@ class App(ctk.CTk):
         self._was_hidden_before_recording = not self.winfo_viewable()
         if self._was_hidden_before_recording and not IS_WIN:
             self._show_without_activation()
+        if _has_active_microphone() is False:
+            self._set_state("microphone_unavailable")
+            return
         self._rec_start = time.time()
         self._recording_usage = _recording_usage_context()
         self._recording_usage["mode"] = self.mode
         self._set_state("recording")
         def start():
-            try: self.recorder.start()
+            try:
+                self.recorder.start()
+            except MicrophoneUnavailableError:
+                self.after(0, self._show_microphone_unavailable)
             except Exception as e: self.after(0, lambda: self._set_state("ready", f"Err: {e}"))
         threading.Thread(target=start, daemon=True).start()
+
+    def _show_microphone_unavailable(self):
+        # Ignore a delayed recorder failure if the user already stopped it.
+        if self.app_state == "recording":
+            self._set_state("microphone_unavailable")
 
     def _stop_recording(self):
         elapsed = time.time() - self._rec_start

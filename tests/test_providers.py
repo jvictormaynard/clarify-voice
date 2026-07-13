@@ -47,6 +47,20 @@ class ProviderTests(unittest.TestCase):
             "https://proxy.example/v1/audio/transcriptions",
         )
 
+    @patch("app.subprocess.Popen")
+    def test_recorder_reports_when_no_active_microphone_exists(self, popen):
+        recorder = app.Recorder()
+        fake_sounddevice = SimpleNamespace(
+            query_devices=Mock(return_value={"max_input_channels": 0}))
+
+        with patch("app.sd", fake_sounddevice), \
+                patch.object(recorder, "_stop_stale_windows_recorders"), \
+                patch.object(recorder, "_safe_delete"):
+            with self.assertRaises(app.MicrophoneUnavailableError):
+                recorder.start()
+
+        popen.assert_not_called()
+
     @staticmethod
     def _single_instance_api(already_exists=False):
         return SimpleNamespace(
@@ -438,11 +452,16 @@ class ProviderTests(unittest.TestCase):
 
     def test_selection_prompt_expands_unambiguous_chat_abbreviations(self):
         instruction = app.SELECTION_REWRITE_INSTRUCTION
-        self.assertIn(app.FAITHFUL_REWRITE_INSTRUCTION, instruction)
-        self.assertIn("editing, not summarization", instruction)
-        self.assertIn("preserve every requirement", instruction)
+        self.assertNotIn(app.FAITHFUL_REWRITE_INSTRUCTION, instruction)
+        self.assertIn("substantive editor", instruction)
+        self.assertIn("coherence, cohesion, logical progression", instruction)
+        self.assertIn("Do not behave like a spellchecker", instruction)
+        self.assertIn("substantially restructure sentences", instruction)
+        self.assertIn("perform a real structural rewrite", instruction)
+        self.assertIn("rewrite it once more at the structural level", instruction)
+        self.assertIn("Preserve the original language", instruction)
         self.assertIn("'vc' to 'você'", instruction)
-        self.assertIn("Oi, tudo bem com você?", instruction)
+        self.assertIn("definida caso a caso", instruction)
         self.assertIn("Never return the input unchanged", instruction)
 
     def test_prompt_mode_requires_faithful_editing_instead_of_summary(self):
@@ -822,6 +841,55 @@ class RewriteWorkflowTests(unittest.TestCase):
         app.App._show_if_hidden(harness)
 
         show.assert_not_called()
+
+    def test_microphone_failure_replaces_recording_with_alert_state(self):
+        states = []
+        harness = SimpleNamespace(
+            app_state="recording",
+            _set_state=states.append,
+        )
+
+        app.App._show_microphone_unavailable(harness)
+
+        self.assertEqual(states, ["microphone_unavailable"])
+
+    def test_delayed_microphone_failure_does_not_override_newer_state(self):
+        states = []
+        harness = SimpleNamespace(
+            app_state="ready",
+            _set_state=states.append,
+        )
+
+        app.App._show_microphone_unavailable(harness)
+
+        self.assertEqual(states, [])
+
+    def test_alt_l_dismisses_microphone_alert(self):
+        states = []
+        harness = SimpleNamespace(
+            _rewrite_active=False,
+            app_state="microphone_unavailable",
+            _set_state=states.append,
+        )
+
+        app.App.toggle_recording(harness)
+
+        self.assertEqual(states, ["ready"])
+
+    def test_microphone_alert_auto_dismisses_into_existing_fade_out(self):
+        states = []
+        harness = SimpleNamespace(
+            _microphone_alert_job=42,
+            app_state="microphone_unavailable",
+            _set_state=states.append,
+        )
+
+        app.App._dismiss_microphone_alert(harness)
+
+        self.assertIsNone(harness._microphone_alert_job)
+        self.assertEqual(states, ["ready"])
+        self.assertEqual(app.MICROPHONE_ALERT_SECONDS, 1.5)
+        self.assertEqual(app.MICROPHONE_PILL_WIDTH, 100)
 
 
 class WindowFadeTests(unittest.TestCase):
