@@ -1,40 +1,25 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# ClarifyVoice - Linux start script
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$repo_dir"
 
-# Check for required dependencies
-check_dependency() {
-    if ! command -v "$1" &> /dev/null; then
-        echo "Error: $1 is not installed."
-        echo "Install with: $2"
-        return 1
-    fi
-    return 0
-}
-
-echo "Checking dependencies..."
-
-# Check for sox
-if ! check_dependency "sox" "sudo apt install sox libsox-fmt-all"; then
+if [[ "$(uname -s)" == "Linux" ]]; then
+  missing=()
+  for command in sox xclip xdotool; do
+    command -v "$command" >/dev/null 2>&1 || missing+=("$command")
+  done
+  if ((${#missing[@]})); then
+    echo "Missing system tools: ${missing[*]}"
+    echo "On Debian or Ubuntu: sudo apt install sox libsox-fmt-all xclip xdotool python3-tk portaudio19-dev"
     exit 1
+  fi
 fi
 
-# Check for xdotool (required for paste functionality)
-if ! check_dependency "xdotool" "sudo apt install xdotool"; then
-    echo "Warning: xdotool not found. Paste functionality will not work."
+if [[ ! -x .venv/bin/python ]]; then
+  python3 -m venv .venv
+  .venv/bin/python -m pip install --upgrade pip
+  .venv/bin/python -m pip install -r requirements.txt
 fi
 
-# Check for Node.js
-if ! check_dependency "node" "sudo apt install nodejs"; then
-    exit 1
-fi
-
-# Check for npm
-if ! check_dependency "npm" "sudo apt install npm"; then
-    exit 1
-fi
-
-echo "All dependencies found. Starting ClarifyVoice..."
-
-# Run the app
-npm start
+exec .venv/bin/python app.py

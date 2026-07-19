@@ -5,10 +5,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$repoSource = Join-Path $repoRoot "app.py"
 $repoExtra = Join-Path $repoRoot "extra"
 $repoAssets = Join-Path $repoRoot "assets"
-$repoEnvFile = Join-Path $repoRoot ".env"
 $buildRoot = Join-Path $env:TEMP "clarify-voice-build"
 $sourceDir = Join-Path $buildRoot "source"
 $distDir = Join-Path $buildRoot "dist"
@@ -69,7 +67,7 @@ Write-Host "Building ClarifyVoice..."
 New-Item $buildRoot -ItemType Directory -Force | Out-Null
 $pip = Start-Process -FilePath $python -ArgumentList @(
     "-m", "pip", "install", "--quiet",
-    "keyboard", "requests", "sounddevice", "customtkinter", "Pillow", "pyinstaller"
+    "requests", "sounddevice", "customtkinter", "Pillow", "pyinstaller"
 ) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $pipOutLog -RedirectStandardError $pipErrLog
 if ($pip.ExitCode -ne 0) {
     Get-Content $pipOutLog, $pipErrLog -ErrorAction SilentlyContinue
@@ -86,26 +84,25 @@ New-Item $sourceDir, $distDir, $workDir, $specDir -ItemType Directory -Force | O
 $source = Join-Path $sourceDir "app.py"
 $extra = Join-Path $sourceDir "extra"
 $assets = Join-Path $sourceDir "assets"
-$envFile = Join-Path $sourceDir ".env"
-Copy-Item $repoSource $source -Force
+Copy-Item (Join-Path $repoRoot "*.py") $sourceDir -Force
 Copy-Item $repoExtra $extra -Recurse -Force
 Copy-Item $repoAssets $assets -Recurse -Force
 # Keep the linked SoX runtime intact, but omit files unused by the app.
 Remove-Item (Join-Path $extra "sox.zip") -Force -ErrorAction SilentlyContinue
 $soxDir = Join-Path $extra "sox-14.4.2"
 Remove-Item (Join-Path $soxDir "*.pdf"),
-    (Join-Path $soxDir "*.txt"),
+    (Join-Path $soxDir "ChangeLog.txt"),
+    (Join-Path $soxDir "README.txt"),
+    (Join-Path $soxDir "README.win32.txt"),
     (Join-Path $soxDir "batch-example.bat"),
     (Join-Path $soxDir "wget.exe"),
     (Join-Path $soxDir "wget.ini") -Force -ErrorAction SilentlyContinue
-if (Test-Path $repoEnvFile) {
-    Copy-Item $repoEnvFile $envFile -Force
-}
 
 $pyinstallerArgs = @(
     "-m", "PyInstaller",
     "--noconfirm", "--onefile", "--windowed",
     "--name", "ClarifyVoice",
+    "--icon", (Join-Path $assets "branding\clarify.ico"),
     "--distpath", $distDir,
     "--workpath", $workDir,
     "--specpath", $specDir,
@@ -113,12 +110,14 @@ $pyinstallerArgs = @(
     "--add-data", "${assets};assets",
     "--hidden-import", "sounddevice",
     "--hidden-import", "_sounddevice_data",
-    "--exclude-module", "numpy"
+    "--exclude-module", "numpy",
+    # Windows hotkeys and Ctrl+C/V are implemented with Win32 APIs. Keep the
+    # cross-platform source fallback out of the packaged Windows executable.
+    "--exclude-module", "keyboard"
 )
 
-if (Test-Path $envFile) {
-    $pyinstallerArgs += @("--add-data", "${envFile};.")
-}
+# Never copy or bundle the repository .env. Public and local executables read
+# provider credentials from the user's ClarifyVoice config directory instead.
 $pyinstallerArgs += $source
 
 $builder = Start-Process -FilePath $python -ArgumentList $pyinstallerArgs -Wait -PassThru `
