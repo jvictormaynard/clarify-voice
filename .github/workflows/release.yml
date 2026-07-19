@@ -41,9 +41,15 @@ jobs:
           $hash = (Get-FileHash dist\ClarifyVoice.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  ClarifyVoice.exe" | Set-Content -Encoding ascii dist\ClarifyVoice.exe.sha256
           $soxSource = "dist\sox-14.4.2-source.tar.gz"
-          Invoke-WebRequest `
-            -Uri "https://downloads.sourceforge.net/project/sox/sox/14.4.2/sox-14.4.2.tar.gz" `
-            -OutFile $soxSource
+          & curl.exe `
+            --fail `
+            --location `
+            --retry 3 `
+            --output $soxSource `
+            "https://downloads.sourceforge.net/project/sox/sox/14.4.2/sox-14.4.2.tar.gz"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to download the corresponding SoX source archive."
+          }
           $soxHash = (Get-FileHash $soxSource -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($soxHash -ne "b45f598643ffbd8e363ff24d61166ccec4836fea6d3888881b8df53e3bb55f6c") {
             throw "The downloaded SoX source archive did not match the expected SHA-256."
