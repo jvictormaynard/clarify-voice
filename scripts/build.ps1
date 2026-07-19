@@ -1,0 +1,92 @@
+[CmdletBinding()]
+param(
+    [string]$OutputDirectory
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+if (-not $OutputDirectory) {
+    $OutputDirectory = Join-Path $repoRoot "dist"
+} elseif (-not [System.IO.Path]::IsPathRooted($OutputDirectory)) {
+    $OutputDirectory = Join-Path $repoRoot $OutputDirectory
+}
+
+& (Join-Path $PSScriptRoot "setup.ps1") -Dev
+if (-not (Test-Path (Join-Path $repoRoot ".venv\Scripts\python.exe"))) {
+    throw "Could not prepare the build environment."
+}
+
+$python = Join-Path $repoRoot ".venv\Scripts\python.exe"
+$entryPoint = Join-Path $repoRoot "app.py"
+$repoExtra = Join-Path $repoRoot "extra"
+$assets = Join-Path $repoRoot "assets"
+$icon = Join-Path $assets "branding\clarify.ico"
+$workDir = Join-Path $repoRoot "build\pyinstaller"
+$specDir = Join-Path $repoRoot "build\spec"
+$packageInput = Join-Path $repoRoot "build\package-input"
+$extra = Join-Path $packageInput "extra"
+$packageSox = Join-Path $extra "sox-14.4.2"
+
+function ConvertTo-ProcessArgument {
+    param([string]$Value)
+
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+foreach ($requiredPath in @($entryPoint, $repoExtra, $assets, $icon)) {
+    if (-not (Test-Path $requiredPath)) {
+        throw "Required build input is missing: $requiredPath"
+    }
+}
+
+New-Item $OutputDirectory, $workDir, $specDir -ItemType Directory -Force | Out-Null
+Remove-Item $packageInput -Recurse -Force -ErrorAction SilentlyContinue
+New-Item $packageSox -ItemType Directory -Force | Out-Null
+
+$repoSox = Join-Path $repoExtra "sox-14.4.2"
+Copy-Item (Join-Path $repoSox "*.dll") $packageSox -Force
+foreach ($runtimeFile in @("sox.exe", "LICENSE.GPL.txt", "README.txt", "README.win32.txt")) {
+    Copy-Item (Join-Path $repoSox $runtimeFile) $packageSox -Force
+}
+
+$pyInstallerArgs = @(
+    "--noconfirm", "--clean", "--onefile", "--windowed",
+    "--name", "ClarifyVoice",
+    "--icon", $icon,
+    "--distpath", $OutputDirectory,
+    "--workpath", $workDir,
+    "--specpath", $specDir,
+    "--paths", $repoRoot,
+    "--add-data", "${extra};extra",
+    "--add-data", "${assets};assets",
+    "--hidden-import", "sounddevice",
+    "--hidden-import", "_sounddevice_data",
+    "--exclude-module", "numpy",
+    # Windows uses native hotkeys and clipboard events. The cross-platform
+    # fallback must not become a global hook in the packaged executable.
+    "--exclude-module", "keyboard",
+    $entryPoint
+)
+
+Write-Host "Building portable ClarifyVoice executable..."
+$arguments = @("-m", "PyInstaller") + $pyInstallerArgs
+$argumentLine = ($arguments | ForEach-Object {
+    ConvertTo-ProcessArgument ([string]$_)
+}) -join " "
+$builder = Start-Process -FilePath $python -ArgumentList $argumentLine `
+    -Wait -PassThru -NoNewWindow
+if ($builder.ExitCode -ne 0) {
+    throw "ClarifyVoice build failed."
+}
+
+$executable = Join-Path $OutputDirectory "ClarifyVoice.exe"
+if (-not (Test-Path $executable)) {
+    throw "PyInstaller completed without producing $executable."
+}
+
+Write-Host "Build complete: $executable"

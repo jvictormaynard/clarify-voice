@@ -5,10 +5,16 @@
 
 # Dependencies
 node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
 
 # Build outputs
 dist/
+build/
 release/
+*.spec
 
 # OS files
 .DS_Store
@@ -28,3 +34,8 @@ npm-debug.log*
 temp_recording.wav
 temp_recording.webm
 *.tmp
+
+# Local application data and test artifacts
+config.json
+usage_stats.json
+*.wav

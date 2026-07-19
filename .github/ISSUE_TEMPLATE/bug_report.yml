@@ -1,0 +1,78 @@
+name: Bug report
+description: Report a reproducible ClarifyVoice problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Remove API keys, transcripts, selected text, and personal paths before submitting.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I removed secrets and private content from logs and screenshots.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: ClarifyVoice version
+      description: Release tag or commit hash
+      placeholder: v0.1.0 or abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation method
+      options:
+        - GitHub release executable
+        - Built locally with build.bat
+        - Run from source
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model
+      description: Do not include the API key.
+      placeholder: Groq, whisper-large-v3-turbo, official endpoint
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Explain what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open ClarifyVoice...
+        2. Press...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized logs or screenshots
+      description: Use synthetic text and redact keys, headers, private content, and personal paths.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include DPI scaling, target application, custom endpoint type, or microphone model when relevant.

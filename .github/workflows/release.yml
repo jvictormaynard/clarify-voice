@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Windows release
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Run tests
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m unittest discover -s tests -v
+
+      - name: Build portable executable
+        shell: pwsh
+        run: .\scripts\build.ps1
+
+      - name: Create release assets
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\ClarifyVoice.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  ClarifyVoice.exe" | Set-Content -Encoding ascii dist\ClarifyVoice.exe.sha256
+          $soxSource = "dist\sox-14.4.2-source.tar.gz"
+          Invoke-WebRequest `
+            -Uri "https://downloads.sourceforge.net/project/sox/sox/14.4.2/sox-14.4.2.tar.gz" `
+            -OutFile $soxSource
+          $soxHash = (Get-FileHash $soxSource -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($soxHash -ne "b45f598643ffbd8e363ff24d61166ccec4836fea6d3888881b8df53e3bb55f6c") {
+            throw "The downloaded SoX source archive did not match the expected SHA-256."
+          }
+          Compress-Archive -Path dist\ClarifyVoice.exe, LICENSE, THIRD_PARTY_NOTICES.md -DestinationPath dist\ClarifyVoice-windows-x64.zip -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ClarifyVoice-windows-${{ github.ref_name }}
+          path: |
+            dist/ClarifyVoice.exe
+            dist/ClarifyVoice.exe.sha256
+            dist/ClarifyVoice-windows-x64.zip
+            dist/sox-14.4.2-source.tar.gz
+          if-no-files-found: error
+
+      - name: Publish tagged GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            dist\ClarifyVoice.exe `
+            dist\ClarifyVoice.exe.sha256 `
+            dist\ClarifyVoice-windows-x64.zip `
+            dist\sox-14.4.2-source.tar.gz `
+            --verify-tag `
+            --generate-notes `
+            --title "ClarifyVoice ${{ github.ref_name }}"

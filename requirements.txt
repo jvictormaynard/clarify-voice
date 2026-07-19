@@ -1,6 +1,8 @@
-keyboard
-requests
-sounddevice
-numpy
-customtkinter
-Pillow
+requests>=2.31,<3
+sounddevice>=0.4.6,<1
+customtkinter>=5.2,<6
+Pillow>=10,<13
+
+# Windows uses native RegisterHotKey calls. Other source platforms use this
+# optional fallback and remain experimental.
+keyboard>=0.13.5,<1; platform_system != "Windows"
