@@ -1,4 +1,4 @@
-requests>=2.31,<3
+requests>=2.34.2,<3
 sounddevice>=0.4.6,<1
 customtkinter>=5.2,<6
 Pillow>=10,<13
