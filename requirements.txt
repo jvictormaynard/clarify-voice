@@ -1,7 +1,7 @@
 requests>=2.34.2,<3
 sounddevice>=0.5.5,<1
 customtkinter>=5.2,<6
-Pillow>=10,<13
+Pillow>=12.3.0,<13
 
 # Windows uses native RegisterHotKey calls. Other source platforms use this
 # optional fallback and remain experimental.
