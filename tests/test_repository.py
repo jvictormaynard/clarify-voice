@@ -24,6 +24,22 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertNotIn('Join-Path $soxDir "*.txt"', content)
         self.assertNotIn('Join-Path $soxDir "LICENSE.GPL.txt"', content)
 
+    def test_deploy_uses_isolated_repository_requirements(self):
+        content = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+        self.assertIn('$venvDir = Join-Path $buildRoot "venv"', content)
+        self.assertIn(
+            '$requirementsFile = Join-Path $requirementsDir '
+            '"requirements-dev.txt"',
+            content,
+        )
+        self.assertIn('"--upgrade", "-r", $requirementsFile', content)
+        self.assertIn("Build dependencies: $dependencyVersions", content)
+        self.assertNotIn(
+            '"requests", "sounddevice", "customtkinter", "Pillow", '
+            '"pyinstaller"',
+            content,
+        )
+
     def test_release_publishes_verified_sox_source(self):
         content = (
             ROOT / ".github" / "workflows" / "release.yml"

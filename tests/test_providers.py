@@ -180,15 +180,17 @@ class ProviderTests(unittest.TestCase):
             "escape")
 
     def test_windows_package_excludes_cross_platform_keyboard_hook(self):
-        deploy_script = (
-            Path(__file__).resolve().parents[1] / "scripts" / "deploy.ps1"
-        ).read_text(encoding="utf-8")
+        root = Path(__file__).resolve().parents[1]
+        deploy_script = (root / "scripts" / "deploy.ps1").read_text(
+            encoding="utf-8")
+        requirements = (root / "requirements.txt").read_text(encoding="utf-8")
 
         self.assertIn('"--exclude-module", "keyboard"', deploy_script)
-        pip_arguments = deploy_script.split(
-            "$pip = Start-Process", 1)[1].split(
-            "if ($pip.ExitCode", 1)[0]
-        self.assertNotIn('"keyboard"', pip_arguments)
+        self.assertEqual(deploy_script.count('"keyboard"'), 1)
+        self.assertIn(
+            'keyboard>=0.13.5,<1; platform_system != "Windows"',
+            requirements,
+        )
 
     def test_workflow_controller_prevents_rewrite_translation_overlap(self):
         workflows = WorkflowController()
