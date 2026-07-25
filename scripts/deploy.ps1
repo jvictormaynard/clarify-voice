@@ -8,6 +8,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $repoExtra = Join-Path $repoRoot "extra"
 $repoAssets = Join-Path $repoRoot "assets"
 $buildRoot = Join-Path $env:TEMP "clarify-voice-build"
+$venvDir = Join-Path $buildRoot "venv"
+$venvPython = Join-Path $venvDir "Scripts\python.exe"
+$requirementsDir = Join-Path $buildRoot "requirements"
+$requirementsFile = Join-Path $requirementsDir "requirements-dev.txt"
 $sourceDir = Join-Path $buildRoot "source"
 $distDir = Join-Path $buildRoot "dist"
 $workDir = Join-Path $buildRoot "work"
@@ -15,8 +19,41 @@ $specDir = Join-Path $buildRoot "spec"
 $builtExe = Join-Path $distDir "ClarifyVoice.exe"
 $pipOutLog = Join-Path $buildRoot "pip.stdout.log"
 $pipErrLog = Join-Path $buildRoot "pip.stderr.log"
+$versionsOutLog = Join-Path $buildRoot "versions.stdout.log"
+$versionsErrLog = Join-Path $buildRoot "versions.stderr.log"
 $buildOutLog = Join-Path $buildRoot "build.stdout.log"
 $buildErrLog = Join-Path $buildRoot "build.stderr.log"
+
+function ConvertTo-ProcessArgument {
+    param([string]$Value)
+
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+function Invoke-LoggedProcess {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$StandardOutput,
+        [string]$StandardError,
+        [string]$FailureMessage
+    )
+
+    $argumentLine = ($Arguments | ForEach-Object {
+        ConvertTo-ProcessArgument ([string]$_)
+    }) -join " "
+    $process = Start-Process -FilePath $FilePath -ArgumentList $argumentLine `
+        -Wait -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput $StandardOutput `
+        -RedirectStandardError $StandardError
+    if ($process.ExitCode -ne 0) {
+        Get-Content $StandardOutput, $StandardError -ErrorAction SilentlyContinue
+        throw $FailureMessage
+    }
+}
 
 function Resolve-InstallPath {
     param([string]$ExplicitPath)
@@ -64,15 +101,36 @@ $targetDir = Split-Path -Parent $targetExe
 $backupExe = "$targetExe.backup"
 
 Write-Host "Building ClarifyVoice..."
-New-Item $buildRoot -ItemType Directory -Force | Out-Null
-$pip = Start-Process -FilePath $python -ArgumentList @(
-    "-m", "pip", "install", "--quiet",
-    "requests", "sounddevice", "customtkinter", "Pillow", "pyinstaller"
-) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $pipOutLog -RedirectStandardError $pipErrLog
-if ($pip.ExitCode -ne 0) {
-    Get-Content $pipOutLog, $pipErrLog -ErrorAction SilentlyContinue
-    throw "Could not install the Windows build dependencies."
+New-Item $buildRoot, $requirementsDir -ItemType Directory -Force | Out-Null
+Copy-Item (Join-Path $repoRoot "requirements.txt") $requirementsDir -Force
+Copy-Item (Join-Path $repoRoot "requirements-dev.txt") $requirementsDir -Force
+
+if (-not (Test-Path $venvPython)) {
+    Write-Host "Creating isolated build environment at $venvDir..."
+    Invoke-LoggedProcess $python @("-m", "venv", $venvDir) `
+        $pipOutLog $pipErrLog `
+        "Could not create the isolated Windows build environment."
+    if (-not (Test-Path $venvPython)) {
+        throw "Could not create the isolated Windows build environment."
+    }
 }
+
+Invoke-LoggedProcess $venvPython @(
+    "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
+    "--upgrade", "-r", $requirementsFile
+) $pipOutLog $pipErrLog "Could not install the Windows build dependencies."
+
+$versionScript = (
+    "from importlib.metadata import version; " +
+    "names=('requests','sounddevice','customtkinter','Pillow','pyinstaller'); " +
+    "print(', '.join(name + ' ' + version(name) for name in names))"
+)
+$versionArguments = @("-c", $versionScript)
+Invoke-LoggedProcess $venvPython $versionArguments `
+    $versionsOutLog $versionsErrLog `
+    "Could not inspect the isolated Windows build dependencies."
+$dependencyVersions = (Get-Content $versionsOutLog -Raw).Trim()
+Write-Host "Build dependencies: $dependencyVersions"
 
 # Keep PyInstaller's work directory so subsequent deployments can reuse its
 # dependency-analysis cache. Only refresh source inputs and final output.
@@ -120,11 +178,10 @@ $pyinstallerArgs = @(
 # provider credentials from the user's ClarifyVoice config directory instead.
 $pyinstallerArgs += $source
 
-$builder = Start-Process -FilePath $python -ArgumentList $pyinstallerArgs -Wait -PassThru `
-    -WindowStyle Hidden -RedirectStandardOutput $buildOutLog -RedirectStandardError $buildErrLog
-if ($builder.ExitCode -ne 0 -or -not (Test-Path $builtExe)) {
-    Get-Content $buildOutLog, $buildErrLog -ErrorAction SilentlyContinue
-    throw "ClarifyVoice build failed. The installed version was not changed."
+Invoke-LoggedProcess $venvPython $pyinstallerArgs $buildOutLog $buildErrLog `
+    "ClarifyVoice build failed. The installed version was not changed."
+if (-not (Test-Path $builtExe)) {
+    throw "ClarifyVoice build completed without producing an executable."
 }
 
 Write-Host "Updating $targetExe..."
