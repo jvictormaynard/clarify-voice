@@ -2003,13 +2003,16 @@ class Recorder:
         self._process_job = None
         self.mic_stream = None
         self.mic_level = 0.0
+        # WMI process discovery can take one or two seconds on Windows. Do it
+        # while the application is starting instead of delaying the first
+        # microphone samples after the recording pill is already visible.
+        self._stop_stale_windows_recorders()
 
     def start(self):
         # A forced app update/restart can leave SoX alive after its parent exits.
         # Every recorder writes to the same temp path, so such an orphan keeps
         # growing the next request until the provider rejects the huge upload.
         self.stop()
-        self._stop_stale_windows_recorders()
         self._safe_delete(AUDIO_PATH)
         if _has_active_microphone() is False:
             raise MicrophoneUnavailableError("No active microphone")
@@ -2777,6 +2780,56 @@ def _make_microphone_warning_image(size=24):
     return image.resize((size, size), Image.Resampling.LANCZOS)
 
 
+@lru_cache(maxsize=1)
+def _layered_window_types():
+    """Return the one ctypes type set shared by every layered Win32 surface.
+
+    ``ctypes.windll.user32`` exposes one process-wide UpdateLayeredWindow
+    function object. Registering its ``argtypes`` with per-instance POINT
+    classes makes existing surfaces incompatible as soon as another surface is
+    created. Keeping these classes cached gives every pill and backdrop the
+    exact same pointer types.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+    class SIZE(ctypes.Structure):
+        _fields_ = [("cx", wintypes.LONG), ("cy", wintypes.LONG)]
+
+    class BLENDFUNCTION(ctypes.Structure):
+        _fields_ = [
+            ("BlendOp", wintypes.BYTE), ("BlendFlags", wintypes.BYTE),
+            ("SourceConstantAlpha", wintypes.BYTE), ("AlphaFormat", wintypes.BYTE),
+        ]
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+            ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+            ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+            ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+            ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+            ("biClrImportant", wintypes.DWORD),
+        ]
+
+    class BITMAPINFO(ctypes.Structure):
+        _fields_ = [
+            ("bmiHeader", BITMAPINFOHEADER),
+            ("bmiColors", wintypes.DWORD * 3),
+        ]
+
+    return types.SimpleNamespace(
+        POINT=POINT,
+        SIZE=SIZE,
+        BLENDFUNCTION=BLENDFUNCTION,
+        BITMAPINFOHEADER=BITMAPINFOHEADER,
+        BITMAPINFO=BITMAPINFO,
+    )
+
+
 class LayeredRecordingOverlay:
     """Small Win32 status pill with true per-pixel alpha composition."""
 
@@ -2792,30 +2845,12 @@ class LayeredRecordingOverlay:
         self.scale = 3
         self.icon = icon
 
-        class POINT(ctypes.Structure):
-            _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
-
-        class SIZE(ctypes.Structure):
-            _fields_ = [("cx", wintypes.LONG), ("cy", wintypes.LONG)]
-
-        class BLENDFUNCTION(ctypes.Structure):
-            _fields_ = [
-                ("BlendOp", wintypes.BYTE), ("BlendFlags", wintypes.BYTE),
-                ("SourceConstantAlpha", wintypes.BYTE), ("AlphaFormat", wintypes.BYTE),
-            ]
-
-        class BITMAPINFOHEADER(ctypes.Structure):
-            _fields_ = [
-                ("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
-                ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
-                ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
-                ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
-                ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
-                ("biClrImportant", wintypes.DWORD),
-            ]
-
-        class BITMAPINFO(ctypes.Structure):
-            _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+        layered_types = _layered_window_types()
+        POINT = layered_types.POINT
+        SIZE = layered_types.SIZE
+        BLENDFUNCTION = layered_types.BLENDFUNCTION
+        BITMAPINFOHEADER = layered_types.BITMAPINFOHEADER
+        BITMAPINFO = layered_types.BITMAPINFO
 
         self.POINT = POINT
         self.SIZE = SIZE
@@ -3266,6 +3301,7 @@ class App(ctk.CTk):
 
     def __init__(self, start_hidden=False):
         super().__init__()
+        self._clarify_visibility_target = not start_hidden
         if start_hidden:
             self.withdraw()
         self.title("ClarifyVoice")
@@ -3362,6 +3398,7 @@ class App(ctk.CTk):
 
     def _show_without_activation(self):
         self.deiconify()
+        self.update_idletasks()
         self.attributes("-topmost", True)
         if IS_WIN and getattr(self, "_overlay_hwnd", None):
             try:
@@ -3374,21 +3411,37 @@ class App(ctk.CTk):
 
     def _show_with_fade(self):
         is_visible = self.winfo_viewable()
-        if is_visible and not getattr(self, "_clarify_fading_out", False):
+        was_target_visible = getattr(
+            self, "_clarify_visibility_target", is_visible)
+        is_fading_out = getattr(self, "_clarify_fading_out", False)
+        if (was_target_visible and is_visible and not is_fading_out
+                and _window_opacity(self) >= 0.99):
             return
+        self._clarify_visibility_target = True
         self._clarify_fading_out = False
         if not is_visible:
             _set_window_opacity(self, 0.0)
-            self._show_without_activation()
+        # Tk can briefly keep reporting a withdrawn transparent tool window as
+        # viewable. Always issue the native show when the previous visibility
+        # intent was hidden instead of trusting that stale value.
+        self._show_without_activation()
         _animate_window_opacity(self, 1.0, WINDOW_FADE_IN_MS)
 
     def _hide_to_tray(self):
+        self._clarify_visibility_target = False
         if not self.winfo_viewable():
             self.withdraw()
+            _set_window_opacity(self, 1.0)
+            self._clarify_fading_out = False
             return
         self._clarify_fading_out = True
 
         def finish():
+            # A newer Alt+R may have reversed the fade before this completion
+            # callback reached the Tk loop. Never let the stale callback hide
+            # the newly reopened window.
+            if getattr(self, "_clarify_visibility_target", False):
+                return
             self.withdraw()
             _set_window_opacity(self, 1.0)
             self._clarify_fading_out = False
@@ -3444,7 +3497,10 @@ class App(ctk.CTk):
 
     def _show_if_hidden(self):
         """Reveal an Alt+R-hidden app when another launch requests activation."""
-        if self._recording_overlay is None and not self.winfo_viewable():
+        if (self._recording_overlay is None
+                and (not getattr(
+                    self, "_clarify_visibility_target", self.winfo_viewable())
+                     or not self.winfo_viewable())):
             self._show_with_fade()
 
     def _build_ui(self):
@@ -3642,7 +3698,14 @@ class App(ctk.CTk):
                 self.withdraw()
                 self._was_hidden_before_recording = False
             elif had_overlay:
-                self._show_without_activation()
+                # Finish the result layout while the root is still withdrawn,
+                # then reveal that final geometry through the same complete
+                # fade path used by Alt+R. This also clears any stale fade state
+                # left while the transient translation/rewrite pill was active.
+                if after_ready is not None:
+                    after_ready()
+                    after_ready = None
+                self._show_with_fade()
             if after_ready is not None:
                 after_ready()
         elif s in (
@@ -5416,7 +5479,6 @@ class App(ctk.CTk):
 
         images = {}
         picker_images = {}
-        card_canvas_images = {}
         for provider in provider_ids:
             source = _make_provider_icon(provider, 96)
             if source is not None:
@@ -5424,8 +5486,6 @@ class App(ctk.CTk):
                     light_image=source, dark_image=source, size=(24, 24))
                 picker_images[provider] = ctk.CTkImage(
                     light_image=source, dark_image=source, size=(18, 18))
-                card_canvas_images[provider] = ImageTk.PhotoImage(
-                    source.resize((24, 24), Image.Resampling.LANCZOS))
 
         add_provider_text = self._t("add_provider")
 
@@ -5940,42 +6000,34 @@ class App(ctk.CTk):
                 fg_color="#121212", border_width=1, border_color="#242424")
             card.pack(fill="x", pady=3)
             card.pack_propagate(False)
-            canvas = tk.Canvas(card, height=46, background="#121212",
-                highlightthickness=0, borderwidth=0, cursor="hand2")
-            canvas.pack(fill="both", expand=True, padx=2, pady=2)
-            icon = card_canvas_images.get(provider)
-            icon_id = None
-            if icon is not None:
-                canvas._provider_icon = icon
-                icon_id = canvas.create_image(14, 0, image=icon, anchor="w")
-            name_id = canvas.create_text(48, 0, text=provider_names[provider],
-                fill="#eeeeee", font=(font_family, 10), anchor="w")
-            status_id = canvas.create_text(420, 0, text="", fill="#777777",
-                font=(font_family, 9), anchor="e")
+            icon_label = ctk.CTkLabel(
+                card, text="", image=images.get(provider), width=24, height=24,
+                fg_color="transparent")
+            icon_label.pack(side="left", padx=(14, 10))
+            name_label = ctk.CTkLabel(
+                card, text=provider_names[provider], text_color="#eeeeee",
+                font=font_caption, fg_color="transparent")
+            name_label.pack(side="left")
+            status_label = ctk.CTkLabel(
+                card, text="", text_color="#777777", font=font_caption,
+                fg_color="transparent")
+            status_label.pack(side="right", padx=14)
 
-            def center_card_content(event, icon_item=icon_id,
-                    name_item=name_id, status_item=status_id):
-                center_y = event.height / 2
-                if icon_item is not None:
-                    event.widget.coords(icon_item, 14, center_y)
-                event.widget.coords(name_item, 48, center_y)
-                event.widget.coords(
-                    status_item, max(80, event.width - 14), center_y)
-
-            canvas.bind("<Configure>", center_card_content)
-            canvas.bind("<Enter>", lambda event:
-                event.widget.configure(background="#1d1d1d"))
-            canvas.bind("<Leave>", lambda event:
-                event.widget.configure(background="#121212"))
-            canvas.bind("<Button-1>", lambda _event, p=provider:
-                show_page(f"detail:{p}"))
+            card_widgets = (card, icon_label, name_label, status_label)
+            for widget in card_widgets:
+                widget.bind("<Enter>", lambda _event, target=card:
+                    target.configure(fg_color="#1d1d1d"))
+                widget.bind("<Leave>", lambda _event, target=card:
+                    target.configure(fg_color="#121212"))
+                widget.bind("<Button-1>", lambda _event, p=provider:
+                    show_page(f"detail:{p}"))
             card_buttons[provider] = card
-            card_status_buttons[provider] = (canvas, status_id)
+            card_status_buttons[provider] = status_label
 
         def refresh_provider_ui(provider):
             status, color = status_presentation(provider)
-            status_canvas, status_id = card_status_buttons[provider]
-            status_canvas.itemconfigure(status_id, text=status, fill=color)
+            card_status_buttons[provider].configure(
+                text=status, text_color=color)
             if provider in detail_status_labels:
                 detail_status_labels[provider].configure(text=status, text_color=color)
                 error = state[provider]["error"]
@@ -6278,12 +6330,22 @@ class App(ctk.CTk):
 
     # -- Visibility --
     def _toggle_visibility(self):
-        if getattr(self, "_clarify_fading_out", False):
+        is_visible = self.winfo_viewable()
+        target_visible = getattr(
+            self, "_clarify_visibility_target", is_visible)
+        has_transient_surface = (
+            getattr(self, "_recording_overlay", None) is not None
+            or getattr(self, "_translation_picker", None) is not None)
+        if (getattr(self, "_clarify_fading_out", False)
+                or not target_visible
+                # Alt+T can temporarily withdraw the root while leaving its
+                # visibility intent unchanged. Once no transient Clarify
+                # surface remains, the real hidden state must win so Alt+R
+                # reveals the application instead of hiding it again.
+                or (not is_visible and not has_transient_surface)):
             self._show_with_fade()
-        elif self.winfo_viewable():
-            self._hide_to_tray()
         else:
-            self._show_with_fade()
+            self._hide_to_tray()
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
