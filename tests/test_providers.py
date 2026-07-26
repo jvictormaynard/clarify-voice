@@ -1,4 +1,5 @@
 import json
+import inspect
 import os
 import queue
 import tempfile
@@ -63,17 +64,40 @@ class ProviderTests(unittest.TestCase):
 
     @patch("app.subprocess.Popen")
     def test_recorder_reports_when_no_active_microphone_exists(self, popen):
-        recorder = app.Recorder()
         fake_sounddevice = SimpleNamespace(
             query_devices=Mock(return_value={"max_input_channels": 0}))
 
         with patch("app.sd", fake_sounddevice), \
-                patch.object(recorder, "_stop_stale_windows_recorders"), \
+                patch.object(app.Recorder, "_stop_stale_windows_recorders"):
+            recorder = app.Recorder()
+        with patch("app.sd", fake_sounddevice), \
                 patch.object(recorder, "_safe_delete"):
             with self.assertRaises(app.MicrophoneUnavailableError):
                 recorder.start()
 
         popen.assert_not_called()
+
+    @patch("app.time.sleep")
+    @patch("app.subprocess.Popen")
+    @patch.object(app.Recorder, "_stop_stale_windows_recorders")
+    def test_stale_recorder_cleanup_runs_before_recording_hot_path(
+            self, cleanup, popen, _sleep):
+        stream = Mock()
+        fake_sounddevice = SimpleNamespace(
+            query_devices=Mock(return_value={"max_input_channels": 1}),
+            RawInputStream=Mock(return_value=stream),
+        )
+        popen.return_value.poll.return_value = None
+
+        with patch("app.sd", fake_sounddevice):
+            recorder = app.Recorder()
+            cleanup.assert_called_once_with()
+            cleanup.reset_mock()
+            with patch.object(recorder, "_safe_delete"):
+                recorder.start()
+
+        cleanup.assert_not_called()
+        stream.start.assert_called_once_with()
 
     @staticmethod
     def _single_instance_api(already_exists=False):
@@ -1177,6 +1201,45 @@ class RewriteWorkflowTests(unittest.TestCase):
         self.assertEqual(harness._pill_pending_ready, ("Pronto", callback))
         callback.assert_not_called()
 
+    def test_ready_result_layout_precedes_standard_visibility_fade(self):
+        events = []
+        overlay = Mock()
+        harness = SimpleNamespace(
+            app_state="processing",
+            _wave_running=False,
+            _timer_running=True,
+            _microphone_alert_job=None,
+            _recording_overlay=overlay,
+            attributes=Mock(),
+            rec_card=SimpleNamespace(pack_forget=Mock()),
+            idle_card=SimpleNamespace(pack=Mock()),
+            _idle_card_pad=0,
+            lbl=SimpleNamespace(configure=Mock()),
+            sub=SimpleNamespace(configure=Mock()),
+            _saved_pos=(10, 20),
+            geometry=Mock(),
+            _was_hidden_before_recording=False,
+            _show_with_fade=lambda: events.append("fade"),
+            _t=lambda key: key,
+        )
+
+        app.App._set_state(
+            harness, "ready",
+            after_ready=lambda: events.append("result"),
+            _skip_pill_fade=True)
+
+        self.assertEqual(events, ["result", "fade"])
+        overlay.destroy.assert_called_once_with()
+
+    def test_layered_windows_share_ctypes_pointer_types(self):
+        first = app._layered_window_types()
+        second = app._layered_window_types()
+
+        self.assertIs(first, second)
+        self.assertIs(first.POINT, second.POINT)
+        self.assertIs(first.SIZE, second.SIZE)
+        self.assertIs(first.BLENDFUNCTION, second.BLENDFUNCTION)
+
     def test_second_launch_reveals_hidden_app(self):
         show = Mock()
         harness = SimpleNamespace(
@@ -1378,6 +1441,68 @@ class WindowFadeTests(unittest.TestCase):
 
         show.assert_called_once_with()
         harness._hide_to_tray.assert_not_called()
+
+    def test_alt_r_reveals_when_tk_viewability_is_stale(self):
+        show = Mock()
+        harness = SimpleNamespace(
+            _clarify_visibility_target=False,
+            _clarify_fading_out=False,
+            winfo_viewable=lambda: True,
+            _hide_to_tray=Mock(),
+            _show_with_fade=show,
+        )
+
+        app.App._toggle_visibility(harness)
+
+        show.assert_called_once_with()
+        harness._hide_to_tray.assert_not_called()
+
+    def test_alt_r_reveals_after_translation_with_stale_visible_intent(self):
+        show = Mock()
+        harness = SimpleNamespace(
+            _clarify_visibility_target=True,
+            _clarify_fading_out=False,
+            _recording_overlay=None,
+            _translation_picker=None,
+            winfo_viewable=lambda: False,
+            _hide_to_tray=Mock(),
+            _show_with_fade=show,
+        )
+
+        app.App._toggle_visibility(harness)
+
+        show.assert_called_once_with()
+        harness._hide_to_tray.assert_not_called()
+
+    @patch("app._set_window_opacity")
+    @patch("app._animate_window_opacity")
+    def test_stale_hide_completion_does_not_withdraw_reopened_window(
+            self, animate, _set_opacity):
+        withdraw = Mock()
+        harness = SimpleNamespace(
+            _clarify_visibility_target=True,
+            _clarify_fading_out=False,
+            winfo_viewable=lambda: True,
+            withdraw=withdraw,
+        )
+        completion = []
+        animate.side_effect = lambda _widget, _target, _duration, callback: (
+            completion.append(callback))
+
+        app.App._hide_to_tray(harness)
+        harness._clarify_visibility_target = True
+        completion[0]()
+
+        withdraw.assert_not_called()
+
+    def test_provider_cards_do_not_cover_their_ctk_border_with_a_canvas(self):
+        source = inspect.getsource(app.App._open_settings)
+        card_source = source.split(
+            "# Providers page and cards are also created once.", 1)[1].split(
+            "def refresh_provider_ui", 1)[0]
+
+        self.assertNotIn("tk.Canvas(", card_source)
+        self.assertIn("ctk.CTkLabel(", card_source)
 
     def test_recording_state_syncs_escape_hotkey(self):
         tray = Mock()
