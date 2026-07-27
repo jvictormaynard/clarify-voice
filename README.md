@@ -159,6 +159,7 @@ tests/                         Unit and repository-safety tests
 docs/                          Architecture and development documentation
 legacy/electron-prototype/     Archived first implementation, not built
 .github/                       CI, release, issue, and PR automation
+.agents/skills/                Repository-specific maintainer workflows
 ```
 
 The current application is Python. The Electron prototype is kept only for

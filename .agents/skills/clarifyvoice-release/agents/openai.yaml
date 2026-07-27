@@ -1,0 +1,4 @@
+interface:
+  display_name: "ClarifyVoice Release"
+  short_description: "Publicar releases verificadas do ClarifyVoice"
+  default_prompt: "Use $clarifyvoice-release to prepare and publish the next verified ClarifyVoice release."

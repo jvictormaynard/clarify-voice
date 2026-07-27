@@ -5,6 +5,23 @@ Notable user-facing changes are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-27
+
+### Fixed
+
+- Preserved provider-card borders with CustomTkinter 6
+- Removed the initial microphone capture delay caused by stale-recorder cleanup
+- Restored reliable `Alt+R` visibility toggling after `Alt+T` translations
+- Restored the standard fade-in when the main window returns after translation
+- Shared native layered-window types to prevent Windows transparency failures
+- Made Windows release-source downloads resilient to redirects and transient
+  network failures
+
+### Changed
+
+- Updated CustomTkinter, Pillow, sounddevice, Requests, and PyInstaller
+- Isolated maintainer deployments from system Python dependencies
+
 ## [0.1.0] - 2026-07-19
 
 ### Added
@@ -24,5 +41,6 @@ Notable user-facing changes are documented here. This project follows
 
 - Local `.env` files and API keys are excluded from portable builds
 
-[Unreleased]: https://github.com/jvictormaynard/clarify-voice/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jvictormaynard/clarify-voice/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/jvictormaynard/clarify-voice/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jvictormaynard/clarify-voice/releases/tag/v0.1.0
