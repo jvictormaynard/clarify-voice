@@ -72,6 +72,22 @@ class RepositorySafetyTests(unittest.TestCase):
         for relative_path in required:
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
 
+    def test_release_skill_is_repository_local_and_complete(self):
+        skill_root = ROOT / ".agents" / "skills" / "clarifyvoice-release"
+        required = [
+            "SKILL.md",
+            "agents/openai.yaml",
+            "references/release-contract.md",
+            "scripts/release_preflight.py",
+        ]
+        for relative_path in required:
+            self.assertTrue((skill_root / relative_path).is_file(), relative_path)
+
+        skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("name: clarifyvoice-release", skill)
+        self.assertIn("ClarifyVoice.exe.sha256", skill)
+        self.assertNotIn("/mnt/c/Users/Work/.codex/skills", skill)
+
 
 if __name__ == "__main__":
     unittest.main()

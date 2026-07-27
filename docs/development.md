@@ -98,13 +98,29 @@ Windows path and include platform-specific validation.
 
 ## Release process
 
-1. Update `CHANGELOG.md`.
-2. Ensure CI is green on the intended commit.
-3. Create and push a semantic tag, for example `v0.1.0`.
-4. The release workflow builds on Windows, creates a ZIP and SHA-256 checksum,
-   verifies the official SoX source archive, and publishes all of them to the
-   same GitHub release.
-5. Download the published asset and perform the Windows acceptance checklist.
+The repository-local `$clarifyvoice-release` skill under
+`.agents/skills/clarifyvoice-release/` is the canonical maintainer procedure.
+It standardizes the release PR, CI gates, tag provenance, assets, checksums, and
+post-release verification.
+
+1. Choose the next semantic version from the changes since the latest tag.
+2. Update `CHANGELOG.md` and any documentation whose behavior changed.
+3. Run the release preflight, replacing the example version:
+
+   ```bash
+   python3 .agents/skills/clarifyvoice-release/scripts/release_preflight.py \
+     --repo . --version 0.1.1
+   ```
+
+4. Open and merge a focused release-preparation PR after local, Ubuntu,
+   Windows, and packaging checks pass.
+5. Create an annotated `vX.Y.Z` tag on the exact green `master` commit and push
+   only that tag.
+6. The release workflow builds on Windows, creates the executable, ZIP and
+   SHA-256 checksum, verifies the official SoX source archive, and publishes
+   all four assets to the same GitHub release.
+7. Download the published assets, verify the executable checksum and ZIP
+   contents, and confirm that `/releases/latest` resolves to the new version.
 
 The executable is currently unsigned. Code signing should be introduced before
 representing the app as a warning-free consumer installer.
