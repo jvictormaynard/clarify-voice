@@ -4558,10 +4558,6 @@ class App(ctk.CTk):
 
     def _stop_recording(self):
         elapsed = time.time() - self._rec_start
-        if elapsed < 3:
-            self._set_state("ready", self._t("too_short"))
-            threading.Thread(target=self.recorder.cancel, daemon=True).start()
-            return
         self._set_state("processing")
         def run():
             self.recorder.stop()

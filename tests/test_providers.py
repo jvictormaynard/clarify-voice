@@ -1313,6 +1313,38 @@ class RewriteWorkflowTests(unittest.TestCase):
         self.assertEqual(app.MICROPHONE_ALERT_SECONDS, 1.5)
         self.assertEqual(app.MICROPHONE_PILL_WIDTH, 100)
 
+    def test_subsecond_recording_is_processed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "recording.wav"
+            audio_path.write_bytes(b"0" * 1001)
+            recorder = SimpleNamespace(stop=Mock(), cancel=Mock())
+            harness = SimpleNamespace(
+                _rec_start=100.0,
+                _recording_usage={},
+                recorder=recorder,
+                mode="transcribe",
+                lang="en",
+                _set_state=Mock(),
+                _on_result=Mock(),
+                after=lambda _delay, callback: callback(),
+            )
+
+            def run_immediately(target, daemon):
+                return SimpleNamespace(start=target)
+
+            with patch.object(app, "AUDIO_PATH", audio_path), \
+                    patch("app.time.time", return_value=100.25), \
+                    patch("app.time.sleep"), \
+                    patch("app.threading.Thread", side_effect=run_immediately), \
+                    patch("app.call_transcription_provider",
+                          return_value="Short phrase"):
+                app.App._stop_recording(harness)
+
+        harness._set_state.assert_called_once_with("processing")
+        recorder.stop.assert_called_once_with()
+        recorder.cancel.assert_not_called()
+        harness._on_result.assert_called_once_with("Short phrase")
+
 
 class WindowFadeTests(unittest.TestCase):
     class Widget:
