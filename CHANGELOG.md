@@ -5,6 +5,13 @@ Notable user-facing changes are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-31
+
+### Fixed
+
+- Allowed short and sub-second recordings to be transcribed while preventing
+  an immediate stop from racing microphone startup
+
 ## [0.1.1] - 2026-07-27
 
 ### Fixed
@@ -41,6 +48,7 @@ Notable user-facing changes are documented here. This project follows
 
 - Local `.env` files and API keys are excluded from portable builds
 
-[Unreleased]: https://github.com/jvictormaynard/clarify-voice/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/jvictormaynard/clarify-voice/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/jvictormaynard/clarify-voice/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jvictormaynard/clarify-voice/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jvictormaynard/clarify-voice/releases/tag/v0.1.0
