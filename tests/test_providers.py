@@ -3,6 +3,7 @@ import inspect
 import os
 import queue
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1343,6 +1344,49 @@ class RewriteWorkflowTests(unittest.TestCase):
         harness._set_state.assert_called_once_with("processing")
         recorder.stop.assert_called_once_with()
         recorder.cancel.assert_not_called()
+        harness._on_result.assert_called_once_with("Short phrase")
+
+    def test_subsecond_stop_waits_for_recorder_startup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "recording.wav"
+            startup_entered = threading.Event()
+            allow_startup = threading.Event()
+            result_ready = threading.Event()
+            recorder = SimpleNamespace(stop=Mock())
+
+            def delayed_start():
+                startup_entered.set()
+                self.assertTrue(allow_startup.wait(1))
+                audio_path.write_bytes(b"0" * 1001)
+
+            recorder.start = delayed_start
+            harness = SimpleNamespace(
+                result_frame=SimpleNamespace(winfo_manager=lambda: False),
+                _update_focused_icon=Mock(),
+                winfo_viewable=lambda: True,
+                recorder=recorder,
+                mode="transcribe",
+                lang="en",
+                _set_state=Mock(),
+                _on_result=Mock(side_effect=lambda _text: result_ready.set()),
+                after=lambda _delay, callback: callback(),
+            )
+
+            with patch.object(app, "AUDIO_PATH", audio_path), \
+                    patch("app._has_active_microphone", return_value=True), \
+                    patch("app._recording_usage_context", return_value={}), \
+                    patch("app.time.sleep"), \
+                    patch("app.call_transcription_provider",
+                          return_value="Short phrase"):
+                app.App._start_recording(harness)
+                self.assertTrue(startup_entered.wait(1))
+                app.App._stop_recording(harness)
+                self.assertFalse(result_ready.wait(0.05))
+                self.assertFalse(recorder.stop.called)
+                allow_startup.set()
+                self.assertTrue(result_ready.wait(1))
+
+        recorder.stop.assert_called_once_with()
         harness._on_result.assert_called_once_with("Short phrase")
 
 

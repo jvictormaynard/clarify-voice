@@ -4539,6 +4539,7 @@ class App(ctk.CTk):
         if _has_active_microphone() is False:
             self._set_state("microphone_unavailable")
             return
+        self._recorder_start_finished = threading.Event()
         self._rec_start = time.time()
         self._recording_usage = _recording_usage_context()
         self._recording_usage["mode"] = self.mode
@@ -4549,6 +4550,8 @@ class App(ctk.CTk):
             except MicrophoneUnavailableError:
                 self.after(0, self._show_microphone_unavailable)
             except Exception as e: self.after(0, lambda: self._set_state("ready", f"Err: {e}"))
+            finally:
+                self._recorder_start_finished.set()
         threading.Thread(target=start, daemon=True).start()
 
     def _show_microphone_unavailable(self):
@@ -4558,8 +4561,12 @@ class App(ctk.CTk):
 
     def _stop_recording(self):
         elapsed = time.time() - self._rec_start
+        recorder_start_finished = getattr(
+            self, "_recorder_start_finished", None)
         self._set_state("processing")
         def run():
+            if recorder_start_finished is not None:
+                recorder_start_finished.wait()
             self.recorder.stop()
             time.sleep(0.3)
             if not AUDIO_PATH.exists() or AUDIO_PATH.stat().st_size < 1000:
