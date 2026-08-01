@@ -68,12 +68,16 @@ def is_alt_pressed() -> bool:
     return bool(ctypes.windll.user32.GetAsyncKeyState(VK_MENU) & 0x8000)
 
 
-def send_ctrl_key(letter: str) -> None:
-    """Send Ctrl plus one ASCII letter with the lightweight Win32 API."""
+def send_ctrl_key(letter: str) -> bool:
+    """Send Ctrl plus one ASCII letter and report Win32 dispatch success."""
     virtual_key = ord(str(letter).upper())
     user32 = ctypes.windll.user32
     key_up = 0x0002
-    user32.keybd_event(0x11, 0, 0, 0)  # Ctrl down
-    user32.keybd_event(virtual_key, 0, 0, 0)
-    user32.keybd_event(virtual_key, 0, key_up, 0)
-    user32.keybd_event(0x11, 0, key_up, 0)  # Ctrl up
+    try:
+        user32.keybd_event(0x11, 0, 0, 0)  # Ctrl down
+        user32.keybd_event(virtual_key, 0, 0, 0)
+        user32.keybd_event(virtual_key, 0, key_up, 0)
+        user32.keybd_event(0x11, 0, key_up, 0)  # Ctrl up
+        return True
+    except OSError:
+        return False

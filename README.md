@@ -105,7 +105,10 @@ The minimize button hides the app to the tray instead of closing it.
 For rewrite and translation, ClarifyVoice only pastes when the original window
 and selection are still active. If focus changed while the provider was
 processing, the result stays in the clipboard and appears in the result panel.
-Rich-text formatting is not preserved.
+Automatic paste temporarily writes the result and restores the user's Unicode
+text, HTML, RTF, and DIB image clipboard formats after a short bounded delay.
+If focus, paste confirmation, or clipboard ownership is lost, the generated
+result remains available for manual paste and the newer clipboard contents win.
 
 ## Providers
 

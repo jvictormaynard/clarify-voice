@@ -63,7 +63,7 @@ Use clear commit messages. Conventional prefixes such as `fix:`, `feat:`,
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q app.py desktop_state.py windows_hotkeys.py tests
+.\.venv\Scripts\python.exe -m compileall -q app.py desktop_state.py windows_hotkeys.py windows_clipboard.py tests
 ```
 
 For packaging-related changes:
