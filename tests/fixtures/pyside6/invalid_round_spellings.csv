@@ -1,0 +1,7 @@
+Target,Round,RunId,BootId,Executable,ColdStartMs,MainWindowSeen,WindowProcessId,WorkingSetMB,PrivateMemoryMB,ProcessCount,ThreadCount,PackageSizeMB,MeasuredAtUtc
+CustomTkinter,1,ctk-round-1,boot-round-1,C:\\ctk.exe,100,True,101,80,50,1,8,40,2026-08-02T00:00:00Z
+CustomTkinter,01,ctk-round-01,boot-round-2,C:\\ctk.exe,110,True,102,81,51,1,8,40,2026-08-03T00:00:00Z
+CustomTkinter,+1,ctk-round-plus-1,boot-round-3,C:\\ctk.exe,105,True,103,79,49,1,8,40,2026-08-04T00:00:00Z
+PySide6,1,qt-round-1,boot-round-4,C:\\qt.exe,140,True,201,120,90,1,12,70,2026-08-05T00:00:00Z
+PySide6,2,qt-round-2,boot-round-5,C:\\qt.exe,130,True,202,121,91,1,12,70,2026-08-06T00:00:00Z
+PySide6,3,qt-round-3,boot-round-6,C:\\qt.exe,135,True,203,119,89,1,12,70,2026-08-07T00:00:00Z

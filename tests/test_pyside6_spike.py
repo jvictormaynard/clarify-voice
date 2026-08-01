@@ -66,6 +66,7 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("ConvertTo-ValidMeasurement", aggregate)
         self.assertIn("MainWindowSeen is not true", aggregate)
         self.assertIn("ConvertTo-PositiveInteger", aggregate)
+        self.assertIn("$Row.Round = $round", aggregate)
         for metric in ("WindowProcessId", "ProcessCount", "ThreadCount"):
             self.assertIn(f'@("WindowProcessId", "ProcessCount", "ThreadCount")', aggregate)
             self.assertIn(metric, aggregate)
@@ -73,6 +74,7 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("$resolvedInput.ToLowerInvariant() -eq $destinationKey", aggregate)
         self.assertTrue((FIXTURES / "valid_measurements.csv").is_file())
         self.assertTrue((FIXTURES / "invalid_measurements.csv").is_file())
+        self.assertTrue((FIXTURES / "invalid_round_spellings.csv").is_file())
         for fixture in FIXTURES.glob("invalid_*_process_id.csv"):
             self.assertTrue(fixture.is_file())
         for name in (
@@ -115,6 +117,9 @@ class PySide6SpikeTests(unittest.TestCase):
             failed = run_aggregate([invalid])
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn("MainWindowSeen", failed.stdout + failed.stderr)
+            equivalent_rounds = run_aggregate([FIXTURES / "invalid_round_spellings.csv"])
+            self.assertNotEqual(equivalent_rounds.returncode, 0)
+            self.assertIn("three independent", equivalent_rounds.stdout + equivalent_rounds.stderr)
             for malformed in sorted(FIXTURES.glob("invalid_*_process_id.csv")) + sorted(
                 FIXTURES.glob("invalid_*_process_count.csv")
             ) + sorted(FIXTURES.glob("invalid_*_thread_count.csv")):

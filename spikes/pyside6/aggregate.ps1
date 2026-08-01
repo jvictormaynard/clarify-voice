@@ -62,6 +62,7 @@ function ConvertTo-ValidMeasurement {
     if (-not [int]::TryParse([string]$Row.Round, $integerStyle, $invariant, [ref]$round) -or $round -lt 1) {
         throw "Rejected invalid round in $Path."
     }
+    $Row.Round = $round
     foreach ($metric in @("WindowProcessId", "ProcessCount", "ThreadCount")) {
         [void](ConvertTo-PositiveInteger ([string]$Row.$metric) $metric $Path)
     }
