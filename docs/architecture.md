@@ -31,7 +31,10 @@ run outside that loop so the floating window remains responsive.
 
 The application entry point currently owns:
 
-- configuration and local statistics;
+- provider workflows and UI integration. Configuration and local statistics are
+  accessed through the repository boundary in `repositories.py` (the legacy
+  `APP_CONFIG` mapping remains as a compatibility adapter while extraction is
+  staged);
 - provider discovery, validation, transcription, rewriting, and translation;
 - audio capture and conversion;
 - clipboard and focus safety;
@@ -60,6 +63,21 @@ clipboard safety, workflow state, usage statistics, and geometry calculations.
 Windows UI acceptance still requires a real installed build because mocked
 tests cannot reveal transparency, focus, DPI, or hotkey integration defects.
 
+Repository behavior is covered separately by configuration, migration, and
+statistics tests. Every repository write is JSON-encoded to a same-directory
+temporary file, flushed, and atomically replaced. Unknown fields and malformed
+values are ignored so a damaged or newer settings file cannot prevent startup.
+
+### `repositories.py`
+
+`ConfigRepository` and `UsageStatsRepository` are the application-facing
+interfaces. `LocalConfigRepository` loads the existing flat settings format,
+adds `schema_version`, and applies ordered idempotent migrations. Its typed
+`AppConfig` model groups provider endpoints/model IDs, provider selection, UI
+preferences, and startup settings. `LocalUsageStatsRepository` preserves the
+anonymous event list and its existing `version` marker while also writing an
+explicit `schema_version`.
+
 ## Data ownership
 
 | Data | Location | Content |
@@ -70,6 +88,12 @@ tests cannot reveal transparency, focus, DPI, or hotkey integration defects.
 
 On non-Windows source runs, the equivalent data directory is
 `~/.clarifyvoice`.
+
+For startup configuration, precedence is persisted settings first, then the
+documented environment variables (`*_API_KEY`, `*_BASE_URL`, `*_MODEL`, and
+refinement variables), then built-in defaults. Environment variables therefore
+provide reliable first-run/headless defaults without overwriting a user's saved
+UI choices on later launches.
 
 ## Packaging
 

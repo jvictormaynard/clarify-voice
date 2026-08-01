@@ -20,6 +20,11 @@ from pathlib import Path
 import requests
 
 from desktop_state import WorkflowController
+from repositories import (
+    ApplicationRepositories,
+    LocalConfigRepository,
+    LocalUsageStatsRepository,
+)
 from windows_hotkeys import (
     WM_HOTKEY,
     action_for_hotkey_id,
@@ -111,6 +116,14 @@ DEFAULT_CONFIG = {
     "ui_mode": "prompt",
     "ui_language": "en",
 }
+
+# Persistence is injected through this small boundary.  The legacy mapping
+# below remains available to provider/UI code during the staged extraction,
+# while all file-format and atomic-write details live in repositories.py.
+APP_REPOSITORIES = ApplicationRepositories(
+    config=LocalConfigRepository(CONFIG_PATH, defaults=DEFAULT_CONFIG),
+    usage_stats=LocalUsageStatsRepository(STATS_PATH),
+)
 
 SUPPORTED_LANGUAGES = ("en", "pt", "es", "de", "ru")
 LANGUAGE_FLAGS = {
@@ -269,28 +282,35 @@ def _build_translation_usage_event(provider: str, model: str, source: str,
     return event
 
 
-def _load_usage_events() -> list[dict]:
-    try:
-        payload = json.loads(STATS_PATH.read_text(encoding="utf-8"))
-        events = payload.get("events", []) if isinstance(payload, dict) else []
-        return [event for event in events if isinstance(event, dict)]
-    except (OSError, ValueError, TypeError):
-        return []
+def _storage_repositories(repositories=None):
+    """Use injected repositories, retaining path patchability for old callers."""
+    if repositories is not None:
+        return repositories
+    if Path(getattr(APP_REPOSITORIES.config, "path", CONFIG_PATH)) != Path(CONFIG_PATH):
+        return ApplicationRepositories(
+            config=LocalConfigRepository(CONFIG_PATH, defaults=DEFAULT_CONFIG),
+            usage_stats=LocalUsageStatsRepository(STATS_PATH),
+        )
+    if Path(getattr(APP_REPOSITORIES.usage_stats, "path", STATS_PATH)) != Path(STATS_PATH):
+        return ApplicationRepositories(
+            config=APP_REPOSITORIES.config,
+            usage_stats=LocalUsageStatsRepository(STATS_PATH),
+        )
+    return APP_REPOSITORIES
 
 
-def _record_usage_event(event: dict) -> None:
+def _load_usage_events(repositories=None) -> list[dict]:
+    return _storage_repositories(repositories).usage_stats.load_events()
+
+
+def _record_usage_event(event: dict, repositories=None) -> None:
     """Persist anonymous usage metadata; transcript contents are never stored."""
     with _STATS_LOCK:
-        events = _load_usage_events()
-        events.append(event)
-        temp_path = STATS_PATH.with_suffix(".tmp")
-        temp_path.write_text(json.dumps({"version": 1, "events": events}, indent=2),
-            encoding="utf-8")
-        temp_path.replace(STATS_PATH)
+        _storage_repositories(repositories).usage_stats.append(event)
 
 
-def _usage_summary(events=None, now=None) -> dict:
-    events = _load_usage_events() if events is None else list(events)
+def _usage_summary(events=None, now=None, repositories=None) -> dict:
+    events = (_load_usage_events(repositories) if events is None else list(events))
     now = time.time() if now is None else float(now)
     recordings = [event for event in events if event.get("type") == "recording"]
     model_counts = {}
@@ -341,14 +361,8 @@ def _canonical_audio_model(provider, model):
     return AUDIO_MODEL_ALIASES.get((provider, value.casefold()), value)
 
 
-def _load_app_config():
-    config = DEFAULT_CONFIG.copy()
-    try:
-        stored = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        if isinstance(stored, dict):
-            config.update({key: value for key, value in stored.items() if key in config})
-    except (OSError, ValueError, TypeError):
-        pass
+def _load_app_config(repositories=None):
+    config = _storage_repositories(repositories).config.load().to_legacy_mapping()
     if config["transcription_provider"] not in ("openai", "gemini", "groq"):
         config["transcription_provider"] = "gemini"
     if config["refinement_provider"] not in ("openai", "gemini", "groq"):
@@ -373,10 +387,8 @@ def _load_app_config():
 APP_CONFIG = _load_app_config()
 
 
-def _save_app_config():
-    temp_path = CONFIG_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(APP_CONFIG, indent=2), encoding="utf-8")
-    temp_path.replace(CONFIG_PATH)
+def _save_app_config(repositories=None):
+    _storage_repositories(repositories).config.save(APP_CONFIG)
 
 
 def _autostart_command(executable=None):
@@ -3299,8 +3311,9 @@ class App(ctk.CTk):
         else:
             self._workflow.finish("translation")
 
-    def __init__(self, start_hidden=False):
+    def __init__(self, start_hidden=False, repositories=None):
         super().__init__()
+        self.repositories = repositories or APP_REPOSITORIES
         self._clarify_visibility_target = not start_hidden
         if start_hidden:
             self.withdraw()
@@ -4020,7 +4033,11 @@ class App(ctk.CTk):
         APP_CONFIG["ui_mode"] = self.mode
         APP_CONFIG["ui_language"] = self.lang
         try:
-            _save_app_config()
+            repositories = getattr(self, "repositories", None)
+            if repositories is None or repositories is APP_REPOSITORIES:
+                _save_app_config()
+            else:
+                _save_app_config(repositories)
         except OSError:
             pass
 
@@ -4385,7 +4402,8 @@ class App(ctk.CTk):
                 _record_usage_event(_build_translation_usage_event(
                     str(APP_CONFIG.get("refinement_provider", "")),
                     str(APP_CONFIG.get("refinement_model", "")),
-                    selected_text, translated, target_language))
+                    selected_text, translated, target_language),
+                    getattr(self, "repositories", None))
             except OSError:
                 pass
 
@@ -4489,7 +4507,7 @@ class App(ctk.CTk):
                 _record_usage_event(_build_rewrite_usage_event(
                     str(APP_CONFIG.get("refinement_provider", "")),
                     str(APP_CONFIG.get("refinement_model", "")),
-                    selected_text, rewritten))
+                    selected_text, rewritten), getattr(self, "repositories", None))
             except OSError:
                 pass
 
@@ -4576,7 +4594,8 @@ class App(ctk.CTk):
             if text and not text.startswith("[Error"):
                 try:
                     _record_usage_event(_build_recording_usage_event(
-                        getattr(self, "_recording_usage", {}), elapsed, text))
+                        getattr(self, "_recording_usage", {}), elapsed, text),
+                        getattr(self, "repositories", None))
                 except OSError:
                     pass
                 self.after(0, lambda: self._on_result(text))
@@ -4893,7 +4912,7 @@ class App(ctk.CTk):
                     drafts["groq"]["text_model"] or "llama-3.3-70b-versatile"),
             })
             try:
-                _save_app_config()
+                _save_app_config(self.repositories)
                 _fade_out_window(win, win.destroy)
             except OSError as error:
                 hint.configure(text=f"Could not save settings: {error}", text_color="#ef4444")
@@ -5306,7 +5325,7 @@ class App(ctk.CTk):
                     if models and current_model not in models:
                         APP_CONFIG[model_key] = models[0]
                     try:
-                        _save_app_config()
+                        _save_app_config(self.repositories)
                     except OSError as exc:
                         provider_state[provider].update(status="not_configured", error=str(exc))
                 show_page("provider_detail", provider)
@@ -5333,7 +5352,7 @@ class App(ctk.CTk):
                     status="not_configured", models=[], error="",
                     generation=provider_state[provider]["generation"] + 1)
                 try:
-                    _save_app_config()
+                    _save_app_config(self.repositories)
                 except OSError:
                     pass
                 ensure_valid_selection()
@@ -5351,7 +5370,7 @@ class App(ctk.CTk):
                 APP_CONFIG["transcription_provider"] = selected["provider"]
                 APP_CONFIG[model_config_keys[selected["provider"]]] = selected["model"]
             try:
-                _save_app_config()
+                _save_app_config(self.repositories)
                 _fade_out_window(win, win.destroy)
             except OSError:
                 pass
@@ -5836,7 +5855,7 @@ class App(ctk.CTk):
         statistics_cost_note.pack(fill="x")
 
         def refresh_statistics():
-            summary = _usage_summary()
+            summary = _usage_summary(repositories=self.repositories)
             metric_values["recordings"].configure(text=str(summary["recordings"]))
             metric_values["duration"].configure(
                 text=_format_duration(summary["total_seconds"]))
@@ -6089,7 +6108,7 @@ class App(ctk.CTk):
                             if models and current_model not in models:
                                 APP_CONFIG[model_keys[provider]] = models[0]
                             try:
-                                _save_app_config()
+                                _save_app_config(self.repositories)
                             except OSError as exc:
                                 provider_state.update(
                                     status="not_configured", models=[],
@@ -6187,7 +6206,7 @@ class App(ctk.CTk):
                 APP_CONFIG[f"{provider_id}_api_key"] = ""
                 APP_CONFIG[f"{provider_id}_base_url"] = default_bases[provider_id]
                 try:
-                    _save_app_config()
+                    _save_app_config(self.repositories)
                 except OSError:
                     pass
                 refresh_provider_ui(provider_id)
@@ -6304,7 +6323,7 @@ class App(ctk.CTk):
                 active_text_options(), model_keys)
             try:
                 _set_autostart(bool(autostart_switch.get()))
-                _save_app_config()
+                _save_app_config(self.repositories)
             except OSError:
                 return
             saved_settings.clear()

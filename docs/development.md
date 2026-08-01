@@ -33,15 +33,19 @@ Run the same core checks used in CI:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q app.py desktop_state.py windows_hotkeys.py tests
+.\.venv\Scripts\python.exe -m compileall -q app.py repositories.py desktop_state.py windows_hotkeys.py tests
 ```
 
 From Linux or WSL with the dependencies installed:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q app.py desktop_state.py windows_hotkeys.py tests
+python3 -m compileall -q app.py repositories.py desktop_state.py windows_hotkeys.py tests
 ```
+
+Repository-specific tests live in `tests/test_repositories.py` and are split
+into configuration, migration, and usage-statistics cases. They cover legacy
+file loading, future/unknown fields, idempotent migrations, and atomic writes.
 
 ## Build
 
