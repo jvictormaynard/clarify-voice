@@ -151,6 +151,12 @@ Each recording reserves a unique temporary WAV owned by its
 then removes it on success, provider or encoding failure, cancellation, or
 application exit. SoX is stopped before cleanup, and Windows processes are
 attached to a Job Object so force-closing the app cannot orphan the recorder.
+Stale SoX discovery runs during recorder initialization, before a hotkey can
+start fresh capture. If shutdown happens during an upload, the session keeps
+its ownership until the provider worker releases the file, then performs a
+final bounded cleanup retry. Escape cancellation likewise retains ownership
+until recorder shutdown completes, preventing immediate restart from reusing
+the recorder concurrently.
 
 ## Packaging
 

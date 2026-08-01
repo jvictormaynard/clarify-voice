@@ -1966,6 +1966,9 @@ class MicrophoneUnavailableError(RecordingError):
     """Raised when Windows has no active microphone input to record."""
 
 
+SESSION_SHUTDOWN_JOIN_SECONDS = 2.0
+
+
 def _new_recording_path() -> Path:
     """Reserve a unique, app-owned path without leaving an empty WAV behind."""
     descriptor, raw_path = tempfile.mkstemp(
@@ -2015,10 +2018,8 @@ class Recorder:
             self._cancel_requested = False
             if cancel_event is not None and cancel_event.is_set():
                 raise RecordingCancelledError("Recording cancelled before startup")
-            # A forced app update/restart can leave SoX alive after its parent
-            # exits. Search by this session's unique path before starting.
-            if audio_path != Path(AUDIO_PATH):
-                self._stop_stale_windows_recorders(audio_path)
+            # Stale-process discovery runs during Recorder initialization, not
+            # here: a synchronous WMI query must never delay fresh capture.
             self.stop()
             if cancel_event is not None and cancel_event.is_set():
                 raise RecordingCancelledError("Recording cancelled during startup")
@@ -2184,15 +2185,27 @@ class Recorder:
         if not IS_WIN:
             return
         if audio_path is None:
-            audio_path = AUDIO_PATH
-        target = str(audio_path).replace("'", "''")
-        script = (
-            f"$target = '{target}'; "
-            "Get-CimInstance Win32_Process | "
-            "Where-Object { $_.Name -ieq 'sox.exe' -and "
-            "$_.CommandLine -like ('*' + $target + '*') } | "
-            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
-            "-ErrorAction SilentlyContinue }")
+            targets = [AUDIO_PATH, DATA_DIR / "clarifyvoice-recording-"]
+            target_literals = ", ".join(
+                "'" + str(target).replace("'", "''") + "'"
+                for target in targets)
+            script = (
+                f"$targets = @({target_literals}); "
+                "Get-CimInstance Win32_Process | "
+                "Where-Object { $commandLine = $_.CommandLine; $_.Name -ieq 'sox.exe' -and "
+                "(($targets | Where-Object { $commandLine -like "
+                "('*' + $_ + '*') }).Count -gt 0) } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                "-ErrorAction SilentlyContinue }")
+        else:
+            target = str(audio_path).replace("'", "''")
+            script = (
+                f"$target = '{target}'; "
+                "Get-CimInstance Win32_Process | "
+                "Where-Object { $_.Name -ieq 'sox.exe' -and "
+                "$_.CommandLine -like ('*' + $target + '*') } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                "-ErrorAction SilentlyContinue }")
         try:
             subprocess.run(
                 ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -2238,6 +2251,12 @@ class RecordingSession:
         self.start_finished = threading.Event()
         self.cancel_event = threading.Event()
         self._lock = threading.RLock()
+        self._workers = set()
+        self._workers_lock = threading.RLock()
+        self._cleanup_lock = threading.Lock()
+        self._cleanup_done = threading.Event()
+        self.shutdown_complete = threading.Event()
+        self._shutdown_watcher_started = False
 
     @property
     def terminal(self):
@@ -2270,6 +2289,61 @@ class RecordingSession:
         finally:
             self.start_finished.set()
 
+    def attach_worker(self, worker):
+        with self._workers_lock:
+            self._workers.add(worker)
+
+    def detach_worker(self, worker):
+        with self._workers_lock:
+            self._workers.discard(worker)
+        self._complete_shutdown_if_ready()
+
+    def _active_workers(self):
+        with self._workers_lock:
+            return tuple(self._workers)
+
+    def _active_workers_except_current(self):
+        current = threading.current_thread()
+        return tuple(worker for worker in self._active_workers() if worker is not current)
+
+    def _cleanup_once(self):
+        if self._cleanup_done.is_set():
+            return True
+        with self._cleanup_lock:
+            if self._cleanup_done.is_set():
+                return True
+            try:
+                Recorder._safe_delete(self.audio_path, strict=True)
+            except RecordingCleanupError as error:
+                self.cleanup_error = error
+                if self.error is None:
+                    self.error = error
+                return False
+            self._cleanup_done.set()
+            return True
+
+    def _complete_shutdown_if_ready(self):
+        if (self.terminal and not self._active_workers()
+                and (self._cleanup_done.is_set() or self.cleanup_error is not None)):
+            self.shutdown_complete.set()
+
+    def _finish_shutdown(self):
+        for worker in self._active_workers():
+            if worker.ident is not None:
+                worker.join()
+        self._cleanup_once()
+        self._complete_shutdown_if_ready()
+
+    def _ensure_shutdown_watcher(self):
+        with self._workers_lock:
+            if self._shutdown_watcher_started:
+                return
+            self._shutdown_watcher_started = True
+        threading.Thread(target=self._finish_shutdown, daemon=True).start()
+
+    def wait_for_shutdown(self, timeout=None):
+        return self.shutdown_complete.wait(timeout)
+
     def begin_processing(self):
         with self._lock:
             if self.state != "recording":
@@ -2285,14 +2359,22 @@ class RecordingSession:
 
     def cancel(self):
         with self._lock:
-            if self.terminal:
+            if self.terminal and self.shutdown_complete.is_set():
                 return False
             self.cancel_event.set()
         try:
             self.recorder.cancel()
         except Exception as error:
             self.error = error
-        self.finalize("failed" if self.error else "cancelled", self.error)
+        with self._lock:
+            if not self.terminal:
+                self.state = "failed" if self.error else "cancelled"
+        if self._active_workers_except_current():
+            self._ensure_shutdown_watcher()
+        else:
+            if not self._cleanup_once() and self.state == "cancelled":
+                self.state = "failed"
+            self._complete_shutdown_if_ready()
         return True
 
     def finalize(self, outcome, error=None):
@@ -2300,17 +2382,21 @@ class RecordingSession:
         if outcome not in self.TERMINAL_STATES:
             raise RecordingError(f"Invalid terminal state {outcome}")
         with self._lock:
-            if self.terminal:
+            if self.terminal and self._cleanup_done.is_set():
                 return False
-            try:
-                Recorder._safe_delete(self.audio_path, strict=True)
-            except RecordingCleanupError as cleanup_error:
-                self.cleanup_error = cleanup_error
-                error = cleanup_error
-                outcome = "failed"
-            self.error = error
-            self.state = outcome
+            if not self.terminal:
+                self.error = error
+                self.state = outcome
+        if self._active_workers_except_current():
+            self._ensure_shutdown_watcher()
             return True
+        cleaned = self._cleanup_once()
+        if not cleaned and outcome != "failed":
+            with self._lock:
+                if not self.terminal or self.state == outcome:
+                    self.state = "failed"
+        self._complete_shutdown_if_ready()
+        return True
 
 # ---------------------------------------------------------------------------
 # Clipboard
@@ -3656,24 +3742,30 @@ class App(ctk.CTk):
         """Stop and clean an owned recording before Tk tears down the app."""
         if not getattr(self, "_recording_shutdown", False):
             self._recording_shutdown = True
-            session = getattr(self, "_recording_session", None)
-            if session is not None:
-                session.cancel()
-                self._recording_session = None
-            else:
-                recorder = getattr(self, "recorder", None)
-                if recorder is not None:
-                    try:
-                        recorder.cancel()
-                    except Exception:
-                        pass
-                    try:
-                        audio_path = getattr(recorder, "audio_path", None)
-                        if audio_path is not None:
-                            Recorder._safe_delete(Path(audio_path))
-                    except OSError:
-                        pass
+            self._shutdown_recording(SESSION_SHUTDOWN_JOIN_SECONDS)
         return super().destroy()
+
+    def _shutdown_recording(self, timeout=None):
+        """Stop the active session and leave a watcher for late upload cleanup."""
+        session = getattr(self, "_recording_session", None)
+        if session is not None:
+            session.cancel()
+            session.wait_for_shutdown(timeout)
+            if getattr(self, "_recording_session", None) is session:
+                self._recording_session = None
+            return
+        recorder = getattr(self, "recorder", None)
+        if recorder is not None:
+            try:
+                recorder.cancel()
+            except Exception:
+                pass
+            try:
+                audio_path = getattr(recorder, "audio_path", None)
+                if audio_path is not None:
+                    Recorder._safe_delete(Path(audio_path))
+            except OSError:
+                pass
 
     def _show_if_hidden(self):
         """Reveal an Alt+R-hidden app when another launch requests activation."""
@@ -4225,9 +4317,13 @@ class App(ctk.CTk):
         if self.app_state == "recording":
             self._set_state("ready")
             session = getattr(self, "_recording_session", None)
-            self._recording_session = None
             if session is not None:
-                threading.Thread(target=session.cancel, daemon=True).start()
+                def cancel_session():
+                    session.cancel()
+                    session.wait_for_shutdown()
+                    if getattr(self, "_recording_session", None) is session:
+                        self._recording_session = None
+                threading.Thread(target=cancel_session, daemon=True).start()
             else:
                 threading.Thread(target=self.recorder.cancel, daemon=True).start()
 
@@ -4801,24 +4897,29 @@ class App(ctk.CTk):
                 self, "_session_is_current",
                 lambda candidate: getattr(self, "_recording_session", None) is candidate)
             try:
-                session.start()
-            except MicrophoneUnavailableError as error:
-                session.finalize("failed", error)
-                if is_current(session):
-                    self.after(0, lambda: self._show_microphone_unavailable(session))
-            except RecordingCancelledError as error:
-                session.finalize("cancelled", error)
-            except Exception as error:
-                session.finalize("failed", error)
-                if is_current(session):
-                    finisher = getattr(self, "_finish_recording_session", None)
-                    if finisher is not None:
-                        self.after(0, lambda: finisher(session, error=error))
-                    else:
-                        self._recording_session = None
-                        self.after(0, lambda: self._set_state(
-                            "ready", f"Err: {error}"))
-        threading.Thread(target=start, daemon=True).start()
+                try:
+                    session.start()
+                except MicrophoneUnavailableError as error:
+                    session.finalize("failed", error)
+                    if is_current(session):
+                        self.after(0, lambda: self._show_microphone_unavailable(session))
+                except RecordingCancelledError as error:
+                    session.finalize("cancelled", error)
+                except Exception as error:
+                    session.finalize("failed", error)
+                    if is_current(session):
+                        finisher = getattr(self, "_finish_recording_session", None)
+                        if finisher is not None:
+                            self.after(0, lambda: finisher(session, error=error))
+                        else:
+                            self._recording_session = None
+                            self.after(0, lambda: self._set_state(
+                                "ready", f"Err: {error}"))
+            finally:
+                session.detach_worker(threading.current_thread())
+        worker = threading.Thread(target=start, daemon=True)
+        session.attach_worker(worker)
+        worker.start()
 
     def _show_microphone_unavailable(self, session=None):
         # Ignore a delayed recorder failure if the user already stopped it.
@@ -4916,7 +5017,11 @@ class App(ctk.CTk):
                         self._recording_session = None
                         self.after(0, lambda: self._set_state(
                             "ready", self._t("error")))
-        threading.Thread(target=run, daemon=True).start()
+            finally:
+                session.detach_worker(threading.current_thread())
+        worker = threading.Thread(target=run, daemon=True)
+        session.attach_worker(worker)
+        worker.start()
 
     def _on_result(self, text):
         target_window = getattr(self, "_recording_target_window", None)

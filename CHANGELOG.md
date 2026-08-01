@@ -10,6 +10,8 @@ Notable user-facing changes are documented here. This project follows
 - Gave each recording an explicit session owner with unique temporary audio,
   bounded SoX shutdown, cancellation, stale-worker protection, and cleanup on
   success, failure, cancellation, and application exit
+- Moved stale SoX discovery out of the first-audio hot path and coordinated
+  shutdown with active provider uploads before the final cleanup retry
 
 ## [0.1.2] - 2026-07-31
 
