@@ -433,24 +433,52 @@ def _set_autostart(enabled: bool, registry=None):
                 pass
 
 
-def _is_autostart_enabled(registry=None) -> bool:
+def _autostart_registry_state(registry=None):
+    """Return ``(exists, value, type)`` for the current Run entry."""
     if not IS_WIN:
-        return False
+        return False, None, None
     if registry is None:
         import winreg as registry
     path = r"Software\Microsoft\Windows\CurrentVersion\Run"
     try:
         with registry.OpenKey(registry.HKEY_CURRENT_USER, path) as key:
-            value, _kind = registry.QueryValueEx(key, "ClarifyVoice")
-        return bool(str(value).strip())
+            value, kind = registry.QueryValueEx(key, "ClarifyVoice")
+        return True, value, kind
     except OSError:
-        return False
+        return False, None, None
 
 
-def _persist_autostart_preference(enabled: bool, repositories=None, registry=None) -> None:
+def _restore_autostart_registry_state(state, registry=None):
+    """Restore a previously captured Run value, including its Registry type."""
+    if not IS_WIN:
+        return
+    if registry is None:
+        import winreg as registry
+    exists, value, kind = state
+    path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    with registry.CreateKey(registry.HKEY_CURRENT_USER, path) as key:
+        if exists:
+            registry.SetValueEx(key, "ClarifyVoice", 0, kind, value)
+        else:
+            try:
+                registry.DeleteValue(key, "ClarifyVoice")
+            except FileNotFoundError:
+                pass
+
+
+def _is_autostart_enabled(registry=None) -> bool:
+    exists, value, _kind = _autostart_registry_state(registry)
+    return exists and bool(str(value).strip())
+
+
+def _persist_autostart_preference(
+        enabled: bool, repositories=None, registry=None,
+        previous_config=None, previous_registry_state=None) -> None:
     """Keep the Windows startup entry and persisted preference in sync."""
-    previous_config = APP_CONFIG.copy()
-    previous_registry = _is_autostart_enabled(registry)
+    previous_config = APP_CONFIG.copy() if previous_config is None else dict(previous_config)
+    previous_registry_state = (
+        _autostart_registry_state(registry)
+        if previous_registry_state is None else previous_registry_state)
     selected = bool(enabled)
     try:
         APP_CONFIG["autostart"] = selected
@@ -460,7 +488,7 @@ def _persist_autostart_preference(enabled: bool, repositories=None, registry=Non
         APP_CONFIG.clear()
         APP_CONFIG.update(previous_config)
         try:
-            _set_autostart(previous_registry, registry)
+            _restore_autostart_registry_state(previous_registry_state, registry)
         except OSError:
             pass
         raise
@@ -478,6 +506,20 @@ def _apply_selected_models(selected, selected_refinement, audio_options,
     if text_choice in text_options:
         APP_CONFIG["refinement_provider"] = selected_refinement["provider"]
         APP_CONFIG["refinement_model"] = selected_refinement["model"]
+
+
+def _apply_settings_transaction(
+        selected, selected_refinement, audio_options, text_options, model_keys,
+        autostart_enabled, repositories=None, registry=None):
+    """Apply model and startup selections as one rollback-capable operation."""
+    previous_config = APP_CONFIG.copy()
+    previous_registry_state = _autostart_registry_state(registry)
+    _apply_selected_models(
+        selected, selected_refinement, audio_options, text_options, model_keys)
+    _persist_autostart_preference(
+        autostart_enabled, repositories, registry,
+        previous_config=previous_config,
+        previous_registry_state=previous_registry_state)
 
 
 def _enable_windows_dpi_awareness():
@@ -6353,11 +6395,10 @@ class App(ctk.CTk):
         def apply_settings():
             if apply_feedback_job["active"]:
                 return
-            _apply_selected_models(
-                selected, selected_refinement, active_options(),
-                active_text_options(), model_keys)
             try:
-                _persist_autostart_preference(
+                _apply_settings_transaction(
+                    selected, selected_refinement, active_options(),
+                    active_text_options(), model_keys,
                     bool(autostart_switch.get()), self.repositories)
             except OSError:
                 return

@@ -140,6 +140,7 @@ class ConfigurationRepositoryTests(unittest.TestCase):
 
             def __init__(self):
                 self.values = {}
+                self.types = {}
 
             def CreateKey(self, *_args):
                 return Key(self)
@@ -149,11 +150,12 @@ class ConfigurationRepositoryTests(unittest.TestCase):
 
             def SetValueEx(self, _key, name, _reserved, _kind, value):
                 self.values[name] = value
+                self.types[name] = _kind
 
             def QueryValueEx(self, _key, name):
                 if name not in self.values:
                     raise FileNotFoundError(name)
-                return self.values[name], self.REG_SZ
+                return self.values[name], self.types.get(name, self.REG_SZ)
 
             def DeleteValue(self, _key, name):
                 if name not in self.values:
@@ -199,6 +201,59 @@ class ConfigurationRepositoryTests(unittest.TestCase):
                 self.assertTrue(app.APP_CONFIG["autostart"])
                 self.assertIn("ClarifyVoice", registry.values)
                 self.assertTrue(config_repository.load().startup.autostart)
+
+                custom_command = r"C:\Legacy\ClarifyVoice.exe --custom-start"
+                registry.values["ClarifyVoice"] = custom_command
+                registry.types["ClarifyVoice"] = 42
+                with patch.object(app, "IS_WIN", True):
+                    with self.assertRaises(OSError):
+                        app._persist_autostart_preference(False, failing_bundle, registry)
+                self.assertEqual(registry.values["ClarifyVoice"], custom_command)
+                self.assertEqual(registry.types["ClarifyVoice"], 42)
+            finally:
+                app.APP_CONFIG.clear()
+                app.APP_CONFIG.update(original)
+
+    def test_settings_transaction_rolls_back_model_changes_on_save_failure(self):
+        import app
+        from repositories import ApplicationRepositories
+
+        class FailingConfigRepository(LocalConfigRepository):
+            def save(self, _config):
+                raise OSError("simulated config write failure")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            seed = LocalConfigRepository(path)
+            seed.save({
+                "transcription_provider": "gemini",
+                "gemini_model": "gemini-2.5-flash",
+                "refinement_provider": "openai",
+                "refinement_model": "gpt-4o-mini",
+                "autostart": False,
+            })
+            repository = FailingConfigRepository(path)
+            bundle = ApplicationRepositories(
+                config=repository,
+                usage_stats=LocalUsageStatsRepository(Path(directory) / "stats.json"),
+            )
+            original = app.APP_CONFIG.copy()
+            try:
+                app._activate_repositories(bundle)
+                before = app.APP_CONFIG.copy()
+                with self.assertRaises(OSError):
+                    app._apply_settings_transaction(
+                        {"provider": "openai", "model": "whisper-1"},
+                        {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+                        [("openai", "whisper-1")],
+                        [("groq", "llama-3.3-70b-versatile")],
+                        {"openai": "openai_audio_model"},
+                        False,
+                        bundle,
+                    )
+                self.assertEqual(app.APP_CONFIG, before)
+                self.assertEqual(seed.load().selection.transcription_provider, "gemini")
+                self.assertEqual(seed.load().gemini.audio_model, "gemini-2.5-flash")
             finally:
                 app.APP_CONFIG.clear()
                 app.APP_CONFIG.update(original)
