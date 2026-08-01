@@ -100,6 +100,9 @@ class RepositorySafetyTests(unittest.TestCase):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn("[tool.ruff]", pyproject)
         self.assertIn("[tool.mypy]", pyproject)
+        checker = ROOT / "scripts" / "check_dependency_lock.py"
+        self.assertTrue(checker.is_file())
+        self.assertNotIn("--check", checker.read_text(encoding="utf-8"))
 
     def test_setup_and_workflows_use_the_shared_lock(self):
         setup = (ROOT / "scripts" / "setup.ps1").read_text(encoding="utf-8")
@@ -115,6 +118,8 @@ class RepositorySafetyTests(unittest.TestCase):
             )
             self.assertIn("requirements-lock.txt", workflow)
             self.assertIn("-c requirements-lock.txt", workflow)
+            self.assertIn("scripts/check_dependency_lock.py", workflow)
+            self.assertNotIn("pip-compile --check", workflow)
             self.assertRegex(workflow, r"uses: actions/[^@]+@[0-9a-f]{40}")
 
     def test_release_has_sbom_and_provenance_contract(self):
