@@ -2321,6 +2321,11 @@ def _restore_windows_clipboard(snapshot):
     return _WINDOWS_CLIPBOARD.restore(snapshot)
 
 
+def _restore_windows_clipboard_if_owned(snapshot, expected_sequence, expected_text):
+    return _WINDOWS_CLIPBOARD.restore_if_owned(
+        snapshot, expected_sequence, expected_text)
+
+
 def _restore_clipboard_snapshot_if_owned(snapshot, expected_sequence, expected_text):
     """Restore only if our selection-copy still owns the clipboard."""
     if snapshot is None:
@@ -2376,19 +2381,15 @@ def _paste_generated_text(text, *, should_paste=True,
 
         time.sleep(restore_delay)
         try:
-            still_owned = (
-                _clipboard_sequence_number() == written_sequence
-                and _get_windows_clipboard_text() == str(text))
+            restored = _restore_windows_clipboard_if_owned(
+                previous, written_sequence, str(text))
         except OSError:
-            still_owned = False
-        # The sequence must be sampled immediately after writing, not after
-        # the delay.  Use the result text as a second guard against contention.
-        if still_owned and previous is not None and previous.restorable:
-            try:
-                _restore_windows_clipboard(previous)
-            except OSError:
-                pass
-        return not (previous is not None and not previous.restorable)
+            restored = False
+        if not IS_WIN and previous is None:
+            # Selected-text flows are Windows-only; retain the historical
+            # test/fallback semantics for non-Windows callers.
+            return True
+        return bool(restored)
 
 
 def _send_key_chord(chord):

@@ -43,6 +43,13 @@ class FakeClipboard:
         self.state = ClipboardSnapshot(snapshot.formats, self.sequence_value)
         return True
 
+    def restore_if_owned(self, snapshot, expected_sequence, expected_text):
+        if (not snapshot.restorable
+                or self.sequence() != expected_sequence
+                or self.text() != expected_text):
+            return False
+        return self.restore(snapshot)
+
     def external_write(self, text):
         self.write_text(text)
 
@@ -70,7 +77,7 @@ class ClipboardPasteTests(unittest.TestCase):
         with patch.object(app, "_WINDOWS_CLIPBOARD", self.clipboard), \
                 patch.object(app, "_send_key_chord", return_value=True), \
                 patch.object(app.time, "sleep", side_effect=user_write):
-            self.assertTrue(app._paste_generated_text("result"))
+            self.assertFalse(app._paste_generated_text("result"))
 
         self.assertEqual(self.clipboard.text(), "user wins")
 
@@ -99,6 +106,31 @@ class ClipboardPasteTests(unittest.TestCase):
             self.assertFalse(app._paste_generated_text("result"))
 
         self.assertEqual(self.clipboard.text(), "result")
+
+    def test_new_clipboard_write_wins_during_atomic_compare_and_restore(self):
+        clipboard = _AtomicRaceClipboard()
+        result = []
+
+        def paste():
+            result.append(app._paste_generated_text("result"))
+
+        with patch.object(app, "_WINDOWS_CLIPBOARD", clipboard), \
+                patch.object(app, "_send_key_chord", return_value=True), \
+                patch.object(app.time, "sleep"):
+            worker = threading.Thread(target=paste)
+            worker.start()
+            self.assertTrue(clipboard.checked.wait(timeout=1))
+
+            writer = threading.Thread(
+                target=clipboard.external_write, args=("new user text",))
+            writer.start()
+            self.assertTrue(clipboard.writer_started.wait(timeout=1))
+            clipboard.allow_restore.set()
+            worker.join(timeout=1)
+            writer.join(timeout=1)
+
+        self.assertEqual(result, [True])
+        self.assertEqual(clipboard.text(), "new user text")
 
     def test_overlapping_operations_are_serialized(self):
         entered = threading.Event()
@@ -190,3 +222,27 @@ class _EnumeratingAdapter(WindowsClipboardAdapter):
 
     def sequence(self):
         return 1
+
+
+class _AtomicRaceClipboard(FakeClipboard):
+    def __init__(self):
+        super().__init__()
+        self.lock = threading.Lock()
+        self.checked = threading.Event()
+        self.allow_restore = threading.Event()
+        self.writer_started = threading.Event()
+
+    def restore_if_owned(self, snapshot, expected_sequence, expected_text):
+        with self.lock:
+            if (not snapshot.restorable
+                    or self.sequence() != expected_sequence
+                    or self.text() != expected_text):
+                return False
+            self.checked.set()
+            self.allow_restore.wait(timeout=1)
+            return self.restore(snapshot)
+
+    def external_write(self, text):
+        self.writer_started.set()
+        with self.lock:
+            self.write_text(text)
