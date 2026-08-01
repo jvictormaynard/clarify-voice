@@ -987,9 +987,10 @@ class RewriteWorkflowTests(unittest.TestCase):
     @patch("app._set_windows_clipboard_text")
     @patch("app.rewrite_selected_text", return_value="[Error: failed]")
     @patch("app._copy_selected_text", return_value="Original")
+    @patch("app._snapshot_windows_clipboard", return_value=None)
     @patch("app._get_windows_clipboard_text", return_value="previous")
-    def test_provider_failure_restores_text_clipboard(self, _clipboard, _copy,
-            _rewrite, set_clipboard):
+    def test_provider_failure_restores_text_clipboard(self, _clipboard, _snapshot,
+            _copy, _rewrite, set_clipboard):
         harness = self.Harness()
         app.App._rewrite_selection_worker(harness, 77)
 
@@ -999,8 +1000,9 @@ class RewriteWorkflowTests(unittest.TestCase):
     @patch("app.is_alt_pressed", new=lambda: False)
     @patch("app._set_windows_clipboard_text")
     @patch("app._copy_selected_text", return_value="  \r\n")
+    @patch("app._snapshot_windows_clipboard", return_value=None)
     @patch("app._get_windows_clipboard_text", return_value="previous")
-    def test_empty_selection_skips_ai_and_restores_clipboard(self, _clipboard,
+    def test_empty_selection_skips_ai_and_restores_clipboard(self, _clipboard, _snapshot,
             _copy, set_clipboard):
         harness = self.Harness()
         with patch("app.rewrite_selected_text") as rewrite:
