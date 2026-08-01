@@ -2366,7 +2366,7 @@ def _paste_generated_text(text, *, should_paste=True,
         if not should_paste:
             return False
         try:
-            paste_result = _send_key_chord("ctrl+v")
+            paste_result = _send_key_chord("ctrl+v", expected_text=str(text))
         except Exception:
             return False
         # A native key-dispatch helper can report that it injected events,
@@ -2389,10 +2389,10 @@ def _paste_generated_text(text, *, should_paste=True,
         return bool(restored)
 
 
-def _send_key_chord(chord):
+def _send_key_chord(chord, *, expected_text=None):
     if IS_WIN and chord in ("ctrl+c", "ctrl+v"):
         if chord == "ctrl+v":
-            return paste_focused_control()
+            return paste_focused_control(expected_text=expected_text)
         return send_ctrl_key(chord[-1])
     else:
         return keyboard.send(chord)

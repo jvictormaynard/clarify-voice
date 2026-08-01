@@ -242,13 +242,18 @@ class WindowsClipboardAdapter:
         try:
             if self.sequence() != expected_sequence:
                 return False
-            data = self._read_global_memory(user32.GetClipboardData(CF_UNICODETEXT))
+            format_id = CF_UNICODETEXT
+            data = self._read_global_memory(user32.GetClipboardData(format_id))
             if data is None:
-                return False
-            current_text = ClipboardSnapshot(
-                (ClipboardFormat(CF_UNICODETEXT, data),), 0).text
-            if current_text != expected_text:
-                return False
+                format_id = CF_TEXT
+                data = self._read_global_memory(user32.GetClipboardData(format_id))
+            if expected_text is not None:
+                if data is None:
+                    return False
+                current_text = ClipboardSnapshot(
+                    (ClipboardFormat(format_id, data),), 0).text
+                if current_text != expected_text:
+                    return False
             return self._restore_open_clipboard(snapshot, user32)
         finally:
             user32.CloseClipboard()

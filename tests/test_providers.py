@@ -905,7 +905,7 @@ class RewriteWorkflowTests(unittest.TestCase):
         app.App._rewrite_selection_worker(harness, 77)
 
         set_clipboard.assert_called_once_with("Texto revisado.")
-        send_key.assert_called_once_with("ctrl+v")
+        send_key.assert_called_once_with("ctrl+v", expected_text="Texto revisado.")
         record_usage.assert_called_once()
         self.assertEqual(harness.finished, [("Texto revisado.", None)])
 
@@ -969,7 +969,7 @@ class RewriteWorkflowTests(unittest.TestCase):
 
         translate.assert_called_once_with("Hello world", "de")
         set_clipboard.assert_called_once_with("Hallo Welt")
-        send_key.assert_called_once_with("ctrl+v")
+        send_key.assert_called_once_with("ctrl+v", expected_text="Hallo Welt")
         record_usage.assert_called_once()
         event = record_usage.call_args.args[0]
         self.assertEqual(event["type"], "translation")

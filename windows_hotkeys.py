@@ -8,6 +8,9 @@ from ctypes import wintypes
 
 WM_HOTKEY = 0x0312
 WM_PASTE = 0x0302
+WM_GETTEXT = 0x000D
+WM_GETTEXTLENGTH = 0x000E
+EM_GETSEL = 0x00B0
 SMTO_BLOCK = 0x0001
 SMTO_ABORTIFHUNG = 0x0002
 MOD_ALT = 0x0001
@@ -31,8 +34,8 @@ _CONFIRMABLE_PASTE_CLASSES = frozenset({
     "RICHEDIT50W",
     "RICHEDIT60A",
     "RICHEDIT60W",
-    "Scintilla",
 })
+_MAX_CONFIRMABLE_CONTROL_TEXT = 4 * 1024 * 1024
 
 
 class _GUIThreadInfo(ctypes.Structure):
@@ -136,32 +139,83 @@ def _window_class_name(user32, hwnd) -> str | None:
     return buffer.value if length else None
 
 
-def paste_focused_control(timeout_ms: int = 250, *, user32=None) -> bool | None:
+def _control_state(user32, hwnd):
+    """Read plain text and selection bounds from a standard text control."""
+    user32.SendMessageW.restype = wintypes.LPARAM
+    length = int(user32.SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0))
+    if length < 0 or length > _MAX_CONFIRMABLE_CONTROL_TEXT:
+        return None
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    copied = int(user32.SendMessageW(hwnd, WM_GETTEXT, length + 1, buffer))
+    if copied < 0:
+        return None
+
+    start = ctypes.c_int()
+    end = ctypes.c_int()
+    user32.SendMessageW(
+        hwnd, EM_GETSEL, ctypes.byref(start), ctypes.byref(end))
+    if start.value < 0 or end.value < start.value or end.value > length:
+        return None
+    return buffer.value, start.value, end.value
+
+
+def _paste_result_matches(before, after, expected_text: str) -> bool:
+    if before is None or after is None:
+        return False
+    before_text, start, end = before
+    after_text, after_start, after_end = after
+    # EM_GETSEL counts UTF-16 code units; avoid guessing around surrogate
+    # pairs when Python's string indexes use Unicode code points.
+    if len(before_text.encode("utf-16-le")) // 2 != len(before_text):
+        return False
+    expected_variants = {
+        str(expected_text),
+        str(expected_text).replace("\n", "\r\n"),
+    }
+    suffix = before_text[end:]
+    prefix = before_text[:start]
+    for inserted in expected_variants:
+        if after_text != prefix + inserted + suffix:
+            continue
+        expected_caret = start + len(inserted.encode("utf-16-le")) // 2
+        if after_start == after_end == expected_caret:
+            return True
+    return False
+
+
+def paste_focused_control(expected_text: str | None = None,
+        timeout_ms: int = 250, *, user32=None) -> bool | None:
     """Paste synchronously into a compatible focused control when possible.
 
-    ``SendMessageTimeoutW`` proves that a standard text control processed the
-    ``WM_PASTE`` message before returning. Custom controls are not assumed to
-    have consumed the message; they fall back to key injection, whose result
-    remains unconfirmed so the generated clipboard text is retained.
+    ``SendMessageTimeoutW`` only proves that a standard text control returned
+    from its window procedure. When the expected text is supplied, confirmation
+    additionally requires the control's text and caret to match the predicted
+    insertion. Custom, read-only, limited, and otherwise unobservable controls
+    fall back to key injection without claiming consumption.
     """
     if user32 is None:
         user32 = ctypes.windll.user32
     try:
         focused = _focused_control_for_foreground(user32)
-        if (focused is not None
-                and _window_class_name(user32, focused)
-                in _CONFIRMABLE_PASTE_CLASSES):
-            result = wintypes.LPARAM()
+        class_name = _window_class_name(user32, focused) if focused else None
+        if (expected_text is not None and focused is not None
+                and class_name in _CONFIRMABLE_PASTE_CLASSES):
+            before = _control_state(user32, focused)
+            if before is None:
+                return send_ctrl_key("v")
+            result = ctypes.c_size_t()
             user32.SendMessageTimeoutW.argtypes = [
                 wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
-                wintypes.UINT, wintypes.UINT, ctypes.POINTER(wintypes.LPARAM)]
+                wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
             user32.SendMessageTimeoutW.restype = wintypes.BOOL
             delivered = user32.SendMessageTimeoutW(
                 focused, WM_PASTE, 0, 0,
                 SMTO_BLOCK | SMTO_ABORTIFHUNG, int(timeout_ms),
                 ctypes.byref(result))
             if delivered:
-                return True
+                after = _control_state(user32, focused)
+                if _paste_result_matches(before, after, expected_text):
+                    return True
     except (AttributeError, OSError, TypeError):
         pass
     return send_ctrl_key("v")
