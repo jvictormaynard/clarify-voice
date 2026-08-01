@@ -132,6 +132,31 @@ class ClipboardPasteTests(unittest.TestCase):
         self.assertEqual(result, [True])
         self.assertEqual(clipboard.text(), "new user text")
 
+    def test_selection_snapshot_restore_is_atomic(self):
+        clipboard = _AtomicRaceClipboard()
+        original = clipboard.snapshot()
+        result = []
+
+        def restore_selection():
+            result.append(app._restore_clipboard_snapshot_if_owned(
+                original, clipboard.sequence(), clipboard.text()))
+
+        with patch.object(app, "_WINDOWS_CLIPBOARD", clipboard):
+            worker = threading.Thread(target=restore_selection)
+            worker.start()
+            self.assertTrue(clipboard.checked.wait(timeout=1))
+
+            writer = threading.Thread(
+                target=clipboard.external_write, args=("new user text",))
+            writer.start()
+            self.assertTrue(clipboard.writer_started.wait(timeout=1))
+            clipboard.allow_restore.set()
+            worker.join(timeout=1)
+            writer.join(timeout=1)
+
+        self.assertEqual(result, [True])
+        self.assertEqual(clipboard.text(), "new user text")
+
     def test_overlapping_operations_are_serialized(self):
         entered = threading.Event()
         release = threading.Event()

@@ -918,7 +918,8 @@ class RewriteWorkflowTests(unittest.TestCase):
                              side_effect=[original, original]), \
                 patch.object(app, "_clipboard_sequence_number", return_value=10), \
                 patch.object(app, "_get_windows_clipboard_text", return_value="Original"), \
-                patch.object(app, "_restore_windows_clipboard") as restore, \
+                patch.object(app, "_restore_windows_clipboard_if_owned",
+                             return_value=True) as restore, \
                 patch.object(app, "_copy_selected_text",
                              side_effect=["Original", "Original"]), \
                 patch.object(app, "rewrite_selected_text", return_value="Rewritten"), \
@@ -939,13 +940,15 @@ class RewriteWorkflowTests(unittest.TestCase):
                 patch.object(app, "_snapshot_windows_clipboard", return_value=original), \
                 patch.object(app, "_clipboard_sequence_number", return_value=10), \
                 patch.object(app, "_get_windows_clipboard_text", return_value="Original"), \
-                patch.object(app, "_restore_windows_clipboard") as restore, \
+                patch.object(app, "_restore_windows_clipboard_if_owned",
+                             return_value=True) as restore, \
                 patch.object(app, "_copy_selected_text", return_value="Original"), \
                 patch.object(app, "rewrite_selected_text", return_value="[Error: failed]"), \
                 patch.object(app, "_set_windows_clipboard_text") as set_clipboard:
             app.App._rewrite_selection_worker(harness, 77)
 
-        restore.assert_called_once_with(original)
+        restore.assert_called_once()
+        self.assertEqual(restore.call_args.args[0], original)
         set_clipboard.assert_not_called()
         self.assertEqual(harness.finished, [(None, "rewrite_failed")])
 

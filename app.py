@@ -30,6 +30,7 @@ from windows_hotkeys import (
     WM_HOTKEY,
     action_for_hotkey_id,
     is_alt_pressed,
+    paste_focused_control,
     register_escape_hotkey,
     register_global_hotkeys,
     send_ctrl_key,
@@ -2331,12 +2332,8 @@ def _restore_clipboard_snapshot_if_owned(snapshot, expected_sequence, expected_t
     if snapshot is None:
         return False
     try:
-        if _clipboard_sequence_number() != expected_sequence:
-            return False
-        if (expected_text is not None
-                and _get_windows_clipboard_text() != expected_text):
-            return False
-        return bool(_restore_windows_clipboard(snapshot))
+        return bool(_restore_windows_clipboard_if_owned(
+            snapshot, expected_sequence, expected_text))
     except OSError:
         return False
 
@@ -2394,6 +2391,8 @@ def _paste_generated_text(text, *, should_paste=True,
 
 def _send_key_chord(chord):
     if IS_WIN and chord in ("ctrl+c", "ctrl+v"):
+        if chord == "ctrl+v":
+            return paste_focused_control()
         return send_ctrl_key(chord[-1])
     else:
         return keyboard.send(chord)
