@@ -29,6 +29,18 @@ function Resolve-ExistingPath {
     return (Get-Item -LiteralPath $Path -ErrorAction Stop).FullName
 }
 
+function ConvertTo-PositiveInteger {
+    param([string]$Value, [string]$Metric, [string]$Path)
+
+    $parsed = [long]0
+    $integerStyle = [System.Globalization.NumberStyles]::Integer
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    if (-not [long]::TryParse($Value, $integerStyle, $invariant, [ref]$parsed) -or $parsed -le 0) {
+        throw "Rejected invalid integer $Metric in $Path."
+    }
+    return $parsed
+}
+
 function ConvertTo-ValidMeasurement {
     param([object]$Row, [string]$Path)
 
@@ -45,16 +57,19 @@ function ConvertTo-ValidMeasurement {
         throw "Rejected unknown target in $Path."
     }
     $round = 0
-    if (-not [int]::TryParse([string]$Row.Round, [ref]$round) -or $round -lt 1) {
+    $integerStyle = [System.Globalization.NumberStyles]::Integer
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    if (-not [int]::TryParse([string]$Row.Round, $integerStyle, $invariant, [ref]$round) -or $round -lt 1) {
         throw "Rejected invalid round in $Path."
     }
-    $positiveMetrics = @(
-        "ColdStartMs", "WorkingSetMB", "PrivateMemoryMB", "ProcessCount",
-        "ThreadCount", "PackageSizeMB", "WindowProcessId"
-    )
+    foreach ($metric in @("WindowProcessId", "ProcessCount", "ThreadCount")) {
+        [void](ConvertTo-PositiveInteger ([string]$Row.$metric) $metric $Path)
+    }
+    $positiveMetrics = @("ColdStartMs", "WorkingSetMB", "PrivateMemoryMB", "PackageSizeMB")
     foreach ($metric in $positiveMetrics) {
         $value = 0.0
-        if (-not [double]::TryParse([string]$Row.$metric, [ref]$value)) {
+        $floatStyle = [System.Globalization.NumberStyles]::Float
+        if (-not [double]::TryParse([string]$Row.$metric, $floatStyle, $invariant, [ref]$value)) {
             throw "Rejected non-numeric $metric in $Path."
         }
         if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -le 0) {

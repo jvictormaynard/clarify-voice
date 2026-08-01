@@ -51,7 +51,8 @@ powershell -ExecutionPolicy Bypass -File spikes\pyside6\aggregate.ps1 `
 
 The aggregator excludes its resolved `OutputCsv` path from the input list,
 rejects failed launches or non-positive/non-numeric metrics before counting
-samples, rejects fewer than three unique boot IDs/rounds per target, and
+samples, parses process/window/thread counts as positive invariant integers,
+rejects fewer than three unique boot IDs/rounds per target, and
 reports medians for cold-start observations, working set/private memory,
 process/thread counts, and package size. This makes reruns with
 `measurements\*.csv` idempotent. The protocol provides repeated post-reboot

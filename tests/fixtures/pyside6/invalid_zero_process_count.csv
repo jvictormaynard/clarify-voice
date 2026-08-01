@@ -1,0 +1,2 @@
+Target,Round,RunId,BootId,Executable,ColdStartMs,MainWindowSeen,WindowProcessId,WorkingSetMB,PrivateMemoryMB,ProcessCount,ThreadCount,PackageSizeMB,MeasuredAtUtc
+CustomTkinter,1,bad-process-zero,boot-bad,C:\\ctk.exe,100,True,101,80,50,0,8,40,2026-08-08T00:00:00Z

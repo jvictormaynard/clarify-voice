@@ -16,7 +16,7 @@ The fake workflow covers the idle surface, recording/processing/success pill, re
 
 ## Evidence protocol
 
-The comparable-build protocol is `spikes/pyside6/package.ps1`; it packages the current CustomTkinter entry point and the PySide6 prototype as separate one-file windowed executables in one isolated environment. `spikes/pyside6/benchmark.ps1` measures one target per invocation and records its Windows boot identifier, while `spikes/pyside6/aggregate.ps1` rejects failed launches or invalid metrics before counting samples, excludes its own output on reruns, rejects fewer than three independent post-reboot rounds per target, and reports medians for cold-start observations, working set/private memory, process count, thread count, and package size.
+The comparable-build protocol is `spikes/pyside6/package.ps1`; it packages the current CustomTkinter entry point and the PySide6 prototype as separate one-file windowed executables in one isolated environment. `spikes/pyside6/benchmark.ps1` measures one target per invocation and records its Windows boot identifier, while `spikes/pyside6/aggregate.ps1` rejects failed launches or invalid metrics before counting samples, parses process/window/thread counts as positive invariant integers, excludes its own output on reruns, rejects fewer than three independent post-reboot rounds per target, and reports medians for cold-start observations, working set/private memory, process count, thread count, and package size.
 
 The protocol intentionally has no fixed target order: run only one target after
 each reboot, alternate which target is first across at least three rounds, and

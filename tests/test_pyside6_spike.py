@@ -65,9 +65,26 @@ class PySide6SpikeTests(unittest.TestCase):
         aggregate = (SPIKE / "aggregate.ps1").read_text(encoding="utf-8")
         self.assertIn("ConvertTo-ValidMeasurement", aggregate)
         self.assertIn("MainWindowSeen is not true", aggregate)
+        self.assertIn("ConvertTo-PositiveInteger", aggregate)
+        for metric in ("WindowProcessId", "ProcessCount", "ThreadCount"):
+            self.assertIn(f'@("WindowProcessId", "ProcessCount", "ThreadCount")', aggregate)
+            self.assertIn(metric, aggregate)
+        self.assertIn("InvariantCulture", aggregate)
         self.assertIn("$resolvedInput.ToLowerInvariant() -eq $destinationKey", aggregate)
         self.assertTrue((FIXTURES / "valid_measurements.csv").is_file())
         self.assertTrue((FIXTURES / "invalid_measurements.csv").is_file())
+        for fixture in FIXTURES.glob("invalid_*_process_id.csv"):
+            self.assertTrue(fixture.is_file())
+        for name in (
+            "invalid_fractional_process_count.csv",
+            "invalid_fractional_thread_count.csv",
+            "invalid_zero_process_count.csv",
+            "invalid_zero_thread_count.csv",
+            "invalid_overflow_window_process_id.csv",
+            "invalid_overflow_process_count.csv",
+            "invalid_overflow_thread_count.csv",
+        ):
+            self.assertTrue((FIXTURES / name).is_file())
 
     @unittest.skipUnless(os.name == "nt", "native PowerShell integration runs on Windows CI")
     def test_aggregate_windows_rejects_failures_and_is_idempotent(self):
@@ -98,6 +115,11 @@ class PySide6SpikeTests(unittest.TestCase):
             failed = run_aggregate([invalid])
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn("MainWindowSeen", failed.stdout + failed.stderr)
+            for malformed in sorted(FIXTURES.glob("invalid_*_process_id.csv")) + sorted(
+                FIXTURES.glob("invalid_*_process_count.csv")
+            ) + sorted(FIXTURES.glob("invalid_*_thread_count.csv")):
+                rejected = run_aggregate([malformed])
+                self.assertNotEqual(rejected.returncode, 0, malformed.name)
 
     def test_spike_isolated_from_production_modules(self):
         source = (SPIKE / "app.py").read_text(encoding="utf-8")
