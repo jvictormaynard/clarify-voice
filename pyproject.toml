@@ -1,0 +1,16 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+extend-exclude = ["legacy", "build", "dist"]
+
+[tool.ruff.lint]
+# Keep the first pass non-disruptive: syntax, imports, and obvious pyflakes
+# findings are enforced while legacy style is migrated in focused changes.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["desktop_state.py", "windows_hotkeys.py"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true

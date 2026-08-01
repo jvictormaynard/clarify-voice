@@ -77,12 +77,19 @@ cd clarify-voice
 ```
 
 On the first run, `start.bat` creates an isolated `.venv`, installs the Python
-dependencies, and launches ClarifyVoice. Later runs reuse that environment.
+dependencies from the checked-in lock, and launches ClarifyVoice. Later runs
+reuse that environment.
 You can refresh it at any time with:
 
 ```powershell
 .\scripts\setup.ps1
 ```
+
+Setup, CI, packaging, and release workflows all consume the checked-in
+`requirements-lock.txt`, so a fresh checkout resolves the same package set.
+Top-level dependency intent remains readable in `requirements.txt` and
+`requirements-dev.txt`; maintainers regenerate the lock with `pip-compile` when
+that intent changes.
 
 Linux and macOS source paths are experimental. See
 [Development](docs/development.md#experimental-linux-and-macos-support) for

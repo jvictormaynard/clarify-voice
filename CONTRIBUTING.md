@@ -63,8 +63,18 @@ Use clear commit messages. Conventional prefixes such as `fix:`, `feat:`,
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q app.py desktop_state.py windows_hotkeys.py windows_clipboard.py tests
+.\.venv\Scripts\python.exe -m compileall -q app.py desktop_state.py windows_hotkeys.py tests
+ruff check desktop_state.py windows_hotkeys.py scripts/dependency_audit.py tests/test_repository.py
+mypy desktop_state.py windows_hotkeys.py
+python scripts/dependency_audit.py
 ```
+
+Dependency intent is kept in `requirements.txt` and `requirements-dev.txt`;
+the generated `requirements-lock.txt` is the shared input for setup, CI,
+packaging, and releases. If intent changes, regenerate the lock with
+`pip-compile --strip-extras --output-file=requirements-lock.txt requirements-dev.txt`
+and include the resulting diff. Do not add an audit exception without a
+reviewed rationale in `dependency-audit.json`.
 
 For packaging-related changes:
 

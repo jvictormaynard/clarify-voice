@@ -21,7 +21,16 @@ cd clarify-voice
 ```
 
 The setup script creates `.venv` and installs runtime dependencies. `-Dev` also
-installs PyInstaller for local packaging.
+installs the pinned development and packaging tools for local checks. Both modes
+consume `requirements-lock.txt`, which is generated from the human-maintained
+`requirements.txt` and `requirements-dev.txt` intent files. Regenerate it only
+when intentionally changing dependency intent:
+
+```powershell
+pip-compile --strip-extras --output-file=requirements-lock.txt requirements-dev.txt
+```
+
+Do not edit the lock file by hand. CI checks that it is current.
 
 Environment variables are optional because provider settings can be entered in
 the UI. For local automation, copy `.env.example` to `.env` and fill only the
@@ -93,6 +102,23 @@ the native Windows temporary directory, builds, backs up the installed
 executable, replaces it, and restarts ClarifyVoice. Override the discovered
 target with `CLARIFYVOICE_INSTALL_PATH` when needed.
 
+## Automated quality and supply-chain checks
+
+The CI quality gate runs staged Ruff linting, a focused Ruff format check, mypy for the
+typed `desktop_state.py` and `windows_hotkeys.py` modules, the full dependency
+audit, the unit-test baseline, and Python compile checks on Ubuntu and Windows.
+The Windows packaging job is required before CI is green.
+
+`scripts/dependency_audit.py` audits the locked set with `pip-audit`. The
+reviewed-exception policy lives in `dependency-audit.json`; it is intentionally
+empty today. Any future exception must include a maintainer-approved rationale
+in that file and should be removed as soon as the dependency can be upgraded.
+
+Tagged releases also publish `ClarifyVoice.sbom.json` (CycloneDX), include it in
+the portable ZIP, and create GitHub artifact attestations for the release files.
+The attestation is verifiable with GitHub's artifact-attestation tooling and is
+separate from the existing SHA-256 checksum.
+
 ## Experimental Linux and macOS support
 
 The source contains fallback clipboard and hotkey paths, but the polished and
@@ -131,9 +157,10 @@ post-release verification.
    Windows, and packaging checks pass.
 5. Create an annotated `vX.Y.Z` tag on the exact green `master` commit and push
    only that tag.
-6. The release workflow builds on Windows, creates the executable, ZIP and
-   SHA-256 checksum, verifies the official SoX source archive, and publishes
-   all four assets to the same GitHub release.
+6. The release workflow builds on Windows, creates the executable, CycloneDX
+   SBOM, ZIP, and SHA-256 checksum, verifies the official SoX source archive,
+   publishes artifact attestations, and uploads all five assets to the same
+   GitHub release.
 7. Download the published assets, verify the executable checksum and ZIP
    contents, and confirm that `/releases/latest` resolves to the new version.
 

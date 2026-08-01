@@ -9,6 +9,7 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $venvDir = Join-Path $repoRoot ".venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
+$lockFile = Join-Path $repoRoot "requirements-lock.txt"
 
 function ConvertTo-ProcessArgument {
     param([string]$Value)
@@ -85,18 +86,19 @@ if (-not (Test-Path $venvPython)) {
     }
 }
 
-Write-Host "Installing ClarifyVoice dependencies..."
-Invoke-CheckedProcess $venvPython @(
-    "-m", "pip", "install", "--disable-pip-version-check", "--upgrade", "pip"
-) "Could not update pip in the ClarifyVoice environment."
+if (-not (Test-Path $lockFile)) {
+    throw "The locked dependency set is missing: $lockFile"
+}
 
+Write-Host "Installing ClarifyVoice dependencies..."
 $requirements = if ($Dev) {
     Join-Path $repoRoot "requirements-dev.txt"
 } else {
     Join-Path $repoRoot "requirements.txt"
 }
 Invoke-CheckedProcess $venvPython @(
-    "-m", "pip", "install", "--disable-pip-version-check", "-r", $requirements
+    "-m", "pip", "install", "--disable-pip-version-check", "-r", $requirements,
+    "-c", $lockFile
 ) "Could not install ClarifyVoice dependencies."
 
 Write-Host "ClarifyVoice environment is ready."

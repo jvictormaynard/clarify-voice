@@ -21,6 +21,7 @@ REQUIRED_FILES = (
     "THIRD_PARTY_NOTICES.md",
     "requirements.txt",
     "requirements-dev.txt",
+    "requirements-lock.txt",
     "scripts/build.ps1",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
@@ -29,6 +30,7 @@ REQUIRED_FILES = (
 REQUIRED_ASSETS = (
     "ClarifyVoice.exe",
     "ClarifyVoice.exe.sha256",
+    "ClarifyVoice.sbom.json",
     "ClarifyVoice-windows-x64.zip",
     "sox-14.4.2-source.tar.gz",
 )
@@ -127,6 +129,10 @@ def main() -> int:
     for asset in REQUIRED_ASSETS:
         if asset not in release_workflow:
             failures.append(f"release workflow does not reference {asset}")
+    if "requirements-lock.txt" not in release_workflow:
+        failures.append("release workflow does not use requirements-lock.txt")
+    if "attest-build-provenance" not in release_workflow:
+        failures.append("release workflow does not publish artifact provenance")
 
     readme = (repo / "README.md").read_text(encoding="utf-8")
     readme_pt = (repo / "docs/README.pt-BR.md").read_text(encoding="utf-8")

@@ -28,22 +28,20 @@ class RepositorySafetyTests(unittest.TestCase):
         content = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
         self.assertIn('$venvDir = Join-Path $buildRoot "venv"', content)
         self.assertIn(
-            '$requirementsFile = Join-Path $requirementsDir '
-            '"requirements-dev.txt"',
+            '$requirementsFile = Join-Path $requirementsDir "requirements-dev.txt"',
             content,
         )
-        self.assertIn('"--upgrade", "-r", $requirementsFile', content)
+        self.assertIn('"-r", $requirementsFile, "-c", $lockFile', content)
         self.assertIn("Build dependencies: $dependencyVersions", content)
         self.assertNotIn(
-            '"requests", "sounddevice", "customtkinter", "Pillow", '
-            '"pyinstaller"',
+            '"requests", "sounddevice", "customtkinter", "Pillow", "pyinstaller"',
             content,
         )
 
     def test_release_publishes_verified_sox_source(self):
-        content = (
-            ROOT / ".github" / "workflows" / "release.yml"
-        ).read_text(encoding="utf-8")
+        content = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("sox-14.4.2-source.tar.gz", content)
         self.assertIn(
             "b45f598643ffbd8e363ff24d61166ccec4836fea6d3888881b8df53e3bb55f6c",
@@ -87,6 +85,46 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertIn("name: clarifyvoice-release", skill)
         self.assertIn("ClarifyVoice.exe.sha256", skill)
         self.assertNotIn("/mnt/c/Users/Work/.codex/skills", skill)
+
+    def test_dependency_contract_files_exist_and_have_review_policy(self):
+        lock = ROOT / "requirements-lock.txt"
+        self.assertTrue(lock.is_file())
+        self.assertIn("pip-compile", lock.read_text(encoding="utf-8"))
+
+        policy = json.loads(
+            (ROOT / "dependency-audit.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(policy["policy_version"], 1)
+        self.assertIsInstance(policy["ignored_vulnerabilities"], dict)
+
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn("[tool.ruff]", pyproject)
+        self.assertIn("[tool.mypy]", pyproject)
+
+    def test_setup_and_workflows_use_the_shared_lock(self):
+        setup = (ROOT / "scripts" / "setup.ps1").read_text(encoding="utf-8")
+        deploy = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+        self.assertIn('"requirements-lock.txt"', setup)
+        self.assertIn('"requirements-lock.txt"', deploy)
+        self.assertIn('"-c", $lockFile', setup)
+        self.assertIn('"-c", $lockFile', deploy)
+
+        for workflow_name in ("ci.yml", "release.yml"):
+            workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("requirements-lock.txt", workflow)
+            self.assertIn("-c requirements-lock.txt", workflow)
+            self.assertRegex(workflow, r"uses: actions/[^@]+@[0-9a-f]{40}")
+
+    def test_release_has_sbom_and_provenance_contract(self):
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("ClarifyVoice.sbom.json", workflow)
+        self.assertIn("actions/attest-build-provenance@", workflow)
+        self.assertIn("id-token: write", workflow)
+        self.assertIn("attestations: write", workflow)
 
 
 if __name__ == "__main__":
