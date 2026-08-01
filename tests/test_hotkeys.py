@@ -71,13 +71,13 @@ class PasteDispatchTests(unittest.TestCase):
         self.assertEqual(len(user32.paste_calls), 1)
         self.assertEqual(user32.paste_calls[0][1], windows_hotkeys.WM_PASTE)
 
-    def test_timeout_falls_back_without_claiming_consumption(self):
+    def test_timeout_stays_unconfirmed_without_second_injection(self):
         user32 = _FakeUser32(delivered=False)
         with patch.object(windows_hotkeys, "send_ctrl_key", return_value=None) as fallback:
             self.assertIsNone(windows_hotkeys.paste_focused_control(
                 expected_text="new", user32=user32))
 
-        fallback.assert_called_once_with("v")
+        fallback.assert_not_called()
         self.assertEqual(len(user32.paste_calls), 1)
 
     def test_ignored_wm_paste_keeps_response_unconfirmed(self):
@@ -86,7 +86,16 @@ class PasteDispatchTests(unittest.TestCase):
             self.assertIsNone(windows_hotkeys.paste_focused_control(
                 expected_text="new", user32=user32))
 
-        fallback.assert_called_once_with("v")
+        fallback.assert_not_called()
+        self.assertEqual(len(user32.paste_calls), 1)
+
+    def test_partial_normalization_does_not_inject_a_second_paste(self):
+        user32 = _FakeUser32(paste_text="new\n")
+        with patch.object(windows_hotkeys, "send_ctrl_key", return_value=None) as fallback:
+            self.assertIsNone(windows_hotkeys.paste_focused_control(
+                expected_text="new", user32=user32))
+
+        fallback.assert_not_called()
         self.assertEqual(len(user32.paste_calls), 1)
 
     def test_read_only_control_keeps_response_unconfirmed(self):
@@ -95,7 +104,7 @@ class PasteDispatchTests(unittest.TestCase):
             self.assertIsNone(windows_hotkeys.paste_focused_control(
                 expected_text="new", user32=user32))
 
-        fallback.assert_called_once_with("v")
+        fallback.assert_not_called()
 
     def test_custom_control_keeps_injected_paste_unconfirmed(self):
         user32 = _FakeUser32(class_name="Chrome_RenderWidgetHostHWND")

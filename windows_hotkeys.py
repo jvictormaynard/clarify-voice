@@ -208,14 +208,26 @@ def paste_focused_control(expected_text: str | None = None,
                 wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
                 wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
             user32.SendMessageTimeoutW.restype = wintypes.BOOL
-            delivered = user32.SendMessageTimeoutW(
-                focused, WM_PASTE, 0, 0,
-                SMTO_BLOCK | SMTO_ABORTIFHUNG, int(timeout_ms),
-                ctypes.byref(result))
+            try:
+                delivered = user32.SendMessageTimeoutW(
+                    focused, WM_PASTE, 0, 0,
+                    SMTO_BLOCK | SMTO_ABORTIFHUNG, int(timeout_ms),
+                    ctypes.byref(result))
+            except (AttributeError, OSError, TypeError):
+                # The message may have crossed the process boundary before
+                # the API reported an error; never inject a second paste.
+                return None
             if delivered:
-                after = _control_state(user32, focused)
+                try:
+                    after = _control_state(user32, focused)
+                except (AttributeError, OSError, TypeError):
+                    return None
                 if _paste_result_matches(before, after, expected_text):
                     return True
+            # WM_PASTE was attempted. A timeout or an unverifiable/malformed
+            # state must not be followed by Ctrl+V, which could double-paste
+            # if the original message was delivered late.
+            return None
     except (AttributeError, OSError, TypeError):
         pass
     return send_ctrl_key("v")
