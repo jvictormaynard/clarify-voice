@@ -24,6 +24,11 @@ function Resolve-OutputPath {
     return [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Path))
 }
 
+function Resolve-ExistingPath {
+    param([string]$Path)
+    return (Get-Item -LiteralPath $Path -ErrorAction Stop).FullName
+}
+
 function ConvertTo-ValidMeasurement {
     param([object]$Row, [string]$Path)
 
@@ -61,10 +66,13 @@ function ConvertTo-ValidMeasurement {
 
 $destination = Resolve-OutputPath $OutputCsv
 $destinationKey = $destination.ToLowerInvariant()
+if (Test-Path -LiteralPath $destination) {
+    $destinationKey = (Resolve-ExistingPath $destination).ToLowerInvariant()
+}
 $rows = @()
 foreach ($path in $InputCsv) {
     if (-not (Test-Path $path)) { throw "Missing measurement CSV: $path" }
-    $resolvedInput = (Resolve-Path $path).ProviderPath
+    $resolvedInput = Resolve-ExistingPath $path
     if ($resolvedInput.ToLowerInvariant() -eq $destinationKey) {
         # The documented measurements/*.csv wildcard also sees summary.csv on
         # reruns. Exclude this output before importing or validating rows.
