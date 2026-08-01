@@ -78,7 +78,10 @@ preferences, and startup settings. `LocalUsageStatsRepository` preserves the
 anonymous event list and its existing `version` marker while also writing an
 explicit `schema_version`. A file from a newer schema is loaded read-only for
 compatibility; saves are refused until a version that understands that schema
-is running, so a downgrade cannot delete newer fields.
+is running, so a downgrade cannot delete newer fields. The same on-disk check
+guards statistics appends, including when a fresh repository instance writes
+without a preceding load. The legacy mapping adapter retains recognized
+startup settings such as `autostart` during round-trips.
 
 ## Data ownership
 

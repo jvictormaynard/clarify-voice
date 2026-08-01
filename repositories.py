@@ -224,7 +224,6 @@ class AppConfig:
 
         values = self.to_mapping()
         values.pop("schema_version", None)
-        values.pop("autostart", None)
         return values
 
 
@@ -285,6 +284,15 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         raise
 
 
+def _read_json_mapping(path: Path) -> dict[str, Any] | None:
+    """Read a JSON object for a pre-write schema check, if one exists."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
 class ConfigRepository(ABC):
     """Application-facing configuration persistence interface."""
 
@@ -313,6 +321,26 @@ class UnsupportedSchemaVersionError(OSError):
     """Raised when saving would downgrade a file from a newer schema."""
 
 
+def _ensure_supported_schema(
+    path: Path,
+    supported_version: int,
+    legacy_version_key: str | None = None,
+) -> int | None:
+    """Inspect the current file immediately before a replacement write."""
+    payload = _read_json_mapping(path)
+    if payload is None:
+        return None
+    versions = [_version(payload.get("schema_version"))]
+    if legacy_version_key:
+        versions.append(_version(payload.get(legacy_version_key)))
+    version = max(versions)
+    if version > supported_version:
+        raise UnsupportedSchemaVersionError(
+            f"Cannot save schema version {version} with supported version "
+            f"{supported_version}")
+    return version
+
+
 class LocalConfigRepository(ConfigRepository):
     """JSON-backed repository for ``%APPDATA%\\ClarifyVoice\\config.json``."""
 
@@ -325,7 +353,6 @@ class LocalConfigRepository(ConfigRepository):
         self.path = Path(path)
         self.defaults = dict(defaults or environment_defaults(environment))
         self._lock = threading.RLock()
-        self._future_schema_version: int | None = None
 
     def load(self) -> AppConfig:
         with self._lock:
@@ -333,18 +360,12 @@ class LocalConfigRepository(ConfigRepository):
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, ValueError, TypeError):
                 raw = {}
-            version = _version(raw.get("schema_version")) if isinstance(raw, Mapping) else 0
-            self._future_schema_version = (
-                version if version > CONFIG_SCHEMA_VERSION else None)
             migrated = migrate_config_payload(raw)
             return AppConfig.from_mapping(migrated, self.defaults)
 
     def save(self, config: AppConfig | Mapping[str, Any]) -> None:
         with self._lock:
-            if self._future_schema_version is not None:
-                raise UnsupportedSchemaVersionError(
-                    f"Cannot save schema version {self._future_schema_version} "
-                    f"with supported version {CONFIG_SCHEMA_VERSION}")
+            _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
             if isinstance(config, AppConfig):
                 if config.schema_version > CONFIG_SCHEMA_VERSION:
                     raise UnsupportedSchemaVersionError(
@@ -385,6 +406,8 @@ class LocalUsageStatsRepository(UsageStatsRepository):
         if not isinstance(event, Mapping):
             return
         with self._lock:
+            _ensure_supported_schema(
+                self.path, STATS_SCHEMA_VERSION, legacy_version_key="version")
             events = self.load_events()
             events.append(copy.deepcopy(dict(event)))
             _atomic_write_json(self.path, {

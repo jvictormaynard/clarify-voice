@@ -62,6 +62,17 @@ class ConfigurationRepositoryTests(unittest.TestCase):
         self.assertEqual(loaded.ui.language, "pt")
         self.assertNotIn("unknown_future_setting", payload)
 
+    def test_legacy_adapter_preserves_autostart_on_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = LocalConfigRepository(Path(directory) / "config.json")
+            repository.save({"autostart": True})
+            config = repository.load()
+            legacy = config.to_legacy_mapping()
+            repository.save(legacy)
+
+            self.assertTrue(legacy["autostart"])
+            self.assertTrue(repository.load().startup.autostart)
+
     def test_injected_repository_becomes_the_app_compatibility_source(self):
         import app
         from repositories import ApplicationRepositories
@@ -144,6 +155,38 @@ class ConfigurationMigrationTests(unittest.TestCase):
 
             self.assertEqual(path.read_bytes(), original)
 
+    def test_future_schema_save_is_refused_without_prior_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "schema_version": CONFIG_SCHEMA_VERSION + 1,
+                "future_setting": {"keep": "me"},
+            }), encoding="utf-8")
+            original = path.read_bytes()
+
+            with self.assertRaises(UnsupportedSchemaVersionError):
+                LocalConfigRepository(path).save({"ui_language": "pt"})
+
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_future_schema_change_between_load_and_save_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"schema_version": CONFIG_SCHEMA_VERSION}),
+                            encoding="utf-8")
+            repository = LocalConfigRepository(path)
+            config = repository.load()
+            path.write_text(json.dumps({
+                "schema_version": CONFIG_SCHEMA_VERSION + 1,
+                "future_setting": {"keep": "me"},
+            }), encoding="utf-8")
+            original = path.read_bytes()
+
+            with self.assertRaises(UnsupportedSchemaVersionError):
+                repository.save(config)
+
+            self.assertEqual(path.read_bytes(), original)
+
 
 class UsageStatisticsRepositoryTests(unittest.TestCase):
     def test_invalid_payload_and_unknown_events_are_safe(self):
@@ -166,6 +209,21 @@ class UsageStatisticsRepositoryTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in payload["events"]],
                          ["recording", "rewrite"])
         self.assertFalse(list(Path(directory).glob("*.tmp")))
+
+    def test_future_schema_append_is_refused_without_rewriting_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "usage_stats.json"
+            path.write_text(json.dumps({
+                "schema_version": 2,
+                "future_setting": {"keep": "me"},
+                "events": [],
+            }), encoding="utf-8")
+            original = path.read_bytes()
+
+            with self.assertRaises(UnsupportedSchemaVersionError):
+                LocalUsageStatsRepository(path).append({"type": "recording"})
+
+            self.assertEqual(path.read_bytes(), original)
 
 
 if __name__ == "__main__":
