@@ -152,11 +152,68 @@ class RecordingSessionTests(unittest.TestCase):
                 harness = SimpleNamespace(_recording_session=session)
                 app.App._shutdown_recording(harness, timeout=0.05)
                 self.assertIsNone(harness._recording_session)
+                self.assertIsNotNone(session._shutdown_watcher)
+                self.assertFalse(session._shutdown_watcher.daemon)
+                self.assertFalse(session.shutdown_complete.is_set())
                 release_upload.set()
                 self.assertTrue(session.wait_for_shutdown(1))
 
             self.assertEqual(session.state, "cancelled")
             self.assertFalse(path.exists())
+
+    def test_recorder_cancel_during_stream_setup_rolls_back_everything(self):
+        stream_constructing = threading.Event()
+        release_stream = threading.Event()
+        cancel_event = threading.Event()
+        stream = Mock()
+        proc = Mock()
+        proc.poll.return_value = None
+
+        def construct_stream(**kwargs):
+            stream_constructing.set()
+            self.assertTrue(release_stream.wait(1))
+            return stream
+
+        fake_sounddevice = SimpleNamespace(
+            RawInputStream=construct_stream,
+            query_devices=Mock(return_value={"max_input_channels": 1}),
+        )
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(app, "sd", fake_sounddevice), \
+                patch.object(app, "IS_WIN", False), \
+                patch.object(app, "_has_active_microphone", return_value=True), \
+                patch.object(app, "time") as clock, \
+                patch.object(app.subprocess, "Popen", return_value=proc), \
+                patch.object(app.Recorder, "_stop_stale_windows_recorders"):
+            clock.sleep.return_value = None
+            recorder = app.Recorder()
+            errors = []
+
+            def start_recorder():
+                try:
+                    recorder.start(Path(directory) / "recording.wav", cancel_event)
+                except Exception as error:
+                    errors.append(error)
+
+            starter = threading.Thread(target=start_recorder)
+            starter.start()
+            self.assertTrue(stream_constructing.wait(1))
+            cancel_event.set()
+            canceller = threading.Thread(target=recorder.cancel)
+            canceller.start()
+            time.sleep(0.02)
+            self.assertTrue(canceller.is_alive())
+            release_stream.set()
+            starter.join(1)
+            canceller.join(1)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], app.RecordingCancelledError)
+        stream.stop.assert_called_once_with()
+        stream.close.assert_called_once_with()
+        proc.terminate.assert_called_once_with()
+        self.assertIsNone(recorder.proc)
+        self.assertIsNone(recorder.mic_stream)
 
     def test_escape_cancel_retains_owner_until_recorder_shutdown(self):
         shutdown_entered = threading.Event()

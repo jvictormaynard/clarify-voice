@@ -1967,6 +1967,7 @@ class MicrophoneUnavailableError(RecordingError):
 
 
 SESSION_SHUTDOWN_JOIN_SECONDS = 2.0
+TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS = 60
 
 
 def _new_recording_path() -> Path:
@@ -2042,31 +2043,50 @@ class Recorder:
                     cancel_event is not None and cancel_event.is_set()):
                 raise RecordingCancelledError("Recording cancelled during startup")
             self.proc = subprocess.Popen(args, stderr=subprocess.DEVNULL, **kwargs)
-        if IS_WIN:
-            self._process_job = self._assign_kill_on_close_job(self.proc)
+            if IS_WIN:
+                self._process_job = self._assign_kill_on_close_job(self.proc)
+            self._finish_start_locked(cancel_event)
+
+    def _finish_start_locked(self, cancel_event=None):
+        """Publish the input stream while cancellation is excluded by the lock."""
         try:
-            self.mic_stream = sd.RawInputStream(
-                channels=1, samplerate=16000, blocksize=256,
-                dtype="int16", callback=self._audio_cb)
-            self.mic_stream.start()
+            if self._cancel_requested or (
+                    cancel_event is not None and cancel_event.is_set()):
+                self.stop()
+                raise RecordingCancelledError("Recording cancelled during startup")
+            try:
+                self.mic_stream = sd.RawInputStream(
+                    channels=1, samplerate=16000, blocksize=256,
+                    dtype="int16", callback=self._audio_cb)
+                self.mic_stream.start()
+            except Exception:
+                # SoX remains the source of truth when the level meter is
+                # unavailable, but close any partially-created stream.
+                if self.mic_stream:
+                    try:
+                        self.mic_stream.stop()
+                        self.mic_stream.close()
+                    except Exception:
+                        pass
+                    self.mic_stream = None
+            # WaveAudio can accept process creation and then exit immediately
+            # when the Windows input endpoint is disabled. Give it a brief
+            # opportunity to report that failure before treating the pill as live.
+            time.sleep(0.18)
+            if self.proc is None or self.proc.poll() is not None:
+                self.stop()
+                raise MicrophoneUnavailableError("No active microphone")
+            if self._cancel_requested or (
+                    cancel_event is not None and cancel_event.is_set()):
+                self.stop()
+                raise RecordingCancelledError("Recording cancelled during startup")
         except Exception:
-            pass
-        # WaveAudio can accept process creation and then exit immediately when
-        # the Windows input endpoint is disabled. Give it a brief opportunity
-        # to report that failure before treating the pill as a live recording.
-        time.sleep(0.18)
-        if self.proc.poll() is not None:
-            if self.mic_stream:
-                try: self.mic_stream.stop(); self.mic_stream.close()
-                except Exception: pass
-                self.mic_stream = None
-            self.proc = None
-            self._close_process_job()
-            raise MicrophoneUnavailableError("No active microphone")
-        if self._cancel_requested or (
-                cancel_event is not None and cancel_event.is_set()):
-            self.cancel()
-            raise RecordingCancelledError("Recording cancelled during startup")
+            if self.proc is not None or self.mic_stream is not None:
+                try:
+                    self.stop()
+                except Exception:
+                    pass
+            raise
 
     def _audio_cb(self, indata, frames, time_info, status):
         samples = memoryview(indata).cast("h")
@@ -2214,8 +2234,9 @@ class Recorder:
             pass
 
     def cancel(self):
-        self._cancel_requested = True
-        self.stop()
+        with self._lifecycle_lock:
+            self._cancel_requested = True
+            self.stop()
 
     @staticmethod
     def _safe_delete(path, *, strict=False):
@@ -2257,6 +2278,7 @@ class RecordingSession:
         self._cleanup_done = threading.Event()
         self.shutdown_complete = threading.Event()
         self._shutdown_watcher_started = False
+        self._shutdown_watcher = None
 
     @property
     def terminal(self):
@@ -2339,7 +2361,12 @@ class RecordingSession:
             if self._shutdown_watcher_started:
                 return
             self._shutdown_watcher_started = True
-        threading.Thread(target=self._finish_shutdown, daemon=True).start()
+        # This thread must keep the interpreter alive after Tk is destroyed:
+        # it joins the provider worker, then retries deletion after its file
+        # handle closes. Provider HTTP calls have a bounded 60-second timeout.
+        self._shutdown_watcher = threading.Thread(
+            target=self._finish_shutdown, name="ClarifyVoiceShutdown", daemon=False)
+        self._shutdown_watcher.start()
 
     def wait_for_shutdown(self, timeout=None):
         return self.shutdown_complete.wait(timeout)
