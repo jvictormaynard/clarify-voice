@@ -891,6 +891,7 @@ class RewriteWorkflowTests(unittest.TestCase):
 
     @patch("app.is_alt_pressed", new=lambda: False)
     @patch("app.time.sleep")
+    @patch("app._restore_windows_clipboard_if_owned", return_value=True)
     @patch("app._send_key_chord", return_value=True)
     @patch("app._set_windows_clipboard_text")
     @patch("app.rewrite_selected_text", return_value="Texto revisado.")
@@ -899,7 +900,7 @@ class RewriteWorkflowTests(unittest.TestCase):
     @patch("app._foreground_window_handle", side_effect=[77, 77])
     @patch("app._record_usage_event")
     def test_safe_selection_is_pasted_once(self, record_usage, _foreground, _clipboard, _copy,
-            _rewrite, set_clipboard, send_key, _sleep):
+            _rewrite, set_clipboard, send_key, _restore, _sleep):
         harness = self.Harness()
         app.App._rewrite_selection_worker(harness, 77)
 
@@ -949,6 +950,7 @@ class RewriteWorkflowTests(unittest.TestCase):
         self.assertEqual(harness.finished, [(None, "rewrite_failed")])
 
     @patch("app.time.sleep")
+    @patch("app._restore_windows_clipboard_if_owned", return_value=True)
     @patch("app._send_key_chord", return_value=True)
     @patch("app._set_windows_clipboard_text")
     @patch("app.translate_selected_text", return_value="Hallo Welt")
@@ -956,7 +958,7 @@ class RewriteWorkflowTests(unittest.TestCase):
     @patch("app._foreground_window_handle", side_effect=[77, 77])
     @patch("app._record_usage_event")
     def test_safe_translation_replaces_only_the_selected_text(self, record_usage,
-            _foreground, _copy, translate, set_clipboard, send_key, _sleep):
+            _foreground, _copy, translate, set_clipboard, send_key, _restore, _sleep):
         harness = self.Harness()
 
         app.App._translation_selection_worker(
