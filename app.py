@@ -2382,6 +2382,14 @@ def _paste_generated_text(text, *, should_paste=True,
                 previous, written_sequence, str(text))
         except OSError:
             restored = False
+            # Snapshot restoration may have cleared the generated result
+            # before a later allocation or SetClipboardData call failed.
+            # Re-publish the result for manual paste without dispatching Ctrl+V
+            # a second time.
+            try:
+                _set_windows_clipboard_text(str(text))
+            except Exception:
+                pass
         if not IS_WIN and previous is None:
             # Selected-text flows are Windows-only; retain the historical
             # test/fallback semantics for non-Windows callers.

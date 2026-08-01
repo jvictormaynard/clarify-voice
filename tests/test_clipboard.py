@@ -54,6 +54,15 @@ class FakeClipboard:
         self.write_text(text)
 
 
+class FailingRestoreClipboard(FakeClipboard):
+    def __init__(self, failure):
+        super().__init__()
+        self.failure = failure
+
+    def restore_if_owned(self, snapshot, expected_sequence, expected_text):
+        raise OSError(self.failure)
+
+
 class ClipboardPasteTests(unittest.TestCase):
     def setUp(self):
         self.clipboard = FakeClipboard()
@@ -106,6 +115,19 @@ class ClipboardPasteTests(unittest.TestCase):
             self.assertFalse(app._paste_generated_text("result"))
 
         self.assertEqual(self.clipboard.text(), "result")
+
+    def test_restore_failure_republishes_generated_text_without_second_paste(self):
+        for failure in ("allocation failed", "SetClipboardData failed"):
+            with self.subTest(failure=failure):
+                clipboard = FailingRestoreClipboard(failure)
+                with patch.object(app, "_WINDOWS_CLIPBOARD", clipboard), \
+                        patch.object(app, "_send_key_chord", return_value=True) as send_key, \
+                        patch.object(app.time, "sleep"):
+                    self.assertFalse(app._paste_generated_text("result"))
+
+                self.assertEqual(clipboard.text(), "result")
+                send_key.assert_called_once_with(
+                    "ctrl+v", expected_text="result")
 
     def test_new_clipboard_write_wins_during_atomic_compare_and_restore(self):
         clipboard = _AtomicRaceClipboard()
@@ -204,6 +226,18 @@ class ClipboardSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot.formats, ())
         self.assertFalse(snapshot.restorable)
 
+    def test_restore_preallocates_before_emptying_clipboard(self):
+        adapter = _RestoreAdapter(allocation_failure_at=2)
+        snapshot = ClipboardSnapshot((
+            ClipboardFormat(CF_UNICODETEXT, b"one"),
+            ClipboardFormat(CF_DIB, b"two"),
+        ), 1)
+
+        with self.assertRaises(OSError):
+            adapter.restore(snapshot)
+
+        self.assertEqual(adapter.user32.empty_calls, 0)
+
 
 class _FakeFunction:
     def __init__(self, callback):
@@ -225,6 +259,52 @@ class _FakeUser32:
             return self.formats[0] if self.formats else 0
         index = self.formats.index(previous) + 1
         return self.formats[index] if index < len(self.formats) else 0
+
+
+class _RestoreUser32:
+    def __init__(self, set_failure_at=None):
+        self.set_failure_at = set_failure_at
+        self.empty_calls = 0
+        self.set_calls = []
+        self.EmptyClipboard = _FakeFunction(self._empty)
+        self.SetClipboardData = _FakeFunction(self._set)
+        self.CloseClipboard = _FakeFunction(lambda: None)
+
+    def _empty(self):
+        self.empty_calls += 1
+        return True
+
+    def _set(self, format_id, handle):
+        self.set_calls.append((format_id, handle))
+        return len(self.set_calls) != self.set_failure_at
+
+
+class _RestoreAdapter(WindowsClipboardAdapter):
+    def __init__(self, allocation_failure_at=None, set_failure_at=None):
+        super().__init__(is_windows=True)
+        self.user32 = _RestoreUser32(set_failure_at)
+        self.allocation_failure_at = allocation_failure_at
+        self.allocations = 0
+
+    def _user32(self):
+        return self.user32
+
+    def _open(self, timeout=0.25):
+        return None
+
+    def _allocate_global_memory(self, data):
+        self.allocations += 1
+        if self.allocations == self.allocation_failure_at:
+            raise OSError("allocation failed")
+        return self.allocations
+
+    def _kernel32(self):
+        return _RestoreKernel32()
+
+
+class _RestoreKernel32:
+    def __init__(self):
+        self.GlobalFree = _FakeFunction(lambda _handle: None)
 
 
 class _EnumeratingAdapter(WindowsClipboardAdapter):
