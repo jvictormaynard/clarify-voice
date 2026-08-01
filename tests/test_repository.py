@@ -132,6 +132,14 @@ class RepositorySafetyTests(unittest.TestCase):
             self.assertIn("scripts/check_dependency_lock.py", workflow)
             self.assertNotIn("pip-compile --check", workflow)
             self.assertRegex(workflow, r"uses: actions/[^@]+@[0-9a-f]{40}")
+            if workflow_name == "ci.yml":
+                self.assertEqual(
+                    workflow.count("run: python scripts/dependency_audit.py"), 1
+                )
+                self.assertNotIn(
+                    "if: matrix.os == 'ubuntu-latest'\n        run: python scripts/dependency_audit.py",
+                    workflow,
+                )
 
     def test_release_has_sbom_and_provenance_contract(self):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
