@@ -175,6 +175,19 @@ class ConfigurationRepositoryTests(unittest.TestCase):
             original = app.APP_CONFIG.copy()
             try:
                 app._activate_repositories(bundle)
+                failing_bundle = ApplicationRepositories(
+                    config=FailingConfigRepository(config_repository.path),
+                    usage_stats=bundle.usage_stats,
+                )
+                # The persisted value is true while the Registry entry is
+                # absent. A failed Apply must preserve that divergence.
+                with patch.object(app, "IS_WIN", True):
+                    with self.assertRaises(OSError):
+                        app._persist_autostart_preference(False, failing_bundle, registry)
+                self.assertTrue(app.APP_CONFIG["autostart"])
+                self.assertNotIn("ClarifyVoice", registry.values)
+                self.assertTrue(config_repository.load().startup.autostart)
+
                 with patch.object(app, "IS_WIN", True):
                     app._persist_autostart_preference(False, bundle, registry)
                 self.assertFalse(app.APP_CONFIG["autostart"])
@@ -183,17 +196,6 @@ class ConfigurationRepositoryTests(unittest.TestCase):
 
                 with patch.object(app, "IS_WIN", True):
                     app._persist_autostart_preference(True, bundle, registry)
-                self.assertTrue(app.APP_CONFIG["autostart"])
-                self.assertIn("ClarifyVoice", registry.values)
-                self.assertTrue(config_repository.load().startup.autostart)
-
-                failing_bundle = ApplicationRepositories(
-                    config=FailingConfigRepository(config_repository.path),
-                    usage_stats=bundle.usage_stats,
-                )
-                with patch.object(app, "IS_WIN", True):
-                    with self.assertRaises(OSError):
-                        app._persist_autostart_preference(False, failing_bundle, registry)
                 self.assertTrue(app.APP_CONFIG["autostart"])
                 self.assertIn("ClarifyVoice", registry.values)
                 self.assertTrue(config_repository.load().startup.autostart)

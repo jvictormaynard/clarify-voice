@@ -449,16 +449,18 @@ def _is_autostart_enabled(registry=None) -> bool:
 
 def _persist_autostart_preference(enabled: bool, repositories=None, registry=None) -> None:
     """Keep the Windows startup entry and persisted preference in sync."""
-    previous = bool(APP_CONFIG.get("autostart", False))
+    previous_config = APP_CONFIG.copy()
+    previous_registry = _is_autostart_enabled(registry)
     selected = bool(enabled)
     try:
         APP_CONFIG["autostart"] = selected
         _set_autostart(selected, registry)
         _save_app_config(repositories)
     except OSError:
-        APP_CONFIG["autostart"] = previous
+        APP_CONFIG.clear()
+        APP_CONFIG.update(previous_config)
         try:
-            _set_autostart(previous, registry)
+            _set_autostart(previous_registry, registry)
         except OSError:
             pass
         raise
