@@ -1439,6 +1439,57 @@ class RewriteWorkflowTests(unittest.TestCase):
         recorder.stop.assert_called_once_with()
         harness._on_result.assert_called_once_with("Short phrase")
 
+    def test_missing_or_short_audio_preserves_no_audio_status_and_cleans_up(self):
+        for payload in (None, b"0" * 999):
+            with self.subTest(payload="missing" if payload is None else "short"), \
+                    tempfile.TemporaryDirectory() as directory:
+                audio_path = Path(directory) / "recording.wav"
+                if payload is not None:
+                    audio_path.write_bytes(payload)
+                recorder = SimpleNamespace(stop=Mock(), cancel=Mock())
+                session = app.RecordingSession(
+                    recorder=recorder, audio_path=audio_path)
+                session.state = "recording"
+                session.start_finished.set()
+                finished = threading.Event()
+                states = []
+
+                def after(_delay, callback):
+                    callback()
+                    finished.set()
+
+                harness = SimpleNamespace(
+                    _rec_start=100.0,
+                    _recording_session=session,
+                    _recording_usage={},
+                    mode="transcribe",
+                    lang="en",
+                    _closing=False,
+                    _session_is_current=lambda candidate: (
+                        harness._recording_session is candidate
+                        and not harness._closing),
+                    _set_state=Mock(side_effect=lambda state, text="": states.append(
+                        (state, text))),
+                    _t=lambda key: key,
+                    after=after,
+                )
+                harness._finish_recording_session = (
+                    lambda session, text=None, error=None, status_key=None:
+                    app.App._finish_recording_session(
+                        harness, session, text, error, status_key))
+
+                with patch.object(app.time, "sleep"), \
+                        patch.object(app, "call_transcription_provider") as provider:
+                    app.App._stop_recording(harness)
+                    self.assertTrue(finished.wait(1))
+
+                provider.assert_not_called()
+                recorder.stop.assert_called_once_with()
+                self.assertEqual(states, [("processing", ""), ("ready", "no_audio")])
+                self.assertIsInstance(session.error, app.RecordingEncodingError)
+                self.assertEqual(session.state, "failed")
+                self.assertFalse(audio_path.exists())
+
 
 class WindowFadeTests(unittest.TestCase):
     class Widget:

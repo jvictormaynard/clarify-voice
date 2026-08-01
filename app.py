@@ -4956,14 +4956,15 @@ class App(ctk.CTk):
                 self._recording_session = None
             self._set_state("microphone_unavailable")
 
-    def _finish_recording_session(self, session, text=None, error=None):
+    def _finish_recording_session(
+            self, session, text=None, error=None, status_key=None):
         if not self._session_is_current(session):
             return
         self._recording_session = None
         if text:
             self._on_result(text)
         else:
-            self._set_state("ready", self._t("error"))
+            self._set_state("ready", self._t(status_key or "error"))
 
     def _stop_recording(self):
         session = getattr(self, "_recording_session", None)
@@ -5034,6 +5035,17 @@ class App(ctk.CTk):
                         self.after(0, lambda: self._on_result(text))
             except RecordingCancelledError as error:
                 session.finalize("cancelled", error)
+            except RecordingEncodingError as error:
+                session.finalize("failed", error)
+                if is_current(session):
+                    finisher = getattr(self, "_finish_recording_session", None)
+                    if finisher is not None:
+                        self.after(0, lambda: finisher(
+                            session, error=error, status_key="no_audio"))
+                    else:
+                        self._recording_session = None
+                        self.after(0, lambda: self._set_state(
+                            "ready", self._t("no_audio")))
             except Exception as error:
                 session.finalize("failed", error)
                 if is_current(session):
