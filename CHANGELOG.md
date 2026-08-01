@@ -5,6 +5,12 @@ Notable user-facing changes are documented here. This project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Gave each recording an explicit session owner with unique temporary audio,
+  bounded SoX shutdown, cancellation, stale-worker protection, and cleanup on
+  success, failure, cancellation, and application exit
+
 ## [0.1.2] - 2026-07-31
 
 ### Fixed

@@ -135,7 +135,7 @@ on-disk keys remain unchanged.
 | --- | --- | --- |
 | Settings | `%APPDATA%\ClarifyVoice\config.json` | Provider keys, endpoints, models, and UI preferences |
 | Usage stats | `%APPDATA%\ClarifyVoice\usage_stats.json` | Counts, durations, model identifiers, and estimates; no transcript text |
-| Working audio | `%APPDATA%\ClarifyVoice\temp_recording.wav` | Temporary audio used during processing |
+| Working audio | `%APPDATA%\ClarifyVoice\clarifyvoice-recording-*.wav` | One unique session-owned file, deleted after the provider no longer needs it |
 
 On non-Windows source runs, the equivalent data directory is
 `~/.clarifyvoice`.
@@ -145,6 +145,12 @@ documented environment variables (`*_API_KEY`, `*_BASE_URL`, `*_MODEL`, and
 refinement variables), then built-in defaults. Environment variables therefore
 provide reliable first-run/headless defaults without overwriting a user's saved
 UI choices on later launches.
+
+Each recording reserves a unique temporary WAV owned by its
+`RecordingSession`. The provider reads it only during that session; cleanup
+then removes it on success, provider or encoding failure, cancellation, or
+application exit. SoX is stopped before cleanup, and Windows processes are
+attached to a Job Object so force-closing the app cannot orphan the recorder.
 
 ## Packaging
 

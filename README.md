@@ -140,7 +140,9 @@ computer to the endpoint you select. The app stores:
 
 - provider settings and API keys in `%APPDATA%\ClarifyVoice\config.json`;
 - anonymous usage counters in `%APPDATA%\ClarifyVoice\usage_stats.json`;
-- a temporary WAV file while processing a recording.
+- a unique temporary WAV file while processing a recording. It is deleted after
+  the provider no longer needs it, including cancellation, failure, and app
+  exit; it is not retained as a recording history.
 
 Transcript and selected-text contents are not written to usage statistics.
 API keys are stored as plain text for the current Windows user, so do not share
