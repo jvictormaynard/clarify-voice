@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from repositories import (
     CONFIG_SCHEMA_VERSION,
@@ -80,15 +81,30 @@ class ConfigurationRepositoryTests(unittest.TestCase):
                 config=injected,
                 usage_stats=LocalUsageStatsRepository(Path(directory) / "stats.json"),
             )
+            default_bundle = ApplicationRepositories(
+                config=default,
+                usage_stats=LocalUsageStatsRepository(Path(directory) / "default-stats.json"),
+            )
             original = app.APP_CONFIG.copy()
             try:
-                app._activate_repositories(bundle)
-                self.assertEqual(app.APP_CONFIG["transcription_provider"], "openai")
-                self.assertEqual(app.APP_CONFIG["openai_api_key"], "injected-key")
-                self.assertEqual(app.APP_CONFIG["ui_mode"], "transcription")
-                app._save_app_config(bundle)
-                self.assertEqual(injected.load().selection.transcription_provider, "openai")
-                self.assertEqual(default.load().selection.transcription_provider, "gemini")
+                with patch.object(app, "APP_REPOSITORIES", default_bundle):
+                    app._activate_repositories(bundle)
+                    self.assertEqual(app.APP_CONFIG["transcription_provider"], "openai")
+                    self.assertEqual(app.APP_CONFIG["openai_api_key"], "injected-key")
+                    self.assertEqual(app.APP_CONFIG["ui_mode"], "transcription")
+                    app._save_app_config(bundle)
+                    self.assertEqual(
+                        injected.load().selection.transcription_provider, "openai")
+
+                    # This is the lifecycle used by a later App() with no
+                    # explicit bundle: the default repository must be loaded
+                    # again instead of retaining injected compatibility state.
+                    app._activate_repositories(None)
+                    self.assertEqual(app.APP_CONFIG["transcription_provider"], "gemini")
+                    self.assertEqual(app.APP_CONFIG["ui_mode"], "prompt")
+                    self.assertEqual(app.APP_CONFIG["openai_api_key"], "")
+                    self.assertEqual(
+                        default.load().selection.transcription_provider, "gemini")
             finally:
                 app.APP_CONFIG.clear()
                 app.APP_CONFIG.update(original)

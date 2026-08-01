@@ -399,9 +399,8 @@ def _activate_repositories(repositories):
     of that compatibility mapping before an ``App`` instance starts reading
     provider settings or writing preferences.
     """
-    if repositories is None or repositories is APP_REPOSITORIES:
-        return APP_CONFIG
-    loaded = _load_app_config(repositories)
+    active_repositories = repositories or APP_REPOSITORIES
+    loaded = _load_app_config(active_repositories)
     APP_CONFIG.clear()
     APP_CONFIG.update(loaded)
     return APP_CONFIG
