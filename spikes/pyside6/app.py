@@ -133,7 +133,6 @@ class PrototypeWindow(QMainWindow):
         self._build_footer()
         self._apply_style()
         self._pill = OverlayPill()
-        self._pill.show()
         self._refresh()
 
     def _build_header(self) -> None:
@@ -167,10 +166,10 @@ class PrototypeWindow(QMainWindow):
         self._record_button.setAccessibleName("Record fake sample")
         self._record_button.clicked.connect(self._start_fake_workflow)
         actions.addWidget(self._record_button)
-        result_button = QPushButton("Show result")
-        result_button.setAccessibleName("Show fake result")
-        result_button.clicked.connect(lambda: self._set_workflow("show_result"))
-        actions.addWidget(result_button)
+        self._result_button = QPushButton("Show result")
+        self._result_button.setAccessibleName("Show fake result")
+        self._result_button.clicked.connect(lambda: self._set_workflow("show_result"))
+        actions.addWidget(self._result_button)
         settings_button = QPushButton("Settings")
         settings_button.setAccessibleName("Open fake settings")
         settings_button.clicked.connect(self._open_settings)
@@ -230,7 +229,25 @@ class PrototypeWindow(QMainWindow):
 
     def _move_window(self, delta: QPoint) -> None:
         self.move(self.pos() + delta)
-        self._pill.move(self.x() + (self.width() - self._pill.width()) // 2, self.y() - 76)
+        self._position_pill()
+
+    def _position_pill(self) -> None:
+        self._pill.move(
+            self.x() + (self.width() - self._pill.width()) // 2,
+            self.y() - 76,
+        )
+
+    def reveal(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self._position_pill()
+        self._pill.show()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._position_pill()
+        self._pill.show()
 
     def _start_fake_workflow(self) -> None:
         if self.workflow.surface != Surface.IDLE:
@@ -265,14 +282,14 @@ class PrototypeWindow(QMainWindow):
         }[surface]
         self._state_label.setText(label)
         self._record_button.setEnabled(surface == Surface.IDLE)
+        self._result_button.setEnabled(surface == Surface.SUCCESS)
         self._result_label.setText(self.workflow.result)
         self._pill.set_text(label)
-        if self.isVisible():
-            self._pill.move(self.x() + (self.width() - self._pill.width()) // 2, self.y() - 76)
 
     def closeEvent(self, event) -> None:
-        self._pill.close()
-        super().closeEvent(event)
+        self._pill.hide()
+        self.hide()
+        event.ignore()
 
 
 def _build_tray(window: PrototypeWindow) -> QSystemTrayIcon:
@@ -286,7 +303,7 @@ def _build_tray(window: PrototypeWindow) -> QSystemTrayIcon:
         menu = QMenu(window)
         tray.setContextMenu(menu)
     show = QAction("Show prototype", window)
-    show.triggered.connect(window.showNormal)
+    show.triggered.connect(window.reveal)
     menu.addAction(show)
     quit_action = QAction("Quit", window)
     quit_action.triggered.connect(QApplication.quit)
@@ -297,6 +314,7 @@ def _build_tray(window: PrototypeWindow) -> QSystemTrayIcon:
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("ClarifyVoice PySide6 spike")
     window = PrototypeWindow()
     _tray = _build_tray(window)

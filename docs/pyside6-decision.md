@@ -2,6 +2,12 @@
 
 Status: **provisional defer**. This spike answers whether PySide6 is worth a measured follow-up; it does not authorize a production rewrite.
 
+Execution status for this PR: **no Windows measurements, screenshots/video, or
+manual UI validation were performed**. The Linux worktree only validates the
+fake model, source isolation, Python compilation, and PowerShell syntax. Every
+Windows evidence row below remains pending; the recommendation is deliberately
+scoped to that limitation.
+
 ## Scope and isolation
 
 The prototype lives in `spikes/pyside6/`. It has its own optional dependency file, a Qt-free fake workflow model, and a standalone entry point. Production startup (`app.py`), provider/audio/clipboard logic, `requirements.txt`, and the normal PyInstaller scripts are unchanged. The spike's package script writes only below `spikes/pyside6/`.

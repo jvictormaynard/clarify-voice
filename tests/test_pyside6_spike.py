@@ -22,6 +22,27 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertEqual(workflow.surface, Surface.SETTINGS)
         self.assertIn("provider", workflow.result)
 
+    def test_show_result_is_gated_until_success(self):
+        with self.assertRaises(ValueError):
+            FakeWorkflow().transition("show_result")
+        source = (SPIKE / "app.py").read_text(encoding="utf-8")
+        self.assertIn("self._result_button.setEnabled(surface == Surface.SUCCESS)", source)
+
+    def test_tray_and_initial_pill_lifecycle_are_explicit(self):
+        source = (SPIKE / "app.py").read_text(encoding="utf-8")
+        self.assertIn("app.setQuitOnLastWindowClosed(False)", source)
+        self.assertIn("self._pill.hide()", source)
+        self.assertIn("event.ignore()", source)
+        self.assertIn("def reveal(self)", source)
+        self.assertIn("def showEvent(self, event)", source)
+
+    def test_benchmark_polls_the_process_tree_for_the_real_window(self):
+        source = (SPIKE / "benchmark.ps1").read_text(encoding="utf-8")
+        self.assertIn("function Get-TreeWindowProcess", source)
+        self.assertIn("Get-TreeWindowProcess $process.Id", source)
+        self.assertIn("$candidate.MainWindowHandle", source)
+        self.assertIn("WindowProcessId", source)
+
     def test_spike_isolated_from_production_modules(self):
         source = (SPIKE / "app.py").read_text(encoding="utf-8")
         tree = ast.parse(source)

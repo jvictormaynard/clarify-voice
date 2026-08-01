@@ -26,6 +26,29 @@ function Get-ProcessTree {
     return @($ids)
 }
 
+function Get-TreeProcesses {
+    param([int]$RootId)
+    $ids = @(Get-ProcessTree $RootId)
+    return @($ids | ForEach-Object {
+        try { Get-Process -Id $_ -ErrorAction Stop } catch { $null }
+    } | Where-Object { $_ })
+}
+
+function Get-TreeWindowProcess {
+    param([int]$RootId)
+    foreach ($candidate in @(Get-TreeProcesses $RootId)) {
+        try {
+            $candidate.Refresh()
+            if ($candidate.MainWindowHandle -ne 0) {
+                return $candidate
+            }
+        } catch {
+            # A short-lived bootloader process can disappear between snapshots.
+        }
+    }
+    return $null
+}
+
 function Measure-Executable {
     param([string]$Label, [string]$Path)
     if (-not (Test-Path $Path)) { throw "Missing executable: $Path" }
@@ -34,18 +57,19 @@ function Measure-Executable {
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $process = Start-Process -FilePath $resolved -PassThru
     $mainWindowSeen = $false
+    $windowProcessId = $null
     while ($watch.Elapsed.TotalSeconds -lt 20) {
         Start-Sleep -Milliseconds 100
-        try { $process.Refresh() } catch { break }
-        if ($process.HasExited) { break }
-        if ($process.MainWindowHandle -ne 0) { $mainWindowSeen = $true; break }
+        $windowProcess = Get-TreeWindowProcess $process.Id
+        if ($null -ne $windowProcess) {
+            $mainWindowSeen = $true
+            $windowProcessId = $windowProcess.Id
+            break
+        }
     }
     $coldStartMs = [math]::Round($watch.Elapsed.TotalMilliseconds, 0)
     Start-Sleep -Seconds 5
-    $ids = @(Get-ProcessTree $process.Id)
-    $processes = @($ids | ForEach-Object {
-        try { Get-Process -Id $_ -ErrorAction Stop } catch { $null }
-    } | Where-Object { $_ })
+    $processes = @(Get-TreeProcesses $process.Id)
     $workingSetMb = [math]::Round((($processes | Measure-Object WorkingSet64 -Sum).Sum) / 1MB, 2)
     $privateMb = [math]::Round((($processes | Measure-Object PrivateMemorySize64 -Sum).Sum) / 1MB, 2)
     $threads = ($processes | ForEach-Object { $_.Threads.Count } | Measure-Object -Sum).Sum
@@ -54,6 +78,7 @@ function Measure-Executable {
         Executable = $resolved
         ColdStartMs = $coldStartMs
         MainWindowSeen = $mainWindowSeen
+        WindowProcessId = $windowProcessId
         WorkingSetMB = $workingSetMb
         PrivateMemoryMB = $privateMb
         ProcessCount = $processes.Count
@@ -61,7 +86,9 @@ function Measure-Executable {
         PackageSizeMB = $sizeMb
         MeasuredAtUtc = [DateTime]::UtcNow.ToString("o")
     }
-    if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+    foreach ($runningProcess in $processes) {
+        try { Stop-Process -Id $runningProcess.Id -Force -ErrorAction SilentlyContinue } catch { }
+    }
     return $result
 }
 
