@@ -43,6 +43,20 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("$candidate.MainWindowHandle", source)
         self.assertIn("WindowProcessId", source)
 
+    def test_measurement_protocol_has_no_fixed_target_order(self):
+        benchmark = (SPIKE / "benchmark.ps1").read_text(encoding="utf-8")
+        aggregate = (SPIKE / "aggregate.ps1").read_text(encoding="utf-8")
+        readme = (SPIKE / "README.md").read_text(encoding="utf-8")
+        self.assertIn('[ValidateSet("CustomTkinter", "PySide6")]', benchmark)
+        self.assertIn("[string]$RunId", benchmark)
+        self.assertIn("[int]$Round", benchmark)
+        self.assertIn("LastBootUpTime", benchmark)
+        self.assertNotIn("CustomTkinterExecutable", benchmark)
+        self.assertNotIn("PySide6Executable", benchmark)
+        self.assertIn("$bootIds.Count -lt 3", aggregate)
+        self.assertIn("alternating which target is measured first", readme)
+        self.assertIn("does not claim a perfectly controlled OS cold state", readme)
+
     def test_spike_isolated_from_production_modules(self):
         source = (SPIKE / "app.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -73,6 +87,7 @@ class PySide6SpikeTests(unittest.TestCase):
             "requirements.txt",
             "package.ps1",
             "benchmark.ps1",
+            "aggregate.ps1",
             ".gitignore",
         ):
             self.assertTrue((SPIKE / relative).is_file(), relative)
@@ -82,7 +97,7 @@ class PySide6SpikeTests(unittest.TestCase):
             "Licensing and redistribution",
             "Migration and rollback outline",
             "Recommendation",
-            "pending Windows run",
+            "pending independent rounds",
         ):
             self.assertIn(phrase, decision)
 

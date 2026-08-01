@@ -16,20 +16,29 @@ The fake workflow covers the idle surface, recording/processing/success pill, re
 
 ## Evidence protocol
 
-The comparable-build protocol is `spikes/pyside6/package.ps1`; it packages the current CustomTkinter entry point and the PySide6 prototype as separate one-file windowed executables in one isolated environment. `spikes/pyside6/benchmark.ps1` measures cold start, working set/private memory, process count, thread count, and package size using the same Windows host.
+The comparable-build protocol is `spikes/pyside6/package.ps1`; it packages the current CustomTkinter entry point and the PySide6 prototype as separate one-file windowed executables in one isolated environment. `spikes/pyside6/benchmark.ps1` measures one target per invocation and records its Windows boot identifier, while `spikes/pyside6/aggregate.ps1` rejects fewer than three independent post-reboot rounds per target and reports medians for cold-start observations, working set/private memory, process count, thread count, and package size.
+
+The protocol intentionally has no fixed target order: run only one target after
+each reboot, alternate which target is first across at least three rounds, and
+aggregate the resulting rows. This controls the documented order/cache bias as
+far as a practical Windows spike can, but it does not prove a perfectly cold
+OS/filesystem/antivirus state. No single run or target order is sufficient for
+a framework comparison.
 
 The following evidence must be captured on one Windows 10/11 machine before adopting anything:
 
 | Evidence | CustomTkinter | PySide6 | Status |
 | --- | --- | --- | --- |
-| Cold start (ms) | pending Windows run | pending Windows run | blocked in this Linux worktree |
+| Cold-start observation (ms) | pending independent rounds | pending independent rounds | blocked in this Linux worktree |
 | Idle working set/private memory | pending Windows run | pending Windows run | blocked in this Linux worktree |
 | Process/thread count | pending Windows run | pending Windows run | blocked in this Linux worktree |
 | One-file package size | pending Windows run | pending Windows run | blocked in this Linux worktree |
 | 100/125/150% DPI screenshots | pending | pending | manual Windows validation required |
 | Overlay/focus/hotkey/tray behavior video | pending | pending | manual Windows validation required |
 
-Do not substitute Linux measurements: the acceptance question is Windows UI behavior and the production executable uses Windows-specific hotkeys and packaging.
+Do not substitute Linux measurements or call one post-reboot row a cold-state
+comparison: the acceptance question is Windows UI behavior and the production
+executable uses Windows-specific hotkeys and packaging.
 
 ## Qualitative comparison
 

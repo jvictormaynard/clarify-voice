@@ -1,7 +1,11 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)] [string]$CustomTkinterExecutable,
-    [Parameter(Mandatory = $true)] [string]$PySide6Executable,
+    [Parameter(Mandatory = $true)]
+    [ValidateSet("CustomTkinter", "PySide6")]
+    [string]$Target,
+    [Parameter(Mandatory = $true)] [string]$Executable,
+    [Parameter(Mandatory = $true)] [string]$RunId,
+    [Parameter(Mandatory = $true)] [ValidateRange(1, 10)] [int]$Round,
     [string]$OutputCsv = "measurements-windows.csv"
 )
 
@@ -49,8 +53,13 @@ function Get-TreeWindowProcess {
     return $null
 }
 
+function Get-BootId {
+    $os = Get-CimInstance Win32_OperatingSystem
+    return ([DateTime]$os.LastBootUpTime).ToUniversalTime().ToString("o")
+}
+
 function Measure-Executable {
-    param([string]$Label, [string]$Path)
+    param([string]$Path)
     if (-not (Test-Path $Path)) { throw "Missing executable: $Path" }
     $resolved = (Resolve-Path $Path).Path
     $sizeMb = [math]::Round((Get-Item $resolved).Length / 1MB, 2)
@@ -74,7 +83,10 @@ function Measure-Executable {
     $privateMb = [math]::Round((($processes | Measure-Object PrivateMemorySize64 -Sum).Sum) / 1MB, 2)
     $threads = ($processes | ForEach-Object { $_.Threads.Count } | Measure-Object -Sum).Sum
     $result = [pscustomobject]@{
-        Target = $Label
+        Target = $Target
+        Round = $Round
+        RunId = $RunId
+        BootId = Get-BootId
         Executable = $resolved
         ColdStartMs = $coldStartMs
         MainWindowSeen = $mainWindowSeen
@@ -92,10 +104,9 @@ function Measure-Executable {
     return $result
 }
 
-$results = @(
-    Measure-Executable "CustomTkinter" $CustomTkinterExecutable
-    Measure-Executable "PySide6" $PySide6Executable
-)
+$result = Measure-Executable $Executable
 $destination = if ([System.IO.Path]::IsPathRooted($OutputCsv)) { $OutputCsv } else { Join-Path (Get-Location) $OutputCsv }
-$results | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $destination
-Write-Host "Measurements written to $destination"
+$parent = Split-Path -Parent $destination
+if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+$result | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $destination
+Write-Host "One-target measurement written to $destination"

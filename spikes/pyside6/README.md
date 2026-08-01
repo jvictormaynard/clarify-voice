@@ -20,12 +20,41 @@ Build both one-file, windowed artifacts into the spike directory only:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File spikes\pyside6\package.ps1
-powershell -ExecutionPolicy Bypass -File spikes\pyside6\benchmark.ps1 `
-  -CustomTkinterExecutable spikes\pyside6\artifacts\customtkinter\ClarifyVoice-customtkinter.exe `
-  -PySide6Executable spikes\pyside6\artifacts\pyside6\ClarifyVoice-pyside6.exe
 ```
 
-`benchmark.ps1` reports cold start, working set/private memory, process and thread counts, and package size. Run both targets on the same Windows machine, after the same reboot state, and attach the resulting CSV plus screenshots/video to the decision record. Use 100%, 125%, and 150% display scaling where available.
+`benchmark.ps1` measures one target per invocation and records the Windows boot
+identifier. Run at least three independent post-reboot rounds per target,
+alternating which target is measured first across rounds. Do not run both
+targets in one invocation and do not describe a single row as a cold-state
+comparison. For example, after each reboot run one of these commands, then use
+the other target first after the next reboot:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File spikes\pyside6\benchmark.ps1 `
+  -Target CustomTkinter `
+  -Executable spikes\pyside6\artifacts\customtkinter\ClarifyVoice-customtkinter.exe `
+  -RunId round-1-ctk -Round 1 -OutputCsv measurements\round-1-ctk.csv
+
+powershell -ExecutionPolicy Bypass -File spikes\pyside6\benchmark.ps1 `
+  -Target PySide6 `
+  -Executable spikes\pyside6\artifacts\pyside6\ClarifyVoice-pyside6.exe `
+  -RunId round-2-qt -Round 2 -OutputCsv measurements\round-2-qt.csv
+```
+
+Aggregate only after both targets have three or more independent boot rounds:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File spikes\pyside6\aggregate.ps1 `
+  -InputCsv (Get-ChildItem measurements\*.csv | Select-Object -Expand FullName) `
+  -OutputCsv measurements\summary.csv
+```
+
+The aggregator rejects fewer than three unique boot IDs/rounds per target and
+reports medians for cold-start observations, working set/private memory,
+process/thread counts, and package size. This protocol provides repeated
+post-reboot samples; it does not claim a perfectly controlled OS cold state.
+Use 100%, 125%, and 150% display scaling where available, and attach the CSV
+summary plus screenshots/video to the decision record.
 
 ## Manual behavior matrix
 
