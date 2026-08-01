@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $venvDir = Join-Path $repoRoot ".venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
-$lockFile = Join-Path $repoRoot "requirements-lock.txt"
+$lockFile = Join-Path $repoRoot "requirements-lock-windows.txt"
 
 function ConvertTo-ProcessArgument {
     param([string]$Value)

@@ -70,11 +70,12 @@ python scripts/dependency_audit.py
 ```
 
 Dependency intent is kept in `requirements.txt` and `requirements-dev.txt`;
-the generated `requirements-lock.txt` is the shared input for setup, CI,
-packaging, and releases. If intent changes, regenerate the lock with
-`pip-compile --strip-extras --output-file=requirements-lock.txt requirements-dev.txt`
-and include the resulting diff. Do not add an audit exception without a
-reviewed rationale in `dependency-audit.json`.
+the generated platform locks (`requirements-lock-linux.txt` and
+`requirements-lock-windows.txt`) are the shared inputs for setup, CI, packaging,
+and releases. If intent changes, regenerate each lock on its matching runner
+with `python -m piptools compile --strip-extras --output-file=...` and include
+both resulting diffs. Do not add an audit exception without a reviewed rationale
+in `dependency-audit.json`.
 
 For packaging-related changes:
 

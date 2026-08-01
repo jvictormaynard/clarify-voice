@@ -12,7 +12,7 @@ $venvDir = Join-Path $buildRoot "venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $requirementsDir = Join-Path $buildRoot "requirements"
 $requirementsFile = Join-Path $requirementsDir "requirements-dev.txt"
-$lockFile = Join-Path $requirementsDir "requirements-lock.txt"
+$lockFile = Join-Path $requirementsDir "requirements-lock-windows.txt"
 $sourceDir = Join-Path $buildRoot "source"
 $distDir = Join-Path $buildRoot "dist"
 $workDir = Join-Path $buildRoot "work"
@@ -105,7 +105,7 @@ Write-Host "Building ClarifyVoice..."
 New-Item $buildRoot, $requirementsDir -ItemType Directory -Force | Out-Null
 Copy-Item (Join-Path $repoRoot "requirements.txt") $requirementsDir -Force
 Copy-Item (Join-Path $repoRoot "requirements-dev.txt") $requirementsDir -Force
-Copy-Item (Join-Path $repoRoot "requirements-lock.txt") $requirementsDir -Force
+Copy-Item (Join-Path $repoRoot "requirements-lock-windows.txt") $requirementsDir -Force
 
 if (-not (Test-Path $venvPython)) {
     Write-Host "Creating isolated build environment at $venvDir..."

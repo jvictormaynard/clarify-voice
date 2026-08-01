@@ -85,11 +85,12 @@ You can refresh it at any time with:
 .\scripts\setup.ps1
 ```
 
-Setup, CI, packaging, and release workflows all consume the checked-in
-`requirements-lock.txt`, so a fresh checkout resolves the same package set.
-Top-level dependency intent remains readable in `requirements.txt` and
-`requirements-dev.txt`; maintainers regenerate the lock with `pip-compile` when
-that intent changes.
+Setup, CI, packaging, and release workflows consume the checked-in platform
+lock (`requirements-lock-linux.txt` or `requirements-lock-windows.txt`), so a
+runner resolves the same package set for its operating system. Top-level
+dependency intent remains readable in `requirements.txt` and
+`requirements-dev.txt`; maintainers regenerate the matching lock with
+`python -m piptools compile` when that intent changes.
 
 Linux and macOS source paths are experimental. See
 [Development](docs/development.md#experimental-linux-and-macos-support) for

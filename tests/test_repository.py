@@ -87,9 +87,13 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertNotIn("/mnt/c/Users/Work/.codex/skills", skill)
 
     def test_dependency_contract_files_exist_and_have_review_policy(self):
-        lock = ROOT / "requirements-lock.txt"
-        self.assertTrue(lock.is_file())
-        self.assertIn("pip-compile", lock.read_text(encoding="utf-8"))
+        for lock_name in (
+            "requirements-lock-linux.txt",
+            "requirements-lock-windows.txt",
+        ):
+            lock = ROOT / lock_name
+            self.assertTrue(lock.is_file(), lock_name)
+            self.assertIn("pip-compile", lock.read_text(encoding="utf-8"))
 
         policy = json.loads(
             (ROOT / "dependency-audit.json").read_text(encoding="utf-8")
@@ -102,22 +106,29 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertIn("[tool.mypy]", pyproject)
         checker = ROOT / "scripts" / "check_dependency_lock.py"
         self.assertTrue(checker.is_file())
-        self.assertNotIn("--check", checker.read_text(encoding="utf-8"))
+        checker_content = checker.read_text(encoding="utf-8")
+        self.assertNotIn("--check", checker_content)
+        self.assertIn("shutil.copyfile(lockfile, generated)", checker_content)
+        self.assertNotIn('"--upgrade"', checker_content)
 
     def test_setup_and_workflows_use_the_shared_lock(self):
         setup = (ROOT / "scripts" / "setup.ps1").read_text(encoding="utf-8")
         deploy = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
-        self.assertIn('"requirements-lock.txt"', setup)
-        self.assertIn('"requirements-lock.txt"', deploy)
+        start = (ROOT / "start.sh").read_text(encoding="utf-8")
+        self.assertIn('"requirements-lock-windows.txt"', setup)
+        self.assertIn('"requirements-lock-windows.txt"', deploy)
         self.assertIn('"-c", $lockFile', setup)
         self.assertIn('"-c", $lockFile', deploy)
+        self.assertIn("requirements-lock-linux.txt", start)
+        self.assertNotIn("--upgrade pip", start)
 
         for workflow_name in ("ci.yml", "release.yml"):
             workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(
                 encoding="utf-8"
             )
-            self.assertIn("requirements-lock.txt", workflow)
-            self.assertIn("-c requirements-lock.txt", workflow)
+            self.assertIn("requirements-lock-windows.txt", workflow)
+            if workflow_name == "ci.yml":
+                self.assertIn("requirements-lock-linux.txt", workflow)
             self.assertIn("scripts/check_dependency_lock.py", workflow)
             self.assertNotIn("pip-compile --check", workflow)
             self.assertRegex(workflow, r"uses: actions/[^@]+@[0-9a-f]{40}")

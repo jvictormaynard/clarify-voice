@@ -21,7 +21,8 @@ REQUIRED_FILES = (
     "THIRD_PARTY_NOTICES.md",
     "requirements.txt",
     "requirements-dev.txt",
-    "requirements-lock.txt",
+    "requirements-lock-linux.txt",
+    "requirements-lock-windows.txt",
     "scripts/build.ps1",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
@@ -129,8 +130,8 @@ def main() -> int:
     for asset in REQUIRED_ASSETS:
         if asset not in release_workflow:
             failures.append(f"release workflow does not reference {asset}")
-    if "requirements-lock.txt" not in release_workflow:
-        failures.append("release workflow does not use requirements-lock.txt")
+    if "requirements-lock-windows.txt" not in release_workflow:
+        failures.append("release workflow does not use requirements-lock-windows.txt")
     if "attest-build-provenance" not in release_workflow:
         failures.append("release workflow does not publish artifact provenance")
 

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import difflib
+import argparse
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,13 +14,23 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LOCKFILE = ROOT / "requirements-lock.txt"
-HEADER = "#    pip-compile --output-file=requirements-lock.txt --strip-extras requirements-dev.txt"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--lock-file", default="requirements-lock-linux.txt")
+    args = parser.parse_args(argv)
+    lockfile = ROOT / args.lock_file
+    header = (
+        "#    pip-compile --output-file="
+        f"{Path(args.lock_file).name} --strip-extras requirements-dev.txt"
+    )
     with tempfile.TemporaryDirectory(prefix="clarify-voice-lock-") as directory:
-        generated = Path(directory) / "requirements-lock.txt"
+        generated = Path(directory) / Path(args.lock_file).name
+        # Seed the output with the committed pins. Without this, pip-tools may
+        # select newer versions allowed by the intent ranges and make an old
+        # commit fail its own drift check without any requirements change.
+        shutil.copyfile(lockfile, generated)
         command = [
             sys.executable,
             "-m",
@@ -43,17 +55,17 @@ def main() -> int:
 
         actual = generated.read_text(encoding="utf-8")
         actual = re.sub(
-            r"(?m)^#    pip-compile --output-file=.*$", HEADER, actual, count=1
+            r"(?m)^#    pip-compile --output-file=.*$", header, actual, count=1
         )
-        expected = LOCKFILE.read_text(encoding="utf-8")
+        expected = lockfile.read_text(encoding="utf-8")
         if actual != expected:
-            print("requirements-lock.txt is out of date:", file=sys.stderr)
+            print(f"{args.lock_file} is out of date:", file=sys.stderr)
             print(
                 "".join(
                     difflib.unified_diff(
                         expected.splitlines(keepends=True),
                         actual.splitlines(keepends=True),
-                        fromfile=str(LOCKFILE),
+                        fromfile=str(lockfile),
                         tofile="generated lock",
                     )
                 ),
@@ -61,7 +73,7 @@ def main() -> int:
             )
             return 1
 
-    print("requirements-lock.txt is current.")
+    print(f"{args.lock_file} is current.")
     return 0
 
 

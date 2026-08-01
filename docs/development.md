@@ -22,15 +22,19 @@ cd clarify-voice
 
 The setup script creates `.venv` and installs runtime dependencies. `-Dev` also
 installs the pinned development and packaging tools for local checks. Both modes
-consume `requirements-lock.txt`, which is generated from the human-maintained
-`requirements.txt` and `requirements-dev.txt` intent files. Regenerate it only
-when intentionally changing dependency intent:
+consume the platform-specific `requirements-lock-linux.txt` or
+`requirements-lock-windows.txt`, generated from the human-maintained
+`requirements.txt` and `requirements-dev.txt` intent files. Generate the lock
+on the matching runner only when intentionally changing dependency intent:
 
-```powershell
-pip-compile --strip-extras --output-file=requirements-lock.txt requirements-dev.txt
+```text
+python -m piptools compile --strip-extras --output-file=requirements-lock-linux.txt requirements-dev.txt
+python -m piptools compile --strip-extras --output-file=requirements-lock-windows.txt requirements-dev.txt
 ```
 
-Do not edit the lock file by hand. CI checks that it is current.
+Do not edit either lock file by hand. Each CI runner checks its corresponding
+file in a temporary path, so Linux and Windows platform markers are not
+silently treated as interchangeable.
 
 Environment variables are optional because provider settings can be entered in
 the UI. For local automation, copy `.env.example` to `.env` and fill only the
