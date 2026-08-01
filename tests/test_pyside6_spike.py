@@ -1,4 +1,7 @@
 import ast
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -7,6 +10,7 @@ from spikes.pyside6.model import FakeWorkflow, Surface
 
 ROOT = Path(__file__).resolve().parents[1]
 SPIKE = ROOT / "spikes" / "pyside6"
+FIXTURES = ROOT / "tests" / "fixtures" / "pyside6"
 
 
 class PySide6SpikeTests(unittest.TestCase):
@@ -56,6 +60,44 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("$bootIds.Count -lt 3", aggregate)
         self.assertIn("alternating which target is measured first", readme)
         self.assertIn("does not claim a perfectly controlled OS cold state", readme)
+
+    def test_aggregate_fail_closes_invalid_rows_and_excludes_its_output(self):
+        aggregate = (SPIKE / "aggregate.ps1").read_text(encoding="utf-8")
+        self.assertIn("ConvertTo-ValidMeasurement", aggregate)
+        self.assertIn("MainWindowSeen is not true", aggregate)
+        self.assertIn("$resolvedInput.ToLowerInvariant() -eq $destinationKey", aggregate)
+        self.assertTrue((FIXTURES / "valid_measurements.csv").is_file())
+        self.assertTrue((FIXTURES / "invalid_measurements.csv").is_file())
+
+    @unittest.skipUnless(os.name == "nt", "native PowerShell integration runs on Windows CI")
+    def test_aggregate_windows_rejects_failures_and_is_idempotent(self):
+        script = SPIKE / "aggregate.ps1"
+        valid = FIXTURES / "valid_measurements.csv"
+        invalid = FIXTURES / "invalid_measurements.csv"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = Path(temp_dir) / "summary.csv"
+            def run_aggregate(inputs):
+                def quote(path):
+                    return "'" + str(path).replace("'", "''") + "'"
+
+                command = (
+                    f"& {quote(script)} -InputCsv @({','.join(quote(path) for path in inputs)}) "
+                    f"-OutputCsv {quote(summary)}"
+                )
+                return subprocess.run(
+                    [
+                        "powershell.exe", "-NoProfile", "-NonInteractive",
+                        "-ExecutionPolicy", "Bypass", "-Command", command,
+                    ], capture_output=True, text=True, check=False,
+                )
+
+            first = run_aggregate([valid])
+            self.assertEqual(first.returncode, 0, first.stderr or first.stdout)
+            rerun = run_aggregate([valid, summary])
+            self.assertEqual(rerun.returncode, 0, rerun.stderr or rerun.stdout)
+            failed = run_aggregate([invalid])
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("MainWindowSeen", failed.stdout + failed.stderr)
 
     def test_spike_isolated_from_production_modules(self):
         source = (SPIKE / "app.py").read_text(encoding="utf-8")

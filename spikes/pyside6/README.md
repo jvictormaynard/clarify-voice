@@ -49,10 +49,13 @@ powershell -ExecutionPolicy Bypass -File spikes\pyside6\aggregate.ps1 `
   -OutputCsv measurements\summary.csv
 ```
 
-The aggregator rejects fewer than three unique boot IDs/rounds per target and
+The aggregator excludes its resolved `OutputCsv` path from the input list,
+rejects failed launches or non-positive/non-numeric metrics before counting
+samples, rejects fewer than three unique boot IDs/rounds per target, and
 reports medians for cold-start observations, working set/private memory,
-process/thread counts, and package size. This protocol provides repeated
-post-reboot samples; it does not claim a perfectly controlled OS cold state.
+process/thread counts, and package size. This makes reruns with
+`measurements\*.csv` idempotent. The protocol provides repeated post-reboot
+samples; it does not claim a perfectly controlled OS cold state.
 Use 100%, 125%, and 150% display scaling where available, and attach the CSV
 summary plus screenshots/video to the decision record.
 

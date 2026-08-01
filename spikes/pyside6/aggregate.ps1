@@ -16,13 +16,65 @@ function Get-Median {
     return ($sorted[$middle - 1] + $sorted[$middle]) / 2
 }
 
-$rows = @(
-    foreach ($path in $InputCsv) {
-        if (-not (Test-Path $path)) { throw "Missing measurement CSV: $path" }
-        Import-Csv $path
+function Resolve-OutputPath {
+    param([string]$Path)
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
     }
-)
-if ($rows.Count -eq 0) { throw "No measurement rows were provided." }
+    return [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Path))
+}
+
+function ConvertTo-ValidMeasurement {
+    param([object]$Row, [string]$Path)
+
+    $seen = $false
+    if (-not [bool]::TryParse([string]$Row.MainWindowSeen, [ref]$seen) -or -not $seen) {
+        throw "Rejected unsuccessful launch in $Path (MainWindowSeen is not true)."
+    }
+    foreach ($required in @("Target", "RunId", "BootId", "Round", "WindowProcessId")) {
+        if ([string]::IsNullOrWhiteSpace([string]$Row.$required)) {
+            throw "Rejected incomplete measurement in $Path (missing $required)."
+        }
+    }
+    if (@("CustomTkinter", "PySide6") -notcontains [string]$Row.Target) {
+        throw "Rejected unknown target in $Path."
+    }
+    $round = 0
+    if (-not [int]::TryParse([string]$Row.Round, [ref]$round) -or $round -lt 1) {
+        throw "Rejected invalid round in $Path."
+    }
+    $positiveMetrics = @(
+        "ColdStartMs", "WorkingSetMB", "PrivateMemoryMB", "ProcessCount",
+        "ThreadCount", "PackageSizeMB", "WindowProcessId"
+    )
+    foreach ($metric in $positiveMetrics) {
+        $value = 0.0
+        if (-not [double]::TryParse([string]$Row.$metric, [ref]$value)) {
+            throw "Rejected non-numeric $metric in $Path."
+        }
+        if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -le 0) {
+            throw "Rejected invalid $metric in $Path."
+        }
+    }
+    return $Row
+}
+
+$destination = Resolve-OutputPath $OutputCsv
+$destinationKey = $destination.ToLowerInvariant()
+$rows = @()
+foreach ($path in $InputCsv) {
+    if (-not (Test-Path $path)) { throw "Missing measurement CSV: $path" }
+    $resolvedInput = (Resolve-Path $path).ProviderPath
+    if ($resolvedInput.ToLowerInvariant() -eq $destinationKey) {
+        # The documented measurements/*.csv wildcard also sees summary.csv on
+        # reruns. Exclude this output before importing or validating rows.
+        continue
+    }
+    foreach ($row in @(Import-Csv $resolvedInput)) {
+        $rows += ConvertTo-ValidMeasurement $row $resolvedInput
+    }
+}
+if ($rows.Count -eq 0) { throw "No valid measurement rows were provided." }
 
 $summaries = @()
 foreach ($target in @("CustomTkinter", "PySide6")) {
@@ -46,9 +98,8 @@ foreach ($target in @("CustomTkinter", "PySide6")) {
     }
 }
 
-$destination = if ([System.IO.Path]::IsPathRooted($OutputCsv)) { $OutputCsv } else { Join-Path (Get-Location) $OutputCsv }
 $parent = Split-Path -Parent $destination
 if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
 $summaries | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $destination
-Write-Host "Summary uses independent post-reboot rounds; no fixed target order was assumed."
+Write-Host "Summary uses only successful, valid rows; no fixed target order was assumed."
 Write-Host "Measurement summary written to $destination"
