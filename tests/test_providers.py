@@ -20,6 +20,7 @@ for _provider_variable in (
 import app
 from desktop_state import WorkflowController
 import windows_hotkeys
+from windows_clipboard import CF_UNICODETEXT, ClipboardFormat, ClipboardSnapshot
 from PIL import Image as PILImage
 from PIL import ImageDraw as PILImageDraw
 
@@ -890,7 +891,7 @@ class RewriteWorkflowTests(unittest.TestCase):
 
     @patch("app.is_alt_pressed", new=lambda: False)
     @patch("app.time.sleep")
-    @patch("app._send_key_chord")
+    @patch("app._send_key_chord", return_value=True)
     @patch("app._set_windows_clipboard_text")
     @patch("app.rewrite_selected_text", return_value="Texto revisado.")
     @patch("app._copy_selected_text", side_effect=["Texto original.", "Texto original."])
@@ -907,8 +908,48 @@ class RewriteWorkflowTests(unittest.TestCase):
         record_usage.assert_called_once()
         self.assertEqual(harness.finished, [("Texto revisado.", None)])
 
+    def test_rewrite_restores_rich_snapshot_before_final_selection_check(self):
+        original = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "Original\x00".encode("utf-16-le")),), 10)
+        harness = self.Harness()
+        with patch.object(app, "is_alt_pressed", new=lambda: False), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             side_effect=[original, original]), \
+                patch.object(app, "_clipboard_sequence_number", return_value=10), \
+                patch.object(app, "_get_windows_clipboard_text", return_value="Original"), \
+                patch.object(app, "_restore_windows_clipboard") as restore, \
+                patch.object(app, "_copy_selected_text",
+                             side_effect=["Original", "Original"]), \
+                patch.object(app, "rewrite_selected_text", return_value="Rewritten"), \
+                patch.object(app, "_foreground_window_handle", side_effect=[77, 77]), \
+                patch.object(app, "_paste_generated_text", return_value=True), \
+                patch.object(app, "_record_usage_event"):
+            app.App._rewrite_selection_worker(harness, 77)
+
+        self.assertGreaterEqual(restore.call_count, 2)
+        self.assertEqual(restore.call_args_list[0].args[0], original)
+        self.assertEqual(harness.finished, [("Rewritten", None)])
+
+    def test_rewrite_provider_failure_keeps_rich_snapshot_restored(self):
+        original = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "Original\x00".encode("utf-16-le")),), 10)
+        harness = self.Harness()
+        with patch.object(app, "is_alt_pressed", new=lambda: False), \
+                patch.object(app, "_snapshot_windows_clipboard", return_value=original), \
+                patch.object(app, "_clipboard_sequence_number", return_value=10), \
+                patch.object(app, "_get_windows_clipboard_text", return_value="Original"), \
+                patch.object(app, "_restore_windows_clipboard") as restore, \
+                patch.object(app, "_copy_selected_text", return_value="Original"), \
+                patch.object(app, "rewrite_selected_text", return_value="[Error: failed]"), \
+                patch.object(app, "_set_windows_clipboard_text") as set_clipboard:
+            app.App._rewrite_selection_worker(harness, 77)
+
+        restore.assert_called_once_with(original)
+        set_clipboard.assert_not_called()
+        self.assertEqual(harness.finished, [(None, "rewrite_failed")])
+
     @patch("app.time.sleep")
-    @patch("app._send_key_chord")
+    @patch("app._send_key_chord", return_value=True)
     @patch("app._set_windows_clipboard_text")
     @patch("app.translate_selected_text", return_value="Hallo Welt")
     @patch("app._copy_selected_text", return_value="Hello world")

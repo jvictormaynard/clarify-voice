@@ -2367,7 +2367,11 @@ def _paste_generated_text(text, *, should_paste=True,
             paste_result = _send_key_chord("ctrl+v")
         except Exception:
             return False
-        if paste_result is False:
+        # A native key-dispatch helper can report that it injected events,
+        # but cannot prove the target application consumed Ctrl+V. Only an
+        # explicit True from an integration/test with that evidence permits
+        # restoration; every other result keeps the generated text available.
+        if paste_result is not True:
             return False
 
         time.sleep(restore_delay)
@@ -2379,12 +2383,12 @@ def _paste_generated_text(text, *, should_paste=True,
             still_owned = False
         # The sequence must be sampled immediately after writing, not after
         # the delay.  Use the result text as a second guard against contention.
-        if still_owned and previous is not None:
+        if still_owned and previous is not None and previous.restorable:
             try:
                 _restore_windows_clipboard(previous)
             except OSError:
                 pass
-        return True
+        return not (previous is not None and not previous.restorable)
 
 
 def _send_key_chord(chord):
@@ -4603,11 +4607,11 @@ class App(ctk.CTk):
                 return
 
             selected_text = _copy_selected_text()
+            if isinstance(previous_clipboard, ClipboardSnapshot):
+                _restore_clipboard_snapshot_if_owned(
+                    previous_clipboard, _clipboard_sequence_number(), selected_text)
             if not selected_text or not selected_text.strip():
-                if isinstance(previous_clipboard, ClipboardSnapshot):
-                    _restore_clipboard_snapshot_if_owned(
-                        previous_clipboard, _clipboard_sequence_number(), selected_text)
-                else:
+                if not isinstance(previous_clipboard, ClipboardSnapshot):
                     self._restore_clipboard_text(previous_clipboard)
                 self.after(0, lambda: self._finish_rewrite(status_key="no_selection"))
                 return
@@ -4738,8 +4742,11 @@ class App(ctk.CTk):
         should_paste = (
             target_window is None
             or _foreground_window_handle() == target_window)
+        paste = (
+            (lambda: _paste_generated_text(text, should_paste=should_paste))
+            if IS_WIN else (lambda: copy_and_paste(text)))
         threading.Thread(
-            target=lambda: _paste_generated_text(text, should_paste=should_paste),
+            target=paste,
             daemon=True).start()
         def finish():
             self._set_state(

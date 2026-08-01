@@ -31,6 +31,7 @@ class ClipboardFormat:
 class ClipboardSnapshot:
     formats: tuple[ClipboardFormat, ...]
     sequence: int
+    restorable: bool = True
 
     @property
     def text(self) -> str | None:
@@ -124,6 +125,7 @@ class WindowsClipboardAdapter:
         supported = self._supported_formats()
         self._open()
         formats = []
+        restorable = True
         try:
             format_id = 0
             while True:
@@ -131,13 +133,19 @@ class WindowsClipboardAdapter:
                 if not format_id:
                     break
                 if format_id not in supported:
+                    # We cannot safely recreate arbitrary clipboard objects.
+                    restorable = False
                     continue
                 data = self._read_global_memory(user32.GetClipboardData(format_id))
                 if data is not None:
                     formats.append(ClipboardFormat(format_id, data))
+                else:
+                    # A supported format that cannot be copied (for example,
+                    # an oversized DIB) makes the snapshot incomplete.
+                    restorable = False
         finally:
             user32.CloseClipboard()
-        return ClipboardSnapshot(tuple(formats), self.sequence())
+        return ClipboardSnapshot(tuple(formats), self.sequence(), restorable)
 
     def text(self) -> str | None:
         snapshot = self.snapshot()
@@ -189,7 +197,8 @@ class WindowsClipboardAdapter:
                 self._kernel32().GlobalFree(handle)
 
     def restore(self, snapshot: ClipboardSnapshot | None) -> bool:
-        if not self.is_windows or snapshot is None:
+        if (not self.is_windows or snapshot is None
+                or not snapshot.restorable):
             return False
         user32 = self._user32()
         user32.EmptyClipboard.restype = ctypes.c_int

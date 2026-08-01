@@ -68,8 +68,8 @@ def is_alt_pressed() -> bool:
     return bool(ctypes.windll.user32.GetAsyncKeyState(VK_MENU) & 0x8000)
 
 
-def send_ctrl_key(letter: str) -> bool:
-    """Send Ctrl plus one ASCII letter and report Win32 dispatch success."""
+def send_ctrl_key(letter: str) -> bool | None:
+    """Inject Ctrl plus one ASCII letter without claiming paste consumption."""
     virtual_key = ord(str(letter).upper())
     user32 = ctypes.windll.user32
     key_up = 0x0002
@@ -78,6 +78,8 @@ def send_ctrl_key(letter: str) -> bool:
         user32.keybd_event(virtual_key, 0, 0, 0)
         user32.keybd_event(virtual_key, 0, key_up, 0)
         user32.keybd_event(0x11, 0, key_up, 0)  # Ctrl up
-        return True
+        # keybd_event is void; successful injection is not proof that the
+        # target consumed Ctrl+V. Returning None keeps the result available.
+        return None
     except OSError:
         return False

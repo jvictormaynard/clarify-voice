@@ -8,6 +8,7 @@ from windows_clipboard import (
     CF_UNICODETEXT,
     ClipboardFormat,
     ClipboardSnapshot,
+    WindowsClipboardAdapter,
 )
 
 
@@ -81,6 +82,24 @@ class ClipboardPasteTests(unittest.TestCase):
 
         self.assertEqual(self.clipboard.text(), "result")
 
+    def test_injected_ctrl_v_without_consumption_keeps_generated_result(self):
+        with patch.object(app, "_WINDOWS_CLIPBOARD", self.clipboard), \
+                patch.object(app, "_send_key_chord", return_value=None), \
+                patch.object(app.time, "sleep"):
+            self.assertFalse(app._paste_generated_text("result"))
+
+        self.assertEqual(self.clipboard.text(), "result")
+
+    def test_uncapturable_snapshot_never_empties_clipboard_on_restore(self):
+        self.clipboard.state = ClipboardSnapshot(
+            (ClipboardFormat(9001, b"unsupported"),), 10, restorable=False)
+        with patch.object(app, "_WINDOWS_CLIPBOARD", self.clipboard), \
+                patch.object(app, "_send_key_chord", return_value=True), \
+                patch.object(app.time, "sleep"):
+            self.assertFalse(app._paste_generated_text("result"))
+
+        self.assertEqual(self.clipboard.text(), "result")
+
     def test_overlapping_operations_are_serialized(self):
         entered = threading.Event()
         release = threading.Event()
@@ -115,3 +134,59 @@ class ClipboardSnapshotTests(unittest.TestCase):
         snapshot = ClipboardSnapshot(
             (ClipboardFormat(CF_UNICODETEXT, "rich text\x00".encode("utf-16-le")),), 1)
         self.assertEqual(snapshot.text, "rich text")
+
+    def test_unsupported_only_clipboard_is_not_a_restorable_empty_snapshot(self):
+        adapter = _EnumeratingAdapter([9001], {})
+        snapshot = adapter.snapshot()
+        self.assertEqual(snapshot.formats, ())
+        self.assertFalse(snapshot.restorable)
+
+    def test_oversized_supported_format_is_not_restorable(self):
+        adapter = _EnumeratingAdapter([CF_DIB], {CF_DIB: None})
+        snapshot = adapter.snapshot()
+        self.assertEqual(snapshot.formats, ())
+        self.assertFalse(snapshot.restorable)
+
+
+class _FakeFunction:
+    def __init__(self, callback):
+        self.callback = callback
+
+    def __call__(self, *args):
+        return self.callback(*args)
+
+
+class _FakeUser32:
+    def __init__(self, formats):
+        self.formats = formats
+        self.EnumClipboardFormats = _FakeFunction(self._enum)
+        self.GetClipboardData = _FakeFunction(lambda format_id: format_id)
+        self.CloseClipboard = _FakeFunction(lambda: None)
+
+    def _enum(self, previous):
+        if previous == 0:
+            return self.formats[0] if self.formats else 0
+        index = self.formats.index(previous) + 1
+        return self.formats[index] if index < len(self.formats) else 0
+
+
+class _EnumeratingAdapter(WindowsClipboardAdapter):
+    def __init__(self, formats, data):
+        super().__init__(is_windows=True)
+        self.user32 = _FakeUser32(formats)
+        self.data = data
+
+    def _user32(self):
+        return self.user32
+
+    def _supported_formats(self):
+        return {CF_DIB}
+
+    def _open(self, timeout=0.25):
+        return None
+
+    def _read_global_memory(self, handle):
+        return self.data.get(handle)
+
+    def sequence(self):
+        return 1
