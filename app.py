@@ -391,6 +391,22 @@ def _save_app_config(repositories=None):
     _storage_repositories(repositories).config.save(APP_CONFIG)
 
 
+def _activate_repositories(repositories):
+    """Load injected config into the legacy compatibility state.
+
+    Provider and UI code still reads ``APP_CONFIG`` during this staged
+    extraction.  A custom repository bundle must therefore become the source
+    of that compatibility mapping before an ``App`` instance starts reading
+    provider settings or writing preferences.
+    """
+    if repositories is None or repositories is APP_REPOSITORIES:
+        return APP_CONFIG
+    loaded = _load_app_config(repositories)
+    APP_CONFIG.clear()
+    APP_CONFIG.update(loaded)
+    return APP_CONFIG
+
+
 def _autostart_command(executable=None):
     executable = str(executable or sys.executable)
     args = [executable]
@@ -3314,6 +3330,7 @@ class App(ctk.CTk):
     def __init__(self, start_hidden=False, repositories=None):
         super().__init__()
         self.repositories = repositories or APP_REPOSITORIES
+        _activate_repositories(self.repositories)
         self._clarify_visibility_target = not start_hidden
         if start_hidden:
             self.withdraw()

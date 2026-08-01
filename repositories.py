@@ -309,6 +309,10 @@ class UsageStatsRepository(ABC):
         raise NotImplementedError
 
 
+class UnsupportedSchemaVersionError(OSError):
+    """Raised when saving would downgrade a file from a newer schema."""
+
+
 class LocalConfigRepository(ConfigRepository):
     """JSON-backed repository for ``%APPDATA%\\ClarifyVoice\\config.json``."""
 
@@ -321,6 +325,7 @@ class LocalConfigRepository(ConfigRepository):
         self.path = Path(path)
         self.defaults = dict(defaults or environment_defaults(environment))
         self._lock = threading.RLock()
+        self._future_schema_version: int | None = None
 
     def load(self) -> AppConfig:
         with self._lock:
@@ -328,14 +333,30 @@ class LocalConfigRepository(ConfigRepository):
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, ValueError, TypeError):
                 raw = {}
+            version = _version(raw.get("schema_version")) if isinstance(raw, Mapping) else 0
+            self._future_schema_version = (
+                version if version > CONFIG_SCHEMA_VERSION else None)
             migrated = migrate_config_payload(raw)
             return AppConfig.from_mapping(migrated, self.defaults)
 
     def save(self, config: AppConfig | Mapping[str, Any]) -> None:
         with self._lock:
+            if self._future_schema_version is not None:
+                raise UnsupportedSchemaVersionError(
+                    f"Cannot save schema version {self._future_schema_version} "
+                    f"with supported version {CONFIG_SCHEMA_VERSION}")
             if isinstance(config, AppConfig):
+                if config.schema_version > CONFIG_SCHEMA_VERSION:
+                    raise UnsupportedSchemaVersionError(
+                        f"Cannot save schema version {config.schema_version} "
+                        f"with supported version {CONFIG_SCHEMA_VERSION}")
                 model = config
             else:
+                supplied_version = _version(config.get("schema_version"))
+                if supplied_version > CONFIG_SCHEMA_VERSION:
+                    raise UnsupportedSchemaVersionError(
+                        f"Cannot save schema version {supplied_version} "
+                        f"with supported version {CONFIG_SCHEMA_VERSION}")
                 model = AppConfig.from_mapping(config, self.defaults)
             _atomic_write_json(self.path, model.to_mapping())
 

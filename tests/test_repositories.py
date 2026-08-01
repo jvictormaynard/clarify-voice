@@ -8,6 +8,7 @@ from repositories import (
     AppConfig,
     LocalConfigRepository,
     LocalUsageStatsRepository,
+    UnsupportedSchemaVersionError,
     migrate_config_payload,
 )
 
@@ -60,6 +61,38 @@ class ConfigurationRepositoryTests(unittest.TestCase):
         self.assertEqual(loaded.ui.language, "pt")
         self.assertNotIn("unknown_future_setting", payload)
 
+    def test_injected_repository_becomes_the_app_compatibility_source(self):
+        import app
+        from repositories import ApplicationRepositories
+
+        with tempfile.TemporaryDirectory() as directory:
+            default_path = Path(directory) / "default.json"
+            injected_path = Path(directory) / "injected.json"
+            default = LocalConfigRepository(default_path)
+            injected = LocalConfigRepository(injected_path)
+            default.save({"transcription_provider": "gemini", "ui_mode": "prompt"})
+            injected.save({
+                "transcription_provider": "openai",
+                "openai_api_key": "injected-key",
+                "ui_mode": "transcription",
+            })
+            bundle = ApplicationRepositories(
+                config=injected,
+                usage_stats=LocalUsageStatsRepository(Path(directory) / "stats.json"),
+            )
+            original = app.APP_CONFIG.copy()
+            try:
+                app._activate_repositories(bundle)
+                self.assertEqual(app.APP_CONFIG["transcription_provider"], "openai")
+                self.assertEqual(app.APP_CONFIG["openai_api_key"], "injected-key")
+                self.assertEqual(app.APP_CONFIG["ui_mode"], "transcription")
+                app._save_app_config(bundle)
+                self.assertEqual(injected.load().selection.transcription_provider, "openai")
+                self.assertEqual(default.load().selection.transcription_provider, "gemini")
+            finally:
+                app.APP_CONFIG.clear()
+                app.APP_CONFIG.update(original)
+
 
 class ConfigurationMigrationTests(unittest.TestCase):
     def test_legacy_migration_is_ordered_and_idempotent(self):
@@ -76,6 +109,24 @@ class ConfigurationMigrationTests(unittest.TestCase):
 
         self.assertEqual(migrated["schema_version"], CONFIG_SCHEMA_VERSION + 10)
         self.assertEqual(migrated["ui_language"], "es")
+
+    def test_future_schema_loads_but_save_refuses_a_downgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "schema_version": CONFIG_SCHEMA_VERSION + 1,
+                "ui_language": "es",
+                "future_setting": {"keep": "me"},
+            }), encoding="utf-8")
+            original = path.read_bytes()
+            repository = LocalConfigRepository(path)
+            config = repository.load()
+
+            self.assertEqual(config.ui.language, "es")
+            with self.assertRaises(UnsupportedSchemaVersionError):
+                repository.save(config)
+
+            self.assertEqual(path.read_bytes(), original)
 
 
 class UsageStatisticsRepositoryTests(unittest.TestCase):

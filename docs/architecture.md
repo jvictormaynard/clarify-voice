@@ -76,7 +76,9 @@ adds `schema_version`, and applies ordered idempotent migrations. Its typed
 `AppConfig` model groups provider endpoints/model IDs, provider selection, UI
 preferences, and startup settings. `LocalUsageStatsRepository` preserves the
 anonymous event list and its existing `version` marker while also writing an
-explicit `schema_version`.
+explicit `schema_version`. A file from a newer schema is loaded read-only for
+compatibility; saves are refused until a version that understands that schema
+is running, so a downgrade cannot delete newer fields.
 
 ## Data ownership
 
