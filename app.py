@@ -2008,6 +2008,7 @@ class Recorder:
         # while the application is starting instead of delaying the first
         # microphone samples after the recording pill is already visible.
         self._stop_stale_windows_recorders()
+        self._cleanup_orphaned_recordings()
 
     def start(self, audio_path=None, cancel_event=None):
         """Start SoX for one owned path, refusing a concurrent cancellation."""
@@ -2232,6 +2233,30 @@ class Recorder:
                 creationflags=0x08000000, capture_output=True, timeout=8)
         except Exception:
             pass
+
+    @staticmethod
+    def _cleanup_orphaned_recordings():
+        """Remove only app-owned WAVs left by an interrupted session."""
+        try:
+            data_dir = Path(DATA_DIR).resolve()
+            candidates = []
+            legacy_path = Path(AUDIO_PATH)
+            if (legacy_path.name == "temp_recording.wav"
+                    and legacy_path.parent.resolve() == data_dir):
+                candidates.append(legacy_path)
+            for path in data_dir.glob("clarifyvoice-recording-*.wav"):
+                if (path.name.startswith("clarifyvoice-recording-")
+                        and path.name.endswith(".wav")
+                        and path.parent.resolve() == data_dir):
+                    candidates.append(path)
+        except (OSError, RuntimeError):
+            return
+        for path in candidates:
+            try:
+                Recorder._safe_delete(path)
+            except Exception:
+                # Recovery must never prevent the application from starting.
+                pass
 
     def cancel(self):
         with self._lifecycle_lock:

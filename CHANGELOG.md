@@ -12,6 +12,8 @@ Notable user-facing changes are documented here. This project follows
   success, failure, cancellation, and application exit
 - Moved stale SoX discovery out of the first-audio hot path and coordinated
   shutdown with active provider uploads before the final cleanup retry
+- Removed legacy and session-pattern WAVs left behind by an interrupted
+  startup, while keeping cleanup limited to the app data directory
 
 ## [0.1.2] - 2026-07-31
 

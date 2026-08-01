@@ -101,6 +101,43 @@ class RecordingSessionTests(unittest.TestCase):
         self.assertIn(str(session_path), command[-1])
         self.assertIn("sox.exe", command[-1])
 
+    def test_startup_cleanup_removes_owned_wavs_only(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                tempfile.TemporaryDirectory() as outside:
+            data_dir = Path(directory)
+            legacy = data_dir / "temp_recording.wav"
+            session_wav = data_dir / "clarifyvoice-recording-ab12CD.wav"
+            unrelated = data_dir / "meeting.wav"
+            wrong_suffix = data_dir / "clarifyvoice-recording-ab12CD.mp3"
+            outside_wav = Path(outside) / "clarifyvoice-recording-outside.wav"
+            for path in (legacy, session_wav, unrelated, wrong_suffix, outside_wav):
+                path.write_bytes(b"audio")
+
+            with patch.object(app, "DATA_DIR", data_dir), patch.object(
+                    app, "AUDIO_PATH", legacy):
+                app.Recorder._cleanup_orphaned_recordings()
+
+            self.assertFalse(legacy.exists())
+            self.assertFalse(session_wav.exists())
+            self.assertTrue(unrelated.exists())
+            self.assertTrue(wrong_suffix.exists())
+            self.assertTrue(outside_wav.exists())
+
+    def test_startup_cleanup_failure_does_not_abort_recorder_init(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            legacy = data_dir / "temp_recording.wav"
+            legacy.write_bytes(b"audio")
+            with patch.object(app, "DATA_DIR", data_dir), patch.object(
+                    app, "AUDIO_PATH", legacy), patch.object(
+                    app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                    app.Recorder, "_safe_delete",
+                    side_effect=PermissionError("locked")):
+                recorder = app.Recorder()
+
+            self.assertIsInstance(recorder, app.Recorder)
+            self.assertTrue(legacy.exists())
+
     def test_unique_session_start_does_not_scan_stale_processes(self):
         stream = Mock()
         fake_sounddevice = SimpleNamespace(
