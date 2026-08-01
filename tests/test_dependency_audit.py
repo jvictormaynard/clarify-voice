@@ -19,8 +19,22 @@ class DependencyAuditFormatTests(unittest.TestCase):
         self.assertEqual(_vulnerability_ids(payload), {"PYSEC-2"})
 
     def test_malformed_fixture_fails_closed(self):
-        with self.assertRaises(ValueError):
-            _vulnerability_ids({"dependencies": ["not-a-package"]})
+        fixtures = (
+            ({"fixes": []}, "dependencies"),
+            ({"dependencies": ["not-a-package"]}, "package entries"),
+            ({"dependencies": {"example": []}}, "dependencies must be a list"),
+            ({"dependencies": [{"name": "example"}]}, "contain vulns"),
+            (
+                {"dependencies": [{"name": "example", "vulns": {}}]},
+                "vulnerabilities must be a list",
+            ),
+        )
+        for payload, message in fixtures:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                _vulnerability_ids(payload)
 
 
 if __name__ == "__main__":

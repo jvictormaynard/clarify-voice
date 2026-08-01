@@ -21,7 +21,9 @@ POLICYFILE = ROOT / "dependency-audit.json"
 def _vulnerability_ids(payload: object) -> set[str]:
     """Extract vulnerability IDs from pip-audit's object or legacy list JSON."""
     if isinstance(payload, dict):
-        findings = payload.get("dependencies", [])
+        if "dependencies" not in payload:
+            raise ValueError("pip-audit object envelope must contain dependencies")
+        findings = payload["dependencies"]
     elif isinstance(payload, list):
         findings = payload
     else:
@@ -33,7 +35,9 @@ def _vulnerability_ids(payload: object) -> set[str]:
     for package in findings:
         if not isinstance(package, dict):
             raise ValueError("pip-audit package entries must be objects")
-        package_vulnerabilities = package.get("vulns", [])
+        if "vulns" not in package:
+            raise ValueError("pip-audit package entries must contain vulns")
+        package_vulnerabilities = package["vulns"]
         if not isinstance(package_vulnerabilities, list):
             raise ValueError("pip-audit package vulnerabilities must be a list")
         for vulnerability in package_vulnerabilities:
