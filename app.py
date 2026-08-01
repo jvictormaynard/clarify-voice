@@ -447,6 +447,23 @@ def _is_autostart_enabled(registry=None) -> bool:
         return False
 
 
+def _persist_autostart_preference(enabled: bool, repositories=None, registry=None) -> None:
+    """Keep the Windows startup entry and persisted preference in sync."""
+    previous = bool(APP_CONFIG.get("autostart", False))
+    selected = bool(enabled)
+    try:
+        APP_CONFIG["autostart"] = selected
+        _set_autostart(selected, registry)
+        _save_app_config(repositories)
+    except OSError:
+        APP_CONFIG["autostart"] = previous
+        try:
+            _set_autostart(previous, registry)
+        except OSError:
+            pass
+        raise
+
+
 def _apply_selected_models(selected, selected_refinement, audio_options,
         text_options, model_keys):
     """Persist independently valid transcription and text-model selections."""
@@ -6338,8 +6355,8 @@ class App(ctk.CTk):
                 selected, selected_refinement, active_options(),
                 active_text_options(), model_keys)
             try:
-                _set_autostart(bool(autostart_switch.get()))
-                _save_app_config(self.repositories)
+                _persist_autostart_preference(
+                    bool(autostart_switch.get()), self.repositories)
             except OSError:
                 return
             saved_settings.clear()

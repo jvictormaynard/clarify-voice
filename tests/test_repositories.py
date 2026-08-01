@@ -120,6 +120,87 @@ class ConfigurationRepositoryTests(unittest.TestCase):
                 app.APP_CONFIG.clear()
                 app.APP_CONFIG.update(original)
 
+    def test_autostart_apply_updates_registry_and_repository_together(self):
+        import app
+        from repositories import ApplicationRepositories
+
+        class Key:
+            def __init__(self, registry):
+                self.registry = registry
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Registry:
+            HKEY_CURRENT_USER = 1
+            REG_SZ = 1
+
+            def __init__(self):
+                self.values = {}
+
+            def CreateKey(self, *_args):
+                return Key(self)
+
+            def OpenKey(self, *_args):
+                return Key(self)
+
+            def SetValueEx(self, _key, name, _reserved, _kind, value):
+                self.values[name] = value
+
+            def QueryValueEx(self, _key, name):
+                if name not in self.values:
+                    raise FileNotFoundError(name)
+                return self.values[name], self.REG_SZ
+
+            def DeleteValue(self, _key, name):
+                if name not in self.values:
+                    raise FileNotFoundError(name)
+                del self.values[name]
+
+        class FailingConfigRepository(LocalConfigRepository):
+            def save(self, _config):
+                raise OSError("simulated config write failure")
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_repository = LocalConfigRepository(Path(directory) / "config.json")
+            config_repository.save({"autostart": True})
+            bundle = ApplicationRepositories(
+                config=config_repository,
+                usage_stats=LocalUsageStatsRepository(Path(directory) / "stats.json"),
+            )
+            registry = Registry()
+            original = app.APP_CONFIG.copy()
+            try:
+                app._activate_repositories(bundle)
+                with patch.object(app, "IS_WIN", True):
+                    app._persist_autostart_preference(False, bundle, registry)
+                self.assertFalse(app.APP_CONFIG["autostart"])
+                self.assertNotIn("ClarifyVoice", registry.values)
+                self.assertFalse(config_repository.load().startup.autostart)
+
+                with patch.object(app, "IS_WIN", True):
+                    app._persist_autostart_preference(True, bundle, registry)
+                self.assertTrue(app.APP_CONFIG["autostart"])
+                self.assertIn("ClarifyVoice", registry.values)
+                self.assertTrue(config_repository.load().startup.autostart)
+
+                failing_bundle = ApplicationRepositories(
+                    config=FailingConfigRepository(config_repository.path),
+                    usage_stats=bundle.usage_stats,
+                )
+                with patch.object(app, "IS_WIN", True):
+                    with self.assertRaises(OSError):
+                        app._persist_autostart_preference(False, failing_bundle, registry)
+                self.assertTrue(app.APP_CONFIG["autostart"])
+                self.assertIn("ClarifyVoice", registry.values)
+                self.assertTrue(config_repository.load().startup.autostart)
+            finally:
+                app.APP_CONFIG.clear()
+                app.APP_CONFIG.update(original)
+
 
 class ConfigurationMigrationTests(unittest.TestCase):
     def test_legacy_migration_is_ordered_and_idempotent(self):
