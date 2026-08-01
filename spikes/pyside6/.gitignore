@@ -1,0 +1,6 @@
+.venv/
+build/
+artifacts/
+measurements-*.csv
+screenshots/
+recordings/
