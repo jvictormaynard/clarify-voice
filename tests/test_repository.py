@@ -8,6 +8,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RepositorySafetyTests(unittest.TestCase):
+    def test_dependabot_uses_versioning_strategy_only_where_supported(self):
+        config = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+        pip_section, actions_section = config.split(
+            "  - package-ecosystem: github-actions", 1
+        )
+        self.assertIn("versioning-strategy: increase-if-necessary", pip_section)
+        self.assertNotIn("versioning-strategy:", actions_section)
+
     def test_windows_builds_never_bundle_dotenv(self):
         scripts = [
             ROOT / "scripts" / "build.ps1",

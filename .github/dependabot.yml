@@ -13,7 +13,6 @@ updates:
     directory: /
     schedule:
       interval: monthly
-    versioning-strategy: increase-if-necessary
     open-pull-requests-limit: 5
     labels:
       - dependencies
