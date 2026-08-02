@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import app
@@ -205,6 +206,57 @@ class WorkflowRecordingIntegrationTests(unittest.TestCase):
             self.assertEqual(sessions[0].state, "completed")
             self.assertFalse(path.exists())
             self.assertEqual(service.state.phase, WorkflowPhase.COMPLETED)
+
+    def test_cancel_keeps_recording_owner_until_attached_workers_detach(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(app.time, "sleep", return_value=None),
+        ):
+            path = Path(directory) / "recording.wav"
+            recorder = Recorder(block_start=True)
+            cancel_entered = threading.Event()
+            cancel_release = threading.Event()
+
+            def blocked_cancel():
+                cancel_entered.set()
+                cancel_release.wait(timeout=1)
+                recorder.start_release.set()
+
+            recorder.cancel = blocked_cancel
+            session = app.RecordingSession(recorder, audio_path=path)
+            gateway = app.RecordingAudioGateway(lambda: session, lambda: True)
+            tk_loop = SimpleNamespace(after=lambda _delay, callback: callback())
+            scheduler = app.AppWorkflowScheduler(tk_loop)
+            service = self.make_service(
+                gateway, Provider(), Clipboard(), scheduler, Clock()
+            )
+
+            service.dispatch(
+                StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+            )
+            self.assertTrue(recorder.start_entered.wait(timeout=1))
+            self.assertTrue(session._active_workers())
+
+            service.cancel_active()
+            self.assertTrue(cancel_entered.wait(timeout=1))
+
+            # READY is published before cancellation workers finish, but the
+            # owner must remain live and reject a replacement in this window.
+            self.assertFalse(session.shutdown_complete.is_set())
+            owner = SimpleNamespace(
+                _recording_session=session,
+                _new_recording_session=lambda: SimpleNamespace(
+                    shutdown_complete=threading.Event()
+                ),
+            )
+            self.assertIsNone(app.App._new_workflow_recording_session(owner))
+
+            cancel_release.set()
+            self.assertTrue(session.shutdown_complete.wait(timeout=2))
+            replacement = app.App._new_workflow_recording_session(owner)
+
+        self.assertIsNot(replacement, session)
+        self.assertEqual(recorder.order[0], "start_entered")
 
 
 if __name__ == "__main__":

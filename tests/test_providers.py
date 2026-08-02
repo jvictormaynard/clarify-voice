@@ -1052,6 +1052,33 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
         self.assertIsNotNone(capture)
         self.assertIs(capture.context["previous"], previous)
 
+    def test_capture_rechecks_focus_after_snapshot_before_copy(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          side_effect=[True, False]), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_copy_selected_text_with_sequence") as copy:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        copy.assert_not_called()
+
+    def test_capture_rechecks_focus_immediately_before_copy_chord(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          side_effect=[True, True, False]), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_clipboard_sequence_number", return_value=10), \
+                patch.object(app, "_send_key_chord") as send_key:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        send_key.assert_not_called()
+
     def test_capture_rejects_clipboard_change_before_copy_chord(self):
         previous = ClipboardSnapshot((ClipboardFormat(
             CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
@@ -1139,6 +1166,36 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
         send_key.assert_not_called()
         copy_result.assert_called_once_with("generated", should_paste=False)
 
+    def test_apply_result_rechecks_focus_inside_paste_transaction(self):
+        capture = app.SelectionCapture(self.target, "selected")
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        focus = {"window": 77}
+
+        def current(target):
+            return focus["window"] == target.window
+
+        def write_result(_text):
+            focus["window"] = 88
+
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          side_effect=current), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             side_effect=[previous, previous]), \
+                patch.object(app, "_copy_selected_text",
+                             return_value="selected"), \
+                patch.object(app, "_clipboard_sequence_number",
+                             side_effect=[11, 12]), \
+                patch.object(app, "_restore_clipboard_snapshot_if_owned"), \
+                patch.object(app, "_set_windows_clipboard_text",
+                             side_effect=write_result), \
+                patch.object(app, "_send_key_chord") as send_key:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        send_key.assert_not_called()
+
 
 class WorkflowAppBridgeTests(unittest.TestCase):
     def test_dictation_uses_platform_copy_and_paste_on_non_windows(self):
@@ -1151,7 +1208,9 @@ class WorkflowAppBridgeTests(unittest.TestCase):
                 target, "result")
 
         self.assertEqual(disposition, app.SelectionDisposition.PASTED)
-        copy.assert_called_once_with("result")
+        copy.assert_called_once()
+        self.assertEqual(copy.call_args.args, ("result",))
+        self.assertTrue(callable(copy.call_args.kwargs["paste_predicate"]))
 
     def test_dictation_non_windows_focus_change_copies_without_pasting(self):
         target = app.SelectionTarget(77, "editor.exe")

@@ -168,6 +168,9 @@ class ProviderGateway(Protocol):
 class RecordingSessionGateway(Protocol):
     """One recording lifecycle owned by the recording component."""
 
+    def attach_worker(self, worker: Any) -> None: ...
+    def attach_workflow_worker(self, worker: Any) -> None: ...
+    def detach_worker(self, worker: Any) -> None: ...
     def start(self) -> None: ...
     def wait_until_started(self) -> None:
         """Wait for startup to finish, raising its failure or cancellation."""
@@ -233,6 +236,11 @@ class StatisticsGateway(Protocol):
 class Scheduler(Protocol):
     def call_soon(self, callback: Callable[[], None]) -> None: ...
     def run_in_background(self, callback: Callable[[], None]) -> None: ...
+    def run_recording(
+        self,
+        recording: RecordingSessionGateway,
+        callback: Callable[[], None],
+    ) -> None: ...
 
 
 class Clock(Protocol):
@@ -369,7 +377,7 @@ class WorkflowService:
                 self._session = None
                 self._state = WorkflowState()
         if session and session.recording is not None:
-            self._scheduler.run_in_background(session.recording.cancel)
+            self._run_recording(session.recording, session.recording.cancel)
         if not deferred_release:
             self._scheduler.call_soon(lambda: self._deliver_ready())
 
@@ -482,6 +490,24 @@ class WorkflowService:
             and self._clipboard.is_target_current(session.target)
         )
 
+    def _run_recording(
+        self,
+        recording: RecordingSessionGateway,
+        callback: Callable[[], None],
+    ) -> None:
+        """Run a recording worker through the owner's lifecycle seam.
+
+        Older headless schedulers only implement ``run_in_background``; keep
+        that narrow compatibility fallback while the real Tk scheduler uses
+        ``run_recording`` to attach the worker before it starts and detach it
+        in a ``finally`` block.
+        """
+        run_recording = getattr(self._scheduler, "run_recording", None)
+        if run_recording is None:
+            self._scheduler.run_in_background(callback)
+            return
+        run_recording(recording, callback)
+
     # Dictation
 
     def _start_dictation(self, command: StartDictation) -> bool:
@@ -535,10 +561,7 @@ class WorkflowService:
             target=command.target,
         )
         if session is None:
-            try:
-                recording.cancel()
-            except Exception:
-                pass
+            self._run_recording(recording, recording.cancel)
             return False
         session.mode = command.mode
         session.language = command.language
@@ -546,7 +569,9 @@ class WorkflowService:
         session.usage_context = self._config.recording_usage_context(command.mode)
         session.recording = recording
         self._transition(session, WorkflowPhase.RECORDING)
-        self._scheduler.run_in_background(lambda: self._start_audio(session))
+        self._run_recording(
+            recording, lambda: self._start_audio(session)
+        )
         return True
 
     def _start_audio(self, session: _Session) -> None:
@@ -592,12 +617,15 @@ class WorkflowService:
                 session is None
                 or session.kind is not WorkflowKind.DICTATION
                 or self._state.phase is not WorkflowPhase.RECORDING
+                or session.recording is None
             ):
                 return False
+            recording = session.recording
         elapsed = self._clock.time() - session.started_at
         self._transition(session, WorkflowPhase.PROCESSING)
-        self._scheduler.run_in_background(
-            lambda: self._process_dictation(session, elapsed)
+        self._run_recording(
+            recording,
+            lambda: self._process_dictation(session, elapsed),
         )
         return True
 
@@ -718,7 +746,7 @@ class WorkflowService:
             self._session = None
             self._state = WorkflowState()
         if session.recording is not None:
-            self._scheduler.run_in_background(session.recording.cancel)
+            self._run_recording(session.recording, session.recording.cancel)
         self._scheduler.call_soon(lambda: self._deliver_ready())
         return True
 

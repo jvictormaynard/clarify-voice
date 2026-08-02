@@ -2604,6 +2604,7 @@ class RecordingSession:
         self._pending_usage_event = None
         self._lock = threading.RLock()
         self._workers = set()
+        self._workflow_workers = set()
         self._workers_lock = threading.RLock()
         self._cleanup_lock = threading.Lock()
         self._cleanup_done = threading.Event()
@@ -2705,12 +2706,19 @@ class RecordingSession:
         with self._workers_lock:
             self._workers.add(worker)
 
+    def attach_workflow_worker(self, worker):
+        """Attach a worker that must finish before this owner is released."""
+        with self._workers_lock:
+            self._workers.add(worker)
+            self._workflow_workers.add(worker)
+
     def mark_audio_snapshot_complete(self):
         self.audio_snapshot_complete.set()
 
     def detach_worker(self, worker):
         with self._workers_lock:
             self._workers.discard(worker)
+            self._workflow_workers.discard(worker)
             if self._shutdown_watcher_started and self.shutdown_timed_out:
                 # Persist the handoff request while the old watcher is still
                 # tearing down; its finally block will consume this under the
@@ -2725,6 +2733,10 @@ class RecordingSession:
     def _active_workers(self):
         with self._workers_lock:
             return tuple(self._workers)
+
+    def _active_workflow_workers(self):
+        with self._workers_lock:
+            return tuple(self._workflow_workers)
 
     def _active_workers_except_current(self):
         current = threading.current_thread()
@@ -2753,6 +2765,7 @@ class RecordingSession:
 
     def _complete_shutdown_if_ready(self):
         if (self.terminal and self._cleanup_done.is_set()
+                and not self._active_workflow_workers()
                 and (not self._active_workers()
                      or self.audio_snapshot_complete.is_set())):
             with self._lock:
@@ -3042,7 +3055,7 @@ def _restore_clipboard_snapshot_if_owned(snapshot, expected_sequence, expected_t
 
 
 def _paste_generated_text(text, *, should_paste=True,
-        restore_delay=CLIPBOARD_RESTORE_DELAY_SECONDS):
+        restore_delay=CLIPBOARD_RESTORE_DELAY_SECONDS, paste_predicate=None):
     """Write, optionally paste, and conditionally restore one result.
 
     The lock covers the bounded restore window so a second ClarifyVoice
@@ -3068,6 +3081,12 @@ def _paste_generated_text(text, *, should_paste=True,
 
         if not should_paste:
             return False
+        if paste_predicate is not None:
+            try:
+                if not paste_predicate():
+                    return False
+            except Exception:
+                return False
         try:
             paste_result = _send_key_chord("ctrl+v", expected_text=str(text))
         except Exception:
@@ -3102,7 +3121,8 @@ def _send_key_chord(chord, *, expected_text=None):
 
 
 def _copy_selected_text_with_sequence(
-        timeout=0.7, *, expected_sequence=None, suppress_read_errors=False):
+        timeout=0.7, *, expected_sequence=None, suppress_read_errors=False,
+        before_copy=None):
     """Copy a selection and retain the sequence observed by that copy.
 
     The caller uses the two sequence values to prove that the clipboard
@@ -3115,6 +3135,8 @@ def _copy_selected_text_with_sequence(
         expected_sequence is not None
         and previous_sequence != expected_sequence
     ):
+        return None, previous_sequence, previous_sequence
+    if before_copy is not None and not before_copy():
         return None, previous_sequence, previous_sequence
     _send_key_chord("ctrl+c")
     deadline = time.monotonic() + timeout
@@ -3165,20 +3187,29 @@ def _result_window_height(header_height, result_height):
     # Header has 10px vertical pack padding; the root card has 2px.
     return min(360, max(96, int(header_height) + 20 + int(result_height) + 4))
 
-def copy_and_paste(text, *, should_paste=True):
+def copy_and_paste(text, *, should_paste=True, paste_predicate=None):
     if IS_WIN:
         if should_paste:
-            return _paste_generated_text(text)
+            return _paste_generated_text(
+                text, paste_predicate=paste_predicate)
         return _paste_generated_text(text, should_paste=False)
-    elif IS_MAC:
+    paste_allowed = should_paste
+    if IS_MAC:
         subprocess.run(["pbcopy"], input=text.encode(), check=False)
-        if should_paste:
-            subprocess.run(["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'], check=False)
     else:
         subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=False)
-        if should_paste:
+    if should_paste and paste_predicate is not None:
+        try:
+            paste_allowed = bool(paste_predicate())
+        except Exception:
+            paste_allowed = False
+    if IS_MAC:
+        if paste_allowed:
+            subprocess.run(["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'], check=False)
+    else:
+        if paste_allowed:
             subprocess.run(["xdotool", "key", "ctrl+v"], check=False)
-    return True
+    return bool(not should_paste or paste_allowed)
 
 
 class AppWorkflowScheduler:
@@ -3198,6 +3229,32 @@ class AppWorkflowScheduler:
         threading.Thread(
             target=callback, name="ClarifyVoiceWorkflow", daemon=True
         ).start()
+
+    def run_recording(self, recording, callback):
+        """Run a recording worker while its session owns the thread.
+
+        ``RecordingSession`` cannot safely publish shutdown completion until
+        every startup, stop, and cancellation worker has detached.  Register
+        before ``start`` so cancellation cannot observe a missing worker, and
+        detach in the worker's finally block even when the callback raises.
+        """
+        def run():
+            try:
+                callback()
+            finally:
+                recording.detach_worker(threading.current_thread())
+
+        worker = threading.Thread(
+            target=run, name="ClarifyVoiceRecording", daemon=True
+        )
+        attach = getattr(
+            recording, "attach_workflow_worker", recording.attach_worker)
+        attach(worker)
+        try:
+            worker.start()
+        except BaseException:
+            recording.detach_worker(worker)
+            raise
 
 
 class AppWorkflowProvider:
@@ -3329,10 +3386,17 @@ class AppWorkflowClipboard:
                 previous = None
         if not isinstance(previous, ClipboardSnapshot) or not previous.restorable:
             return None
+        # Recheck after the snapshot/retry window and again inside the copy
+        # helper immediately before Ctrl+C.  A focus change must not make the
+        # chord act on an unrelated foreground application.
+        if not AppWorkflowClipboard.is_target_current(target):
+            return None
         selected, copy_start_sequence, copy_observed_sequence = (
             _copy_selected_text_with_sequence(
                 expected_sequence=previous.sequence,
-                suppress_read_errors=True))
+                suppress_read_errors=True,
+                before_copy=lambda: AppWorkflowClipboard.is_target_current(
+                    target)))
         if selected is None:
             AppWorkflowClipboard._restore_failed_capture(
                 previous, copy_start_sequence, copy_observed_sequence)
@@ -3379,7 +3443,11 @@ class AppWorkflowClipboard:
         )
         _restore_clipboard_snapshot_if_owned(before, sequence, current)
         if safe and AppWorkflowClipboard.is_target_current(capture.target):
-            pasted = _paste_generated_text(result)
+            pasted = _paste_generated_text(
+                result,
+                paste_predicate=lambda: AppWorkflowClipboard.is_target_current(
+                    capture.target),
+            )
             return (
                 SelectionDisposition.PASTED
                 if pasted else SelectionDisposition.COPIED
@@ -3392,11 +3460,29 @@ class AppWorkflowClipboard:
         safe = target is None or AppWorkflowClipboard.is_target_current(target)
         if not IS_WIN:
             if safe:
-                copy_and_paste(text)
-                return SelectionDisposition.PASTED
+                if target is None:
+                    pasted = copy_and_paste(text)
+                else:
+                    pasted = copy_and_paste(
+                        text,
+                        paste_predicate=lambda: AppWorkflowClipboard.is_target_current(
+                            target),
+                    )
+                return (
+                    SelectionDisposition.PASTED
+                    if pasted else SelectionDisposition.COPIED
+                )
             copy_and_paste(text, should_paste=False)
             return SelectionDisposition.COPIED
-        pasted = _paste_generated_text(text, should_paste=safe)
+        pasted = _paste_generated_text(
+            text,
+            should_paste=safe,
+            paste_predicate=(
+                None
+                if target is None
+                else lambda: AppWorkflowClipboard.is_target_current(target)
+            ),
+        )
         return (
             SelectionDisposition.PASTED
             if safe and pasted else SelectionDisposition.COPIED

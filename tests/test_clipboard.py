@@ -107,6 +107,25 @@ class ClipboardPasteTests(unittest.TestCase):
 
         self.assertEqual(self.clipboard.text(), "result")
 
+    def test_focus_change_after_write_skips_ctrl_v_and_keeps_result_copied(self):
+        focused = {"value": True}
+
+        def write_result(text):
+            self.clipboard.write_text(text)
+            focused["value"] = False
+
+        with patch.object(app, "_WINDOWS_CLIPBOARD", self.clipboard), \
+                patch.object(app, "_set_windows_clipboard_text",
+                             side_effect=write_result), \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app.time, "sleep"):
+            pasted = app._paste_generated_text(
+                "result", paste_predicate=lambda: focused["value"])
+
+        self.assertFalse(pasted)
+        send_key.assert_not_called()
+        self.assertEqual(self.clipboard.text(), "result")
+
     def test_uncapturable_snapshot_never_empties_clipboard_on_restore(self):
         self.clipboard.state = ClipboardSnapshot(
             (ClipboardFormat(9001, b"unsupported"),), 10, restorable=False)
