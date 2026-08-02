@@ -62,7 +62,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Compile Python sources
-        run: python -m compileall -q app.py desktop_state.py windows_hotkeys.py tests scripts
+        run: python -m compileall -q app.py desktop_state.py version.py windows_hotkeys.py tests scripts
 
       - name: Build portable executable
         shell: pwsh

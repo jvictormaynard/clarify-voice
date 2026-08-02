@@ -21,6 +21,7 @@ The tag, release, and executable must all originate from the same green
 - `docs/development.md`
 - `LICENSE`
 - `THIRD_PARTY_NOTICES.md`
+- `package.json`
 - `requirements.txt`
 - `requirements-dev.txt`
 - `requirements-lock-linux.txt`
@@ -30,6 +31,7 @@ The tag, release, and executable must all originate from the same green
 - `scripts/install_bootstrap_tools.py`
 - `scripts/add_sbom_component.py`
 - `scripts/sox-runtime-manifest.json`
+- `version.py`
 - `scripts/build.ps1`
 - `scripts/build-installer.ps1`
 - `scripts/test-installer.ps1`

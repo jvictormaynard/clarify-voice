@@ -36,6 +36,10 @@ class UpdateSecurityError(RuntimeError):
     """Base class for update failures that must not be bypassed."""
 
 
+class UpdateTransportError(UpdateSecurityError):
+    """A release manifest or installer request could not reach its origin."""
+
+
 class UpdatePolicyError(UpdateSecurityError):
     pass
 
@@ -752,11 +756,19 @@ def prepare_update(
 
     active_policy = policy or load_update_policy()
     cache_directory.mkdir(parents=True, exist_ok=True)
+
+    def download(*args, **kwargs):
+        try:
+            return downloader(*args, **kwargs)
+        except requests.RequestException as error:
+            raise UpdateTransportError(
+                "secure update service is temporarily unavailable") from error
+
     with tempfile.TemporaryDirectory(
             prefix=".update-staging-", dir=cache_directory) as temporary:
         staging_directory = Path(temporary)
         cab_path = staging_directory / active_policy.manifest_asset
-        downloader(
+        download(
             active_policy.manifest_url,
             cab_path,
             maximum_bytes=4 * 1024 * 1024,
@@ -773,7 +785,7 @@ def prepare_update(
         if not require_newer_version(current_version, manifest):
             return None
         staged_installer = staging_directory / manifest.asset.name
-        downloader(
+        download(
             manifest.asset.url,
             staged_installer,
             maximum_bytes=active_policy.maximum_download_bytes,

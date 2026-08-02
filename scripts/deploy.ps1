@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$repoVersion = Join-Path $repoRoot "version.py"
 $repoExtra = Join-Path $repoRoot "extra"
 $repoAssets = Join-Path $repoRoot "assets"
 $repoDistribution = Join-Path $repoRoot "distribution"
@@ -146,7 +147,11 @@ $source = Join-Path $sourceDir "app.py"
 $extra = Join-Path $sourceDir "extra"
 $assets = Join-Path $sourceDir "assets"
 $distribution = Join-Path $sourceDir "distribution"
+if (-not (Test-Path $repoVersion)) {
+    throw "Required packaged version module is missing: $repoVersion"
+}
 Copy-Item (Join-Path $repoRoot "*.py") $sourceDir -Force
+Copy-Item $repoVersion $sourceDir -Force
 Copy-Item $repoExtra $extra -Recurse -Force
 Copy-Item $repoAssets $assets -Recurse -Force
 Copy-Item $repoDistribution $distribution -Recurse -Force
@@ -172,6 +177,7 @@ $pyinstallerArgs = @(
     "--add-data", "${extra};extra",
     "--add-data", "${assets};assets",
     "--add-data", "${distribution};distribution",
+    "--hidden-import", "version",
     "--hidden-import", "sounddevice",
     "--hidden-import", "_sounddevice_data",
     "--exclude-module", "numpy",

@@ -22,6 +22,7 @@ if (-not (Test-Path (Join-Path $repoRoot ".venv\Scripts\python.exe"))) {
 
 $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $entryPoint = Join-Path $repoRoot "app.py"
+$versionSource = Join-Path $repoRoot "version.py"
 $repoExtra = Join-Path $repoRoot "extra"
 $assets = Join-Path $repoRoot "assets"
 $distribution = Join-Path $repoRoot "distribution"
@@ -44,7 +45,8 @@ function ConvertTo-ProcessArgument {
 }
 
 foreach ($requiredPath in @(
-    $entryPoint, $repoExtra, $assets, $distribution, $icon, $soxManifestPath
+    $entryPoint, $versionSource, $repoExtra, $assets, $distribution, $icon,
+    $soxManifestPath
 )) {
     if (-not (Test-Path $requiredPath)) {
         throw "Required build input is missing: $requiredPath"
@@ -77,6 +79,7 @@ $pyInstallerArgs = @(
     "--add-data", "${extra};extra",
     "--add-data", "${assets};assets",
     "--add-data", "${distribution};distribution",
+    "--hidden-import", "version",
     "--hidden-import", "sounddevice",
     "--hidden-import", "_sounddevice_data",
     "--exclude-module", "numpy",

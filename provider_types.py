@@ -137,8 +137,11 @@ class HttpResponse(Protocol):
 
 
 class HttpClient(Protocol):
-    """Minimal transport seam; retry/session policy belongs to issue #17."""
+    """Shared transport seam implemented by the provider HTTP policy."""
 
-    def get(self, url: str, **kwargs: Any) -> HttpResponse: ...
+    def request(self, method: str, url: str, *, provider: str,
+            operation: str, cancel_token: Any = None,
+            safe_to_retry: bool | None = None, **kwargs: Any) -> HttpResponse: ...
 
-    def post(self, url: str, **kwargs: Any) -> HttpResponse: ...
+    def json(self, response: HttpResponse, *, provider: str,
+            operation: str) -> Any: ...

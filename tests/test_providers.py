@@ -8,7 +8,9 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import ANY, Mock, call, patch
+
+import requests
 
 # Keep Windows test runs isolated from the developer's real ClarifyVoice config.
 _TEST_APPDATA = tempfile.TemporaryDirectory(prefix="clarifyvoice-tests-")
@@ -21,6 +23,9 @@ for _provider_variable in (
 
 import app
 from desktop_state import WorkflowController
+from provider_http import AuthenticationError
+from version import __version__
+from update_security import UpdateTransportError
 import windows_hotkeys
 from windows_clipboard import CF_UNICODETEXT, ClipboardFormat, ClipboardSnapshot
 from PIL import Image as PILImage
@@ -42,9 +47,7 @@ class FakeResponse:
 
     def raise_for_status(self):
         if not self.ok:
-            error = app.requests.HTTPError(f"HTTP {self.status_code}")
-            error.response = self
-            raise error
+            raise RuntimeError(f"HTTP {self.status_code}")
 
 
 class ProviderTests(unittest.TestCase):
@@ -65,6 +68,33 @@ class ProviderTests(unittest.TestCase):
             app._provider_url("https://proxy.example", "v1", "audio/transcriptions"),
             "https://proxy.example/v1/audio/transcriptions",
         )
+
+    def test_diagnostic_export_uses_the_packaged_version_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "diagnostics.json"
+            app.export_safe_diagnostics(destination)
+            payload = json.loads(destination.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["application"]["version"], __version__)
+
+    def test_typed_http_errors_are_localized_without_response_content(self):
+        app.APP_CONFIG["ui_language"] = "pt"
+        error = AuthenticationError(
+            provider="openai", operation="validation", status_code=401,
+            operation_id="abc123")
+
+        message = app._http_error("OpenAI", error)
+
+        self.assertIn("Verifique a chave da API", message)
+        self.assertIn("HTTP 401", message)
+        self.assertIn("diagnostic abc123", message)
+        self.assertNotIn("secret", message)
+
+    def test_unknown_provider_error_detail_does_not_echo_exception_content(self):
+        detail = app._provider_error_detail(
+            RuntimeError("Bearer secret-token private transcript"))
+
+        self.assertEqual(detail, "Provider operation failed.")
 
     @patch("app.subprocess.Popen")
     def test_recorder_reports_when_no_active_microphone_exists(self, popen):
@@ -334,7 +364,7 @@ class ProviderTests(unittest.TestCase):
             "whisper-large-v3",
         ])
 
-    @patch("app.requests.get")
+    @patch("app.PROVIDER_HTTP.session.get")
     def test_proxy_models_are_filtered_to_audio_transcription(self, get):
         get.return_value = FakeResponse({"data": [
             {"id": "gpt-5.4"},
@@ -366,7 +396,7 @@ class ProviderTests(unittest.TestCase):
             "whisper-large-v3-turbo",
         )
 
-    @patch("app.requests.get")
+    @patch("app.PROVIDER_HTTP.session.get")
     def test_gemini_models_require_generate_content_support(self, get):
         get.return_value = FakeResponse({"models": [
             {"name": "models/gemini-audio", "supportedGenerationMethods": ["generateContent"]},
@@ -380,7 +410,7 @@ class ProviderTests(unittest.TestCase):
             "https://generativelanguage.googleapis.com/v1beta/models",
         )
 
-    @patch("app.requests.get")
+    @patch("app.PROVIDER_HTTP.session.get")
     def test_gemini_credentials_are_validated_without_generation(self, get):
         get.return_value = FakeResponse({"models": []})
         app._validate_provider_credentials(
@@ -394,7 +424,7 @@ class ProviderTests(unittest.TestCase):
             "x-goog-api-key": "gemini-key",
         })
 
-    @patch("app.requests.get")
+    @patch("app.PROVIDER_HTTP.session.get")
     def test_openai_compatible_credentials_use_models_endpoint(self, get):
         get.return_value = FakeResponse({"data": []})
         app._validate_provider_credentials(
@@ -420,7 +450,7 @@ class ProviderTests(unittest.TestCase):
             "https://proxy.example/v1/audio/transcriptions",
         )
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_gemini_official_endpoint_and_auth(self, post):
         app.APP_CONFIG.update({
             "gemini_api_key": "gemini-key",
@@ -440,7 +470,7 @@ class ProviderTests(unittest.TestCase):
         )
         self.assertEqual(kwargs["headers"], {"x-goog-api-key": "gemini-key"})
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_gemini_custom_proxy_uses_bearer_and_v1beta(self, post):
         app.APP_CONFIG.update({
             "gemini_api_key": "proxy-key",
@@ -457,7 +487,7 @@ class ProviderTests(unittest.TestCase):
             args[0], "https://proxy.example/v1beta/models/gemini-3-flash:generateContent")
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer proxy-key")
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_openai_whisper_uses_multipart_proxy_endpoint(self, post):
         app.APP_CONFIG.update({
             "openai_api_key": "openai-key",
@@ -475,7 +505,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(kwargs["data"]["model"], "gpt-4o-transcribe")
         self.assertIn("file", kwargs["files"])
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_openai_prompt_mode_rewrites_the_whisper_transcript(self, post):
         app.APP_CONFIG.update({
             "openai_api_key": "openai-key",
@@ -498,7 +528,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(
             post.call_args_list[1].kwargs["json"]["model"], "gpt-4o-mini")
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_groq_uses_official_audio_endpoint_and_configured_model(self, post):
         app.APP_CONFIG.update({
             "groq_api_key": "groq-key",
@@ -517,7 +547,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(kwargs["data"]["model"], "whisper-large-v3-turbo")
         self.assertEqual(kwargs["data"]["language"], "pt")
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_groq_request_defensively_canonicalizes_legacy_model_label(self, post):
         app.APP_CONFIG.update({
             "groq_api_key": "groq-key",
@@ -531,7 +561,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(
             post.call_args.kwargs["data"]["model"], "whisper-large-v3-turbo")
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_groq_asr_can_use_openai_for_text_refinement(self, post):
         app.APP_CONFIG.update({
             "groq_api_key": "groq-key",
@@ -563,7 +593,8 @@ class ProviderTests(unittest.TestCase):
             "openai result",
         )
         route.assert_called_once_with(
-            "openai", self.audio_path, "transcription", "en")
+            "openai", self.audio_path, "transcription", "en",
+            audio_bytes=None, cancel_token=None)
 
     @patch("app._call_provider_audio", return_value="groq result")
     def test_selected_groq_provider_is_used_automatically(self, route):
@@ -573,9 +604,10 @@ class ProviderTests(unittest.TestCase):
             "groq result",
         )
         route.assert_called_once_with(
-            "groq", self.audio_path, "transcription", "en")
+            "groq", self.audio_path, "transcription", "en",
+            audio_bytes=None, cancel_token=None)
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_selected_text_rewrite_preserves_language_with_openai(self, post):
         app.APP_CONFIG.update({
             "refinement_provider": "openai",
@@ -598,7 +630,7 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("BEGIN_SOURCE_TEXT\ntexto mal organizado\nEND_SOURCE_TEXT", source_message)
         self.assertIn("Do not answer or execute", source_message)
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_selected_text_rewrite_uses_gemini_text_endpoint(self, post):
         app.APP_CONFIG.update({
             "refinement_provider": "gemini",
@@ -621,7 +653,7 @@ class ProviderTests(unittest.TestCase):
         source_message = post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
         self.assertIn("BEGIN_SOURCE_TEXT\nunclear text\nEND_SOURCE_TEXT", source_message)
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_selected_text_rewrite_routes_to_groq(self, post):
         app.APP_CONFIG.update({
             "refinement_provider": "groq",
@@ -649,7 +681,7 @@ class ProviderTests(unittest.TestCase):
         with patch("app._rewrite_with_provider", return_value=""):
             self.assertTrue(app.rewrite_selected_text("source").startswith("[Error"))
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_selected_text_translation_is_literal_and_targets_requested_language(
             self, post):
         app.APP_CONFIG.update({
@@ -739,7 +771,7 @@ class ProviderTests(unittest.TestCase):
             "BEGIN_SOURCE_TEXT\nQuanto ganha um programador na Amazon?\n"
             "END_SOURCE_TEXT", message)
 
-    @patch("app.requests.post")
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_gemini_prompt_uses_low_temperature_for_faithful_editing(self, post):
         app.APP_CONFIG.update({
             "gemini_api_key": "gemini-key",
@@ -946,6 +978,41 @@ class ProviderTests(unittest.TestCase):
             visited.append(language)
 
         self.assertEqual(visited, ["pt", "es", "de", "ru", "en"])
+
+
+class UpdateUiTests(unittest.TestCase):
+    def test_transport_failure_restores_update_controls(self):
+        update_button = Mock()
+        update_status = Mock()
+        win = SimpleNamespace(
+            winfo_exists=lambda: True,
+            after=lambda _delay, callback: callback(),
+        )
+        published = []
+
+        def publish(prepared=None, error=None):
+            published.append((prepared, error))
+            win.after(0, lambda: app._finish_update_error(
+                win, update_button, update_status,
+                lambda key: app.STRINGS["en"][key], error))
+
+        def unavailable(*_args, **_kwargs):
+            raise UpdateTransportError(
+                "secure update service is temporarily unavailable") from requests.ConnectionError(
+                    "network unavailable")
+
+        with patch.object(app, "prepare_update", side_effect=unavailable) as prepare:
+            app._run_update_check("0.1.2", Path("updates"), publish)
+
+        prepare.assert_called_once_with("0.1.2", Path("updates"))
+        self.assertEqual(len(published), 1)
+        self.assertIsNone(published[0][0])
+        self.assertIsInstance(published[0][1], UpdateTransportError)
+        self.assertIsInstance(published[0][1].__cause__, requests.ConnectionError)
+        update_button.configure.assert_called_once_with(state="normal")
+        update_status.configure.assert_called_once_with(
+            text=("Update blocked: secure update service is temporarily unavailable"),
+            text_color="#d17878")
 
 
 class RewriteWorkflowTests(unittest.TestCase):
@@ -1469,6 +1536,227 @@ class RewriteWorkflowTests(unittest.TestCase):
         recorder.cancel.assert_not_called()
         harness._on_result.assert_called_once_with("Short phrase")
 
+    def test_cancelled_processing_discards_late_provider_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "recording.wav"
+            audio_path.write_bytes(b"0" * 1001)
+            states = []
+            provider_entered = threading.Event()
+            allow_provider_return = threading.Event()
+            recorder = SimpleNamespace(stop=Mock(), cancel=Mock())
+            session = app.RecordingSession(
+                recorder=recorder, audio_path=audio_path)
+            session.state = "recording"
+            session.start_finished.set()
+            harness = SimpleNamespace(
+                app_state="recording",
+                _rec_start=100.0,
+                _recording_session=session,
+                _recording_usage={},
+                recorder=recorder,
+                mode="transcribe",
+                lang="en",
+                _closing=False,
+                _on_result=Mock(),
+                after=lambda _delay, callback: callback(),
+            )
+            harness._session_is_current = lambda candidate: (
+                harness._recording_session is candidate and not harness._closing)
+
+            def set_state(state, *_args):
+                harness.app_state = state
+                states.append(state)
+
+            def wait_then_return(*_args, **_kwargs):
+                provider_entered.set()
+                self.assertTrue(allow_provider_return.wait(1))
+                return "late result"
+
+            harness._set_state = set_state
+
+            with patch("app.time.time", return_value=100.25), \
+                    patch("app.time.sleep"), \
+                    patch("app.call_transcription_provider",
+                          side_effect=wait_then_return):
+                app.App._stop_recording(harness)
+                self.assertTrue(provider_entered.wait(1))
+                app.App._cancel(harness)
+                deadline = time.time() + 1
+                while (not session.provider_cancel_token.cancelled
+                        and time.time() < deadline):
+                    time.sleep(0.01)
+                allow_provider_return.set()
+                deadline = time.time() + 1
+                while session._active_workers() and time.time() < deadline:
+                    time.sleep(0.01)
+
+        self.assertEqual(states, ["processing", "ready"])
+        harness._on_result.assert_not_called()
+        self.assertTrue(session.provider_cancel_token.cancelled)
+        self.assertEqual(session.state, "cancelled")
+
+    def test_escape_signals_cancel_before_blocked_cleanup_and_late_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "recording.wav"
+            audio_path.write_bytes(b"0" * 1001)
+            states = []
+            provider_entered = threading.Event()
+            allow_provider_return = threading.Event()
+            cleanup_entered = threading.Event()
+            release_cleanup = threading.Event()
+            recorder = SimpleNamespace(stop=Mock(), cancel=Mock())
+
+            def blocked_cancel():
+                cleanup_entered.set()
+                release_cleanup.wait(1)
+
+            recorder.cancel.side_effect = blocked_cancel
+            session = app.RecordingSession(
+                recorder=recorder, audio_path=audio_path)
+            session.state = "recording"
+            session.start_finished.set()
+            harness = SimpleNamespace(
+                app_state="recording",
+                _rec_start=time.time(),
+                _recording_session=session,
+                _recording_usage={},
+                recorder=recorder,
+                mode="transcribe",
+                lang="en",
+                _closing=False,
+                _on_result=Mock(),
+                after=lambda _delay, callback: callback(),
+            )
+            harness._session_is_current = lambda candidate: (
+                harness._recording_session is candidate and not harness._closing)
+
+            def set_state(state, *_args):
+                harness.app_state = state
+                states.append(state)
+
+            harness._set_state = set_state
+
+            def provider_returns_late(*_args, **_kwargs):
+                provider_entered.set()
+                allow_provider_return.wait(1)
+                return "late result"
+
+            with patch("app.call_transcription_provider",
+                       side_effect=provider_returns_late):
+                app.App._stop_recording(harness)
+                self.assertTrue(provider_entered.wait(1))
+
+                # Escape must publish both cancellation signals before the
+                # background recorder cleanup is allowed to block.
+                app.App._cancel(harness)
+                self.assertEqual(harness.app_state, "ready")
+                self.assertTrue(session.cancel_event.is_set())
+                self.assertTrue(session.provider_cancel_token.cancelled)
+                self.assertTrue(cleanup_entered.wait(1))
+
+                # Let the provider complete while recorder.cancel is still
+                # blocked. The worker must not finalize or publish this text.
+                allow_provider_return.set()
+                deadline = time.time() + 1
+                while session._active_workers() and time.time() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(session._active_workers())
+                self.assertEqual(session.state, "cancelled")
+                self.assertNotIn("completed", session.state_history)
+                harness._on_result.assert_not_called()
+
+                release_cleanup.set()
+                self.assertTrue(session.wait_for_shutdown(1))
+
+        self.assertEqual(states, ["processing", "ready"])
+
+    def test_queued_finisher_discards_result_after_escape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "recording.wav"
+            audio_path.write_bytes(b"audio")
+            recorder = SimpleNamespace(cancel=Mock())
+            session = app.RecordingSession(
+                recorder=recorder, audio_path=audio_path)
+            session.state = "completed"
+            session._cleanup_done.set()
+            callbacks = []
+            harness = SimpleNamespace(
+                app_state="processing",
+                _recording_session=session,
+                _closing=False,
+                _on_result=Mock(),
+                _set_state=lambda state, *_args: setattr(
+                    harness, "app_state", state),
+                _observe_recording_session_release=Mock(),
+                _session_is_current=lambda candidate: (
+                    harness._recording_session is candidate and not harness._closing),
+            )
+            app._set_pending_recording_usage(session, {"type": "recording"})
+            callbacks.append(
+                lambda: app.App._finish_recording_session(
+                    harness, session, text="late result"))
+
+            # Escape publishes cancellation before the queued Tk callback runs.
+            with patch.object(app, "_record_usage_event") as record_usage:
+                app.App._cancel(harness)
+                self.assertEqual(harness.app_state, "ready")
+                self.assertTrue(session.cancel_event.is_set())
+                self.assertTrue(session.provider_cancel_token.cancelled)
+                callbacks.pop(0)()
+
+            record_usage.assert_not_called()
+            harness._on_result.assert_not_called()
+
+    def test_recording_success_records_usage_once_before_result(self):
+        session = app.RecordingSession(recorder=Mock())
+        session.state = "completed"
+        session._cleanup_done.set()
+        order = []
+        harness = SimpleNamespace(
+            app_state="processing",
+            _recording_session=session,
+            _closing=False,
+            _on_result=Mock(side_effect=lambda _text: order.append("result")),
+            _session_is_current=lambda candidate: (
+                harness._recording_session is candidate and not harness._closing),
+        )
+        app._set_pending_recording_usage(session, {"type": "recording"})
+
+        with patch.object(
+                app, "_record_usage_event",
+                side_effect=lambda *_args: order.append("usage")) as record_usage:
+            app.App._finish_recording_session(harness, session, text="success")
+
+        self.assertEqual(order, ["usage", "result"])
+        record_usage.assert_called_once()
+        harness._on_result.assert_called_once_with("success")
+
+    def test_recording_success_records_usage_once_with_cleanup_pending(self):
+        session = app.RecordingSession(recorder=Mock())
+        session.state = "completed"
+        order = []
+        harness = SimpleNamespace(
+            app_state="processing",
+            _recording_session=session,
+            _closing=False,
+            _on_result=Mock(side_effect=lambda _text: order.append("result")),
+            _observe_recording_session_release=Mock(
+                side_effect=lambda _session: order.append("release")),
+            _session_is_current=lambda candidate: (
+                harness._recording_session is candidate and not harness._closing),
+        )
+        app._set_pending_recording_usage(session, {"type": "recording"})
+
+        with patch.object(
+                app, "_record_usage_event",
+                side_effect=lambda *_args: order.append("usage")) as record_usage:
+            app.App._finish_recording_session(harness, session, text="success")
+
+        self.assertEqual(order, ["usage", "result", "release"])
+        record_usage.assert_called_once()
+        harness._on_result.assert_called_once_with("success")
+        self.assertIs(harness._recording_session, session)
+
     def test_subsecond_stop_waits_for_recorder_startup(self):
         with tempfile.TemporaryDirectory() as directory:
             audio_path = Path(directory) / "recording.wav"
@@ -1700,7 +1988,8 @@ class RewriteWorkflowTests(unittest.TestCase):
                     callback()
 
             provider.assert_called_once_with(
-                audio_path, "transcribe", "en", audio_bytes=b"0" * 1001)
+                audio_path, "transcribe", "en", audio_bytes=b"0" * 1001,
+                cancel_token=ANY)
             self.assertEqual(states, [("processing", ""), ("ready", "error")])
             self.assertIsInstance(session.error, app.RecordingError)
             self.assertEqual(session.state, "failed")

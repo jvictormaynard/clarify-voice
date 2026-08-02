@@ -8,6 +8,7 @@ import mimetypes
 from pathlib import Path
 from typing import Any, Mapping
 
+from provider_http import InvalidResponseError
 from provider_types import (
     HttpClient,
     ModelCatalog,
@@ -15,7 +16,6 @@ from provider_types import (
     ProviderConfigurationError,
     ProviderConnection,
     ProviderMetadata,
-    ProviderResponseError,
     RewriteRequest,
     RewriteResult,
     TranscriptionRequest,
@@ -46,6 +46,25 @@ def _model_entries(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     if not isinstance(entries, list):
         return []
     return [entry for entry in entries if isinstance(entry, Mapping)]
+
+
+def _valid_catalog_payload(payload: Any, key: str) -> bool:
+    if not isinstance(payload, Mapping) or key not in payload:
+        return False
+    entries = payload[key]
+    return isinstance(entries, list) and all(
+        isinstance(entry, Mapping) for entry in entries)
+
+
+def _invalid_response_error(http, response, provider: str, operation: str):
+    factory = getattr(http, "invalid_response", None)
+    if callable(factory):
+        return factory(response, provider=provider, operation=operation)
+    return InvalidResponseError(
+        provider=provider, operation=operation,
+        status_code=getattr(response, "status_code", None),
+        operation_id=getattr(response, "_clarify_operation_id", None),
+    )
 
 
 class ProviderAdapter:
@@ -82,31 +101,35 @@ class ProviderAdapter:
     def parse_text_models(self, payload: Mapping[str, Any]) -> tuple[str, ...]:
         raise NotImplementedError
 
-    def validate(self, connection: ProviderConnection) -> Mapping[str, Any]:
+    def validate(self, connection: ProviderConnection, cancel_token=None,
+            *, operation: str = "validation") -> Mapping[str, Any]:
         raise NotImplementedError
 
-    def discover_models(self, connection: ProviderConnection) -> ModelCatalog:
-        payload = self.validate(connection)
+    def discover_models(self, connection: ProviderConnection,
+            cancel_token=None) -> ModelCatalog:
+        payload = self.validate(
+            connection, cancel_token, operation="model_discovery")
         return ModelCatalog(
             self.parse_audio_models(payload),
             self.parse_text_models(payload),
         )
 
-    def fetch_audio_models(self, connection: ProviderConnection) -> tuple[str, ...]:
-        return self.discover_models(connection).audio_models
+    def fetch_audio_models(self, connection: ProviderConnection,
+            cancel_token=None) -> tuple[str, ...]:
+        return self.discover_models(connection, cancel_token).audio_models
 
     def transcribe(self, request: TranscriptionRequest,
-            connection: ProviderConnection) -> TranscriptionResult:
+            connection: ProviderConnection, cancel_token=None) -> TranscriptionResult:
         self.require(ProviderCapability.AUDIO_TRANSCRIPTION)
         raise NotImplementedError
 
     def rewrite(self, request: RewriteRequest,
-            connection: ProviderConnection) -> RewriteResult:
+            connection: ProviderConnection, cancel_token=None) -> RewriteResult:
         self.require(ProviderCapability.TEXT_GENERATION)
         raise NotImplementedError
 
     def translate(self, request: TranslationRequest,
-            connection: ProviderConnection) -> TranslationResult:
+            connection: ProviderConnection, cancel_token=None) -> TranslationResult:
         self.require(ProviderCapability.TEXT_GENERATION)
         raise NotImplementedError
 
@@ -157,25 +180,26 @@ class GeminiAdapter(ProviderAdapter):
                 for token in self._TEXT_MODEL_EXCLUSIONS)
         )
 
-    def validate(self, connection: ProviderConnection) -> Mapping[str, Any]:
+    def validate(self, connection: ProviderConnection, cancel_token=None,
+            *, operation: str = "validation") -> Mapping[str, Any]:
         self.require(ProviderCapability.MODEL_DISCOVERY)
         self._require_connection(connection)
-        response = self.http.get(
+        response = self.http.request(
+            "GET",
             normalize_provider_url(connection.base_url, self._VERSION, "models"),
-            headers=self._headers(connection), timeout=12,
+            provider=self.metadata.provider_id, operation=operation,
+            cancel_token=cancel_token, headers=self._headers(connection),
         )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, Mapping):
-            raise ProviderResponseError(
-                self.metadata.provider_id,
-                f"{self.metadata.display_name} returned an invalid model catalog",
-                ProviderCapability.MODEL_DISCOVERY,
-            )
+        payload = self.http.json(
+            response, provider=self.metadata.provider_id, operation=operation)
+        if not _valid_catalog_payload(payload, "models"):
+            raise _invalid_response_error(
+                self.http, response, self.metadata.provider_id, operation)
         return payload
 
     def _generate(self, model: str, connection: ProviderConnection,
-            body: Mapping[str, Any], capability: ProviderCapability) -> str:
+            body: Mapping[str, Any], capability: ProviderCapability,
+            operation: str, cancel_token=None) -> str:
         self.require(capability)
         self._require_connection(connection)
         model_id = str(model or "").removeprefix("models/").strip()
@@ -185,29 +209,30 @@ class GeminiAdapter(ProviderAdapter):
                 f"No {self.metadata.display_name} model",
                 capability,
             )
-        response = self.http.post(
+        response = self.http.request(
+            "POST",
             normalize_provider_url(
                 connection.base_url, self._VERSION,
                 f"models/{model_id}:generateContent"),
-            headers=self._headers(connection), json=body, timeout=60,
+            provider=self.metadata.provider_id, operation=operation,
+            cancel_token=cancel_token, safe_to_retry=False,
+            headers=self._headers(connection), json=body,
         )
-        response.raise_for_status()
+        payload = self.http.json(
+            response, provider=self.metadata.provider_id, operation=operation)
         try:
             text = str(
-                response.json()["candidates"][0]["content"]["parts"][0]["text"]
+                payload["candidates"][0]["content"]["parts"][0]["text"]
             ).strip()
         except (KeyError, IndexError, TypeError):
             text = ""
         if not text:
-            raise ProviderResponseError(
-                self.metadata.provider_id,
-                f"{self.metadata.display_name} returned an empty response",
-                capability,
-            )
+            raise _invalid_response_error(
+                self.http, response, self.metadata.provider_id, operation)
         return text
 
     def transcribe(self, request: TranscriptionRequest,
-            connection: ProviderConnection) -> TranscriptionResult:
+            connection: ProviderConnection, cancel_token=None) -> TranscriptionResult:
         self.require(ProviderCapability.MULTIMODAL_AUDIO)
         audio_bytes = (request.audio_bytes if request.audio_bytes is not None
                        else request.audio_path.read_bytes())
@@ -226,6 +251,7 @@ class GeminiAdapter(ProviderAdapter):
         text = self._generate(
             request.model, connection, body,
             ProviderCapability.AUDIO_TRANSCRIPTION,
+            "transcription", cancel_token,
         )
         return TranscriptionResult(
             text, self.metadata.provider_id,
@@ -234,20 +260,21 @@ class GeminiAdapter(ProviderAdapter):
 
     def _generate_text(self, model: str, instruction: str,
             source_message: str, temperature: float,
-            connection: ProviderConnection) -> str:
+            connection: ProviderConnection, cancel_token=None) -> str:
         body = {
             "contents": [{"parts": [{"text": source_message}]}],
             "systemInstruction": {"parts": [{"text": instruction}]},
             "generationConfig": {"temperature": temperature},
         }
         return self._generate(
-            model, connection, body, ProviderCapability.TEXT_GENERATION)
+            model, connection, body, ProviderCapability.TEXT_GENERATION,
+            "text_generation", cancel_token)
 
     def rewrite(self, request: RewriteRequest,
-            connection: ProviderConnection) -> RewriteResult:
+            connection: ProviderConnection, cancel_token=None) -> RewriteResult:
         text = self._generate_text(
             request.model, request.instruction, request.source_message,
-            request.temperature, connection,
+            request.temperature, connection, cancel_token,
         )
         return RewriteResult(
             text, self.metadata.provider_id,
@@ -255,10 +282,10 @@ class GeminiAdapter(ProviderAdapter):
         )
 
     def translate(self, request: TranslationRequest,
-            connection: ProviderConnection) -> TranslationResult:
+            connection: ProviderConnection, cancel_token=None) -> TranslationResult:
         text = self._generate_text(
             request.model, request.instruction, request.source_message,
-            request.temperature, connection,
+            request.temperature, connection, cancel_token,
         )
         return TranslationResult(
             text, self.metadata.provider_id,
@@ -318,39 +345,42 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     def _is_official(self, base_url: str) -> bool:
         return bool(self.official_host and self.official_host in base_url.lower())
 
-    def validate(self, connection: ProviderConnection) -> Mapping[str, Any]:
+    def validate(self, connection: ProviderConnection, cancel_token=None,
+            *, operation: str = "validation") -> Mapping[str, Any]:
         self.require(ProviderCapability.MODEL_DISCOVERY)
         self._require_connection(connection)
-        response = self.http.get(
+        response = self.http.request(
+            "GET",
             normalize_provider_url(connection.base_url, self._VERSION, "models"),
-            headers={"Authorization": f"Bearer {connection.api_key}"}, timeout=12,
+            provider=self.metadata.provider_id, operation=operation,
+            cancel_token=cancel_token,
+            headers={"Authorization": f"Bearer {connection.api_key}"},
         )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, Mapping):
-            raise ProviderResponseError(
-                self.metadata.provider_id,
-                f"{self.metadata.display_name} returned an invalid model catalog",
-                ProviderCapability.MODEL_DISCOVERY,
-            )
+        payload = self.http.json(
+            response, provider=self.metadata.provider_id, operation=operation)
+        if not _valid_catalog_payload(payload, "data"):
+            raise _invalid_response_error(
+                self.http, response, self.metadata.provider_id, operation)
         return payload
 
-    def discover_models(self, connection: ProviderConnection) -> ModelCatalog:
-        catalog = super().discover_models(connection)
+    def discover_models(self, connection: ProviderConnection,
+            cancel_token=None) -> ModelCatalog:
+        catalog = super().discover_models(connection, cancel_token)
         audio_models = catalog.audio_models
         if not audio_models and self._is_official(connection.base_url):
             audio_models = self.official_audio_models
         return ModelCatalog(audio_models, catalog.text_models)
 
-    def fetch_audio_models(self, connection: ProviderConnection) -> tuple[str, ...]:
+    def fetch_audio_models(self, connection: ProviderConnection,
+            cancel_token=None) -> tuple[str, ...]:
         self.require(ProviderCapability.MODEL_DISCOVERY)
         if self._is_official(connection.base_url):
             return self.official_audio_models
         self._require_connection(connection)
-        return super().fetch_audio_models(connection)
+        return super().fetch_audio_models(connection, cancel_token)
 
     def transcribe(self, request: TranscriptionRequest,
-            connection: ProviderConnection) -> TranscriptionResult:
+            connection: ProviderConnection, cancel_token=None) -> TranscriptionResult:
         self.require(ProviderCapability.AUDIO_TRANSCRIPTION)
         self._require_connection(connection)
         model = self.canonical_audio_model(request.model)
@@ -367,9 +397,12 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                        else request.audio_path.read_bytes())
         audio_file = io.BytesIO(audio_bytes)
         try:
-            response = self.http.post(
+            response = self.http.request(
+                "POST",
                 normalize_provider_url(
                     connection.base_url, self._VERSION, "audio/transcriptions"),
+                provider=self.metadata.provider_id, operation="transcription",
+                cancel_token=cancel_token, safe_to_retry=False,
                 headers={"Authorization": f"Bearer {connection.api_key}"},
                 files={"file": (
                     request.audio_path.name, audio_file,
@@ -380,25 +413,22 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     "response_format": "json",
                     "language": request.language,
                 },
-                timeout=60,
             )
         finally:
             audio_file.close()
-        response.raise_for_status()
-        payload = response.json()
+        payload = self.http.json(
+            response, provider=self.metadata.provider_id,
+            operation="transcription")
         text = str(payload.get("text", "")).strip() if isinstance(
             payload, Mapping) else ""
         if not text:
-            raise ProviderResponseError(
-                self.metadata.provider_id,
-                f"{self.metadata.display_name} returned an empty transcription",
-                ProviderCapability.AUDIO_TRANSCRIPTION,
-            )
+            raise _invalid_response_error(
+                self.http, response, self.metadata.provider_id, "transcription")
         return TranscriptionResult(text, self.metadata.provider_id, model)
 
     def _generate_text(self, model: str, instruction: str,
             source_message: str, temperature: float,
-            connection: ProviderConnection) -> str:
+            connection: ProviderConnection, cancel_token=None) -> str:
         self.require(ProviderCapability.TEXT_GENERATION)
         self._require_connection(connection)
         model_id = str(model or "").strip()
@@ -416,39 +446,42 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             ],
             "temperature": temperature,
         }
-        response = self.http.post(
+        response = self.http.request(
+            "POST",
             normalize_provider_url(
                 connection.base_url, self._VERSION, "chat/completions"),
+            provider=self.metadata.provider_id, operation="text_generation",
+            cancel_token=cancel_token, safe_to_retry=False,
             headers={"Authorization": f"Bearer {connection.api_key}"},
-            json=body, timeout=60,
+            json=body,
         )
-        response.raise_for_status()
+        payload = self.http.json(
+            response, provider=self.metadata.provider_id,
+            operation="text_generation")
         try:
-            content = response.json()["choices"][0]["message"]["content"]
+            content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
             content = None
         text = content.strip() if isinstance(content, str) else ""
         if not text:
-            raise ProviderResponseError(
-                self.metadata.provider_id,
-                f"{self.metadata.display_name} returned an empty text response",
-                ProviderCapability.TEXT_GENERATION,
-            )
+            raise _invalid_response_error(
+                self.http, response,
+                self.metadata.provider_id, "text_generation")
         return text
 
     def rewrite(self, request: RewriteRequest,
-            connection: ProviderConnection) -> RewriteResult:
+            connection: ProviderConnection, cancel_token=None) -> RewriteResult:
         text = self._generate_text(
             request.model, request.instruction, request.source_message,
-            request.temperature, connection,
+            request.temperature, connection, cancel_token,
         )
         return RewriteResult(text, self.metadata.provider_id, request.model)
 
     def translate(self, request: TranslationRequest,
-            connection: ProviderConnection) -> TranslationResult:
+            connection: ProviderConnection, cancel_token=None) -> TranslationResult:
         text = self._generate_text(
             request.model, request.instruction, request.source_message,
-            request.temperature, connection,
+            request.temperature, connection, cancel_token,
         )
         return TranslationResult(
             text, self.metadata.provider_id, request.model,

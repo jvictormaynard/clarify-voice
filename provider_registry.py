@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-
-import requests
+import os
+import platform
+from pathlib import Path
 
 from provider_adapters import GeminiAdapter, OpenAICompatibleAdapter, ProviderAdapter
+from provider_http import ProviderHttpClient, SafeRotatingLogger
 from provider_types import (
     HttpClient,
     ModelCatalog,
@@ -59,12 +61,12 @@ class ProviderRegistry:
         self._adapters[provider_id] = adapter
 
     def register_openai_compatible(self, metadata: ProviderMetadata,
-            http: HttpClient = requests, official_host: str = "",
+            http: HttpClient | None = None, official_host: str = "",
             official_audio_models: tuple[str, ...] = (),
             audio_model_aliases: Mapping[str, str] | None = None) -> None:
         """Register another compatible provider without changing workflows."""
         self.register(OpenAICompatibleAdapter(
-            metadata, http,
+            metadata, http or ProviderHttpClient(),
             official_host=official_host,
             official_audio_models=official_audio_models,
             audio_model_aliases=audio_model_aliases,
@@ -142,43 +144,45 @@ class ProviderRegistry:
         ).parse_text_models(payload)
 
     def validate(self, provider_id: str,
-            connection: ProviderConnection) -> Mapping[str, object]:
+            connection: ProviderConnection,
+            cancel_token=None) -> Mapping[str, object]:
         return self.adapter(
             provider_id, ProviderCapability.MODEL_DISCOVERY,
-        ).validate(connection)
+        ).validate(connection, cancel_token)
 
     def discover_models(self, provider_id: str,
-            connection: ProviderConnection) -> ModelCatalog:
+            connection: ProviderConnection, cancel_token=None) -> ModelCatalog:
         return self.adapter(
             provider_id, ProviderCapability.MODEL_DISCOVERY,
-        ).discover_models(connection)
+        ).discover_models(connection, cancel_token)
 
     def fetch_audio_models(self, provider_id: str,
-            connection: ProviderConnection) -> tuple[str, ...]:
+            connection: ProviderConnection, cancel_token=None) -> tuple[str, ...]:
         return self.adapter(
             provider_id, ProviderCapability.MODEL_DISCOVERY,
-        ).fetch_audio_models(connection)
+        ).fetch_audio_models(connection, cancel_token)
 
     def transcribe(self, provider_id: str, request: TranscriptionRequest,
-            connection: ProviderConnection) -> TranscriptionResult:
+            connection: ProviderConnection, cancel_token=None) -> TranscriptionResult:
         return self.adapter(
             provider_id, ProviderCapability.AUDIO_TRANSCRIPTION,
-        ).transcribe(request, connection)
+        ).transcribe(request, connection, cancel_token)
 
     def rewrite(self, provider_id: str, request: RewriteRequest,
-            connection: ProviderConnection) -> RewriteResult:
+            connection: ProviderConnection, cancel_token=None) -> RewriteResult:
         return self.adapter(
             provider_id, ProviderCapability.TEXT_GENERATION,
-        ).rewrite(request, connection)
+        ).rewrite(request, connection, cancel_token)
 
     def translate(self, provider_id: str, request: TranslationRequest,
-            connection: ProviderConnection) -> TranslationResult:
+            connection: ProviderConnection, cancel_token=None) -> TranslationResult:
         return self.adapter(
             provider_id, ProviderCapability.TEXT_GENERATION,
-        ).translate(request, connection)
+        ).translate(request, connection, cancel_token)
 
 
-def build_provider_registry(http: HttpClient = requests) -> ProviderRegistry:
+def build_provider_registry(http: HttpClient | None = None) -> ProviderRegistry:
+    http = http or ProviderHttpClient()
     registry = ProviderRegistry()
     shared = frozenset({
         ProviderCapability.AUDIO_TRANSCRIPTION,
@@ -226,5 +230,13 @@ def build_provider_registry(http: HttpClient = requests) -> ProviderRegistry:
     return registry
 
 
-PROVIDER_REGISTRY = build_provider_registry()
+def _provider_data_directory() -> Path:
+    if platform.system() == "Windows":
+        return Path(os.environ.get("APPDATA", Path.home())) / "ClarifyVoice"
+    return Path.home() / ".clarifyvoice"
+
+
+PROVIDER_HTTP = ProviderHttpClient(
+    logger=SafeRotatingLogger(_provider_data_directory() / "logs"))
+PROVIDER_REGISTRY = build_provider_registry(PROVIDER_HTTP)
 PROVIDER_IDS = PROVIDER_REGISTRY.provider_ids

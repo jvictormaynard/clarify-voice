@@ -3,6 +3,8 @@ import re
 import unittest
 from pathlib import Path
 
+from version import __version__
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -216,10 +218,36 @@ class RepositorySafetyTests(unittest.TestCase):
     def test_package_scripts_are_documented_maintainer_aliases(self):
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertTrue(package["private"])
+        self.assertEqual(package["version"], __version__)
         self.assertEqual(
             set(package["scripts"]),
             {"test", "check", "build", "installer", "setup", "deploy"},
         )
+
+    def test_version_module_is_the_runtime_diagnostics_source(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+
+        self.assertIn("from version import __version__", app_source)
+        self.assertNotIn('APP_VERSION = "', app_source)
+        self.assertEqual(package["version"], __version__)
+
+    def test_build_deploy_and_ci_include_version_module(self):
+        build = (ROOT / "scripts" / "build.ps1").read_text(encoding="utf-8")
+        deploy = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+        package = (ROOT / "package.json").read_text(encoding="utf-8")
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('Join-Path $repoRoot "version.py"', build)
+        self.assertIn('"--hidden-import", "version"', build)
+        self.assertIn('Join-Path $repoRoot "version.py"', deploy)
+        self.assertIn('"--hidden-import", "version"', deploy)
+        self.assertIn("version.py", package)
+        self.assertIn("version.py", ci)
+        self.assertIn("version.py", release)
 
     def test_open_source_community_files_exist(self):
         required = [
