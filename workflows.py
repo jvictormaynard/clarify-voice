@@ -136,6 +136,9 @@ class RecordingSessionGateway(Protocol):
     """One recording lifecycle owned by the recording component."""
 
     def start(self) -> None: ...
+    def wait_until_started(self) -> None:
+        """Wait for startup to finish, raising its failure or cancellation."""
+        ...
     def stop(self) -> Any: ...
     def cancel(self) -> None: ...
     def complete(self) -> None: ...
@@ -434,16 +437,16 @@ class WorkflowService:
                 raise RuntimeError("Recording session was not created")
             session.recording.start()
         except Exception as error:
-            if session.recording is not None:
-                try:
-                    session.recording.fail(error)
-                except Exception:
-                    pass
             with self._lock:
                 if (
                     self._is_current_locked(session.operation_id)
                     and self._state.phase is WorkflowPhase.RECORDING
                 ):
+                    if session.recording is not None:
+                        try:
+                            session.recording.fail(error)
+                        except Exception:
+                            pass
                     self._transition(session, WorkflowPhase.MICROPHONE_UNAVAILABLE)
         finally:
             if (
@@ -477,6 +480,9 @@ class WorkflowService:
                 return
             if session.recording is None:
                 raise RuntimeError("Recording session was not created")
+            session.recording.wait_until_started()
+            if not self._is_current(session.operation_id):
+                return
             audio_source = session.recording.stop()
             result = self._provider.transcribe(
                 audio_source, session.mode, session.language
@@ -506,6 +512,8 @@ class WorkflowService:
                 session, WorkflowPhase.COMPLETED, result_text=result
             )
         except NoUsableAudioError as error:
+            if not self._is_current(session.operation_id):
+                return
             if session.recording is not None:
                 try:
                     session.recording.fail(error)
@@ -513,6 +521,8 @@ class WorkflowService:
                     pass
             self._transition(session, WorkflowPhase.FAILED, status_key="no_audio")
         except Exception as error:
+            if not self._is_current(session.operation_id):
+                return
             if session.recording is not None:
                 try:
                     session.recording.fail(error)

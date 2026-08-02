@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import threading
 import unittest
 from collections.abc import Callable
 
@@ -43,6 +44,27 @@ class ManualScheduler:
 
     def run_in_background(self, callback: Callable[[], None]) -> None:
         self.background.append(callback)
+
+
+class ThreadScheduler:
+    def __init__(self):
+        self.threads = []
+
+    def call_soon(self, callback: Callable[[], None]) -> None:
+        callback()
+
+    def run_in_background(self, callback: Callable[[], None]) -> None:
+        thread = threading.Thread(target=callback, daemon=True)
+        self.threads.append(thread)
+        thread.start()
+
+    def join(self):
+        index = 0
+        while index < len(self.threads):
+            self.threads[index].join(timeout=1.0)
+            if self.threads[index].is_alive():
+                raise AssertionError("background workflow did not finish")
+            index += 1
 
 
 class FakeClock:
@@ -90,6 +112,7 @@ class FakeAudio:
         self.cancelled = 0
         self.completed = 0
         self.failures = []
+        self.startup_waits = 0
 
     def microphone_available(self):
         return self.available
@@ -106,6 +129,9 @@ class FakeAudio:
             raise NoUsableAudioError("no audio")
         return "recording.wav"
 
+    def wait_until_started(self):
+        self.startup_waits += 1
+
     def cancel(self):
         self.cancelled += 1
 
@@ -114,6 +140,48 @@ class FakeAudio:
 
     def fail(self, error):
         self.failures.append(error)
+
+
+class BlockingAudio(FakeAudio):
+    def __init__(self, start_error=None):
+        super().__init__()
+        self.start_error = start_error
+        self.start_entered = threading.Event()
+        self.start_release = threading.Event()
+        self.start_terminal = threading.Event()
+        self.wait_entered = threading.Event()
+        self.order = []
+
+    def start(self):
+        self.started += 1
+        self.order.append("start_entered")
+        self.start_entered.set()
+        if not self.start_release.wait(timeout=1.0):
+            raise AssertionError("test did not release recording startup")
+        if self.cancelled and self.start_error is None:
+            self.start_error = RuntimeError("recording startup cancelled")
+        self.order.append("start_terminal")
+        self.start_terminal.set()
+        if self.start_error is not None:
+            raise self.start_error
+
+    def wait_until_started(self):
+        self.startup_waits += 1
+        self.order.append("wait_until_started")
+        self.wait_entered.set()
+        if not self.start_terminal.wait(timeout=1.0):
+            raise AssertionError("recording startup did not become terminal")
+        if self.start_error is not None:
+            raise self.start_error
+
+    def stop(self):
+        self.order.append("stop")
+        return super().stop()
+
+    def cancel(self):
+        self.order.append("cancel")
+        super().cancel()
+        self.start_release.set()
 
 
 class FakeClipboard:
@@ -388,6 +456,7 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertTrue(self.service.dispatch(StopDictation()))
 
         self.assertEqual(self.audio.started, 1)
+        self.assertEqual(self.audio.startup_waits, 1)
         self.assertEqual(self.audio.stopped, 1)
         self.assertEqual(self.audio.completed, 1)
         self.assertEqual(
@@ -400,6 +469,73 @@ class WorkflowServiceTests(unittest.TestCase):
             [({"mode": "prompt", "provider": "gemini"}, 2.5, "Transcribed")],
         )
         self.assertEqual(self.service.state.phase, WorkflowPhase.COMPLETED)
+
+    def test_immediate_stop_waits_for_blocked_startup_before_stopping(self):
+        scheduler = ThreadScheduler()
+        self.audio = BlockingAudio()
+        service = self.make_service(scheduler)
+
+        self.assertTrue(
+            service.dispatch(StartDictation("editor.exe", "prompt", "en"))
+        )
+        self.assertTrue(self.audio.start_entered.wait(timeout=1.0))
+        self.assertTrue(service.dispatch(StopDictation()))
+        self.assertTrue(self.audio.wait_entered.wait(timeout=1.0))
+        self.assertEqual(self.audio.stopped, 0)
+
+        self.audio.start_release.set()
+        scheduler.join()
+
+        self.assertEqual(self.audio.started, 1)
+        self.assertEqual(self.audio.startup_waits, 1)
+        self.assertEqual(self.audio.stopped, 1)
+        self.assertLess(
+            self.audio.order.index("start_terminal"),
+            self.audio.order.index("stop"),
+        )
+        self.assertEqual(service.state.phase, WorkflowPhase.COMPLETED)
+
+    def test_immediate_stop_propagates_blocked_startup_failure(self):
+        scheduler = ThreadScheduler()
+        self.audio = BlockingAudio(RuntimeError("startup failed"))
+        service = self.make_service(scheduler)
+
+        service.dispatch(StartDictation("editor.exe", "prompt", "en"))
+        self.assertTrue(self.audio.start_entered.wait(timeout=1.0))
+        service.dispatch(StopDictation())
+        self.assertTrue(self.audio.wait_entered.wait(timeout=1.0))
+        self.audio.start_release.set()
+        scheduler.join()
+
+        self.assertEqual(service.state.phase, WorkflowPhase.FAILED)
+        self.assertEqual(service.state.status_key, "error")
+        self.assertEqual(self.audio.stopped, 0)
+        self.assertEqual(len(self.audio.failures), 1)
+        self.assertFalse(hasattr(self.provider, "transcription_request"))
+        self.assertEqual(self.clipboard.auto_pastes, [])
+        self.assertEqual(self.statistics.dictations, [])
+
+    def test_cancel_during_blocked_startup_prevents_late_stop_or_provider(self):
+        scheduler = ThreadScheduler()
+        self.audio = BlockingAudio()
+        service = self.make_service(scheduler)
+
+        service.dispatch(StartDictation("editor.exe", "prompt", "en"))
+        self.assertTrue(self.audio.start_entered.wait(timeout=1.0))
+        self.assertTrue(service.dispatch(CancelDictation()))
+        scheduler.join()
+
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(self.audio.stopped, 0)
+        self.assertGreaterEqual(self.audio.cancelled, 1)
+        self.assertEqual(self.audio.failures, [])
+        self.assertLess(
+            self.audio.order.index("cancel"),
+            self.audio.order.index("start_terminal"),
+        )
+        self.assertFalse(hasattr(self.provider, "transcription_request"))
+        self.assertEqual(self.clipboard.auto_pastes, [])
+        self.assertEqual(self.statistics.dictations, [])
 
     def test_no_usable_audio_is_a_distinct_failure(self):
         self.audio.present = False
