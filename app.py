@@ -70,6 +70,7 @@ from workflows import (
     CancelTranslation,
     ChooseTranslationLanguage,
     DismissMicrophoneUnavailable,
+    MicrophoneUnavailableError as WorkflowMicrophoneUnavailableError,
     NoUsableAudioError,
     RecordingSnapshot,
     SelectionCapture,
@@ -2247,7 +2248,7 @@ class RecordingCleanupError(RecordingError):
     """Raised when temporary audio cannot be removed after retries."""
 
 
-class MicrophoneUnavailableError(RecordingError):
+class MicrophoneUnavailableError(RecordingError, WorkflowMicrophoneUnavailableError):
     """Raised when Windows has no active microphone input to record."""
 
 
@@ -3164,15 +3165,20 @@ def _result_window_height(header_height, result_height):
     # Header has 10px vertical pack padding; the root card has 2px.
     return min(360, max(96, int(header_height) + 20 + int(result_height) + 4))
 
-def copy_and_paste(text):
+def copy_and_paste(text, *, should_paste=True):
     if IS_WIN:
-        return _paste_generated_text(text)
+        if should_paste:
+            return _paste_generated_text(text)
+        return _paste_generated_text(text, should_paste=False)
     elif IS_MAC:
         subprocess.run(["pbcopy"], input=text.encode(), check=False)
-        subprocess.run(["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'], check=False)
+        if should_paste:
+            subprocess.run(["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'], check=False)
     else:
         subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=False)
-        subprocess.run(["xdotool", "key", "ctrl+v"], check=False)
+        if should_paste:
+            subprocess.run(["xdotool", "key", "ctrl+v"], check=False)
+    return True
 
 
 class AppWorkflowScheduler:
@@ -3384,6 +3390,12 @@ class AppWorkflowClipboard:
     @staticmethod
     def write_dictation_result(target, text):
         safe = target is None or AppWorkflowClipboard.is_target_current(target)
+        if not IS_WIN:
+            if safe:
+                copy_and_paste(text)
+                return SelectionDisposition.PASTED
+            copy_and_paste(text, should_paste=False)
+            return SelectionDisposition.COPIED
         pasted = _paste_generated_text(text, should_paste=safe)
         return (
             SelectionDisposition.PASTED
@@ -5829,6 +5841,14 @@ class App(ctk.CTk):
         return clipboard.capture_target()
 
     def _new_workflow_recording_session(self):
+        current = getattr(self, "_recording_session", None)
+        if current is not None:
+            shutdown_complete = getattr(current, "shutdown_complete", None)
+            if shutdown_complete is None or not shutdown_complete.is_set():
+                # Keep the old RecordingSession as the sole owner until its
+                # cleanup has completed; otherwise a new hotkey could reuse
+                # self.recorder while the old startup/stop worker is alive.
+                return None
         session = self._new_recording_session()
         self._recording_session = session
         return session
@@ -5954,27 +5974,35 @@ class App(ctk.CTk):
                 WorkflowPhase.PUBLISHING,
             ):
                 return
-            if phase is WorkflowPhase.RECORDING:
-                self.after(0, lambda: service.dispatch(StopDictation()))
-                return
-            if phase is WorkflowPhase.MICROPHONE_UNAVAILABLE:
-                self.after(
-                    0,
-                    lambda: service.dispatch(DismissMicrophoneUnavailable()),
-                )
-                return
             if phase is not WorkflowPhase.READY:
-                return
-            target = self._workflow_target()
-            self._workflow_dictation_target_window = (
-                target.window if target is not None else None
-            )
-            self.after(
-                0,
-                lambda target=target: service.dispatch(
-                    StartDictation(target, self.mode, self.lang)
-                ),
-            )
+                if phase not in (
+                    WorkflowPhase.RECORDING,
+                    WorkflowPhase.MICROPHONE_UNAVAILABLE,
+                ):
+                    return
+                target = None
+            else:
+                # Capture the target synchronously, before yielding to Tk.
+                target = self._workflow_target()
+                self._workflow_dictation_target_window = (
+                    target.window if target is not None else None
+                )
+            mode = self.mode
+            language = self.lang
+
+            def dispatch_current_phase():
+                current_phase = service.state.phase
+                if current_phase is WorkflowPhase.READY:
+                    service.dispatch(StartDictation(target, mode, language))
+                elif current_phase is WorkflowPhase.RECORDING:
+                    service.dispatch(StopDictation())
+                elif current_phase is WorkflowPhase.MICROPHONE_UNAVAILABLE:
+                    service.dispatch(DismissMicrophoneUnavailable())
+
+            # Re-read the phase after earlier queued hotkeys have run.  Two
+            # events received before Tk drains its queue therefore become
+            # Start then Stop instead of two Starts.
+            self.after(0, dispatch_current_phase)
             return
         if (self._rewrite_active
                 or getattr(self, "_translation_active", False)):

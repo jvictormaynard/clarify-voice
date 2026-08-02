@@ -18,6 +18,7 @@ from workflows import (
     CancelTranslation,
     ChooseTranslationLanguage,
     DismissMicrophoneUnavailable,
+    MicrophoneUnavailableError,
     NoUsableAudioError,
     RecordingSnapshot,
     SelectionCapture,
@@ -310,6 +311,14 @@ class WorkflowServiceTests(unittest.TestCase):
         source = inspect.getsource(workflows)
         self.assertNotIn("customtkinter", source)
         self.assertNotIn("tkinter", source)
+
+    def test_app_microphone_error_implements_the_workflow_domain_contract(self):
+        self.assertTrue(
+            issubclass(
+                app.MicrophoneUnavailableError,
+                workflows.MicrophoneUnavailableError,
+            )
+        )
 
     def test_rewrite_runs_headlessly_and_records_the_result(self):
         self.assertTrue(self.service.dispatch(StartRewrite()))
@@ -806,6 +815,72 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(len(self.audio.failures), 1)
         self.assertFalse(hasattr(self.provider, "transcription_request"))
         self.assertEqual(self.clipboard.auto_pastes, [])
+        self.assertEqual(self.statistics.dictations, [])
+
+    def test_generic_startup_failure_is_not_reported_as_microphone_unavailable(self):
+        scheduler = ThreadScheduler()
+        self.audio = BlockingAudio(RuntimeError("SoX permission denied"))
+        service = self.make_service(scheduler)
+
+        service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
+        self.assertTrue(self.audio.start_entered.wait(timeout=1.0))
+        self.audio.start_release.set()
+        scheduler.join()
+
+        self.assertEqual(service.state.phase, WorkflowPhase.FAILED)
+        self.assertEqual(service.state.status_key, "error")
+
+    def test_typed_microphone_startup_failure_reports_microphone_unavailable(self):
+        scheduler = ThreadScheduler()
+        self.audio = BlockingAudio(MicrophoneUnavailableError("no input"))
+        service = self.make_service(scheduler)
+
+        service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
+        self.assertTrue(self.audio.start_entered.wait(timeout=1.0))
+        self.audio.start_release.set()
+        scheduler.join()
+
+        self.assertEqual(
+            service.state.phase, WorkflowPhase.MICROPHONE_UNAVAILABLE
+        )
+        self.assertIsInstance(self.audio.failures[0], MicrophoneUnavailableError)
+
+    def test_immediate_stop_preserves_typed_microphone_startup_failure(self):
+        scheduler = ThreadScheduler()
+        self.audio = BlockingAudio(MicrophoneUnavailableError("no input"))
+        service = self.make_service(scheduler)
+
+        service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
+        self.assertTrue(self.audio.start_entered.wait(timeout=1.0))
+        self.assertTrue(service.dispatch(StopDictation()))
+        self.assertTrue(self.audio.wait_entered.wait(timeout=1.0))
+        self.audio.start_release.set()
+        scheduler.join()
+
+        self.assertEqual(
+            service.state.phase, WorkflowPhase.MICROPHONE_UNAVAILABLE
+        )
+
+    def test_audio_owner_rejection_keeps_dictation_ready_without_worker(self):
+        scheduler = ManualScheduler()
+        self.audio.create_session = lambda: None
+        service = self.make_service(scheduler)
+
+        self.assertFalse(
+            service.dispatch(
+                StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+            )
+        )
+
+        self.assertEqual(service.state, WorkflowState())
+        self.assertEqual(scheduler.background, [])
+        self.assertFalse(hasattr(self.provider, "transcription_request"))
         self.assertEqual(self.statistics.dictations, [])
 
     def test_cancel_during_blocked_startup_prevents_late_stop_or_provider(self):

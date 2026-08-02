@@ -49,6 +49,16 @@ class NoUsableAudioError(RuntimeError):
     """The recording session finished without a provider-ready audio source."""
 
 
+class MicrophoneUnavailableError(RuntimeError):
+    """Recording could not start because no usable microphone is available.
+
+    This domain error deliberately has no desktop/UI dependencies.  Concrete
+    recording adapters may subclass it to preserve their richer error type
+    while allowing the workflow to distinguish microphone absence from
+    process, permission, or other lifecycle failures.
+    """
+
+
 @dataclass(frozen=True)
 class RecordingSnapshot:
     """Provider-ready audio detached from the temporary recording lifetime."""
@@ -170,7 +180,7 @@ class RecordingSessionGateway(Protocol):
 
 class AudioGateway(Protocol):
     def microphone_available(self) -> bool | None: ...
-    def create_session(self) -> RecordingSessionGateway: ...
+    def create_session(self) -> RecordingSessionGateway | None: ...
 
 
 class ClipboardGateway(Protocol):
@@ -484,21 +494,57 @@ class WorkflowService:
                 return False
             return self._transition(session, WorkflowPhase.MICROPHONE_UNAVAILABLE)
 
+        # Do not ask a concrete audio adapter to allocate a session for a
+        # command that is already superseded by another workflow.  The second
+        # check in ``_new_session`` still closes the small dispatch race below.
+        with self._lock:
+            if (
+                self._session is not None
+                or self._state.phase is not WorkflowPhase.READY
+            ):
+                return False
+        try:
+            recording = self._audio.create_session()
+        except MicrophoneUnavailableError:
+            session = self._new_session(
+                WorkflowKind.DICTATION,
+                target=command.target,
+            )
+            if session is None:
+                return False
+            self._transition(
+                session, WorkflowPhase.MICROPHONE_UNAVAILABLE
+            )
+            return True
+        except Exception:
+            session = self._new_session(
+                WorkflowKind.DICTATION,
+                target=command.target,
+            )
+            if session is None:
+                return False
+            self._transition(session, WorkflowPhase.FAILED, status_key="error")
+            return True
+        # A concrete audio owner may reject creation while its previous
+        # RecordingSession is still shutting down.  Leave the workflow READY
+        # so the old owner remains authoritative and a later hotkey can retry.
+        if recording is None:
+            return False
         session = self._new_session(
             WorkflowKind.DICTATION,
             target=command.target,
         )
         if session is None:
+            try:
+                recording.cancel()
+            except Exception:
+                pass
             return False
         session.mode = command.mode
         session.language = command.language
         session.started_at = self._clock.time()
         session.usage_context = self._config.recording_usage_context(command.mode)
-        try:
-            session.recording = self._audio.create_session()
-        except Exception:
-            self._transition(session, WorkflowPhase.FAILED, status_key="error")
-            return True
+        session.recording = recording
         self._transition(session, WorkflowPhase.RECORDING)
         self._scheduler.run_in_background(lambda: self._start_audio(session))
         return True
@@ -521,7 +567,14 @@ class WorkflowService:
                         session.recording.fail(error)
                     except Exception:
                         pass
-                self._transition(session, WorkflowPhase.MICROPHONE_UNAVAILABLE)
+                if isinstance(error, MicrophoneUnavailableError):
+                    self._transition(
+                        session, WorkflowPhase.MICROPHONE_UNAVAILABLE
+                    )
+                else:
+                    self._transition(
+                        session, WorkflowPhase.FAILED, status_key="error"
+                    )
         finally:
             if (
                 not self._is_current(session.operation_id)
@@ -588,6 +641,15 @@ class WorkflowService:
                 ),
             ):
                 return
+        except MicrophoneUnavailableError as error:
+            if not self._is_current(session.operation_id):
+                return
+            if session.recording is not None:
+                try:
+                    session.recording.fail(error)
+                except Exception:
+                    pass
+            self._transition(session, WorkflowPhase.MICROPHONE_UNAVAILABLE)
         except NoUsableAudioError as error:
             if not self._is_current(session.operation_id):
                 return

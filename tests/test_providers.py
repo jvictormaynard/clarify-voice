@@ -1140,6 +1140,105 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
         copy_result.assert_called_once_with("generated", should_paste=False)
 
 
+class WorkflowAppBridgeTests(unittest.TestCase):
+    def test_dictation_uses_platform_copy_and_paste_on_non_windows(self):
+        target = app.SelectionTarget(77, "editor.exe")
+        with patch.object(app, "IS_WIN", False), \
+                patch.object(app.AppWorkflowClipboard, "is_target_current",
+                             return_value=True), \
+                patch.object(app, "copy_and_paste") as copy:
+            disposition = app.AppWorkflowClipboard.write_dictation_result(
+                target, "result")
+
+        self.assertEqual(disposition, app.SelectionDisposition.PASTED)
+        copy.assert_called_once_with("result")
+
+    def test_dictation_non_windows_focus_change_copies_without_pasting(self):
+        target = app.SelectionTarget(77, "editor.exe")
+        with patch.object(app, "IS_WIN", False), \
+                patch.object(app.AppWorkflowClipboard, "is_target_current",
+                             return_value=False), \
+                patch.object(app, "copy_and_paste") as copy:
+            disposition = app.AppWorkflowClipboard.write_dictation_result(
+                target, "result")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        copy.assert_called_once_with("result", should_paste=False)
+
+    def test_mac_copy_and_paste_uses_command_v_path(self):
+        with patch.object(app, "IS_WIN", False), \
+                patch.object(app, "IS_MAC", True), \
+                patch.object(app.subprocess, "run") as run:
+            self.assertTrue(app.copy_and_paste("result"))
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0], ["pbcopy"])
+        command = run.call_args_list[1].args[0]
+        self.assertEqual(command[0], "osascript")
+        self.assertIn("command down", command[-1])
+
+    def test_workflow_recording_factory_keeps_startup_owner_until_shutdown(self):
+        old_recorder = object()
+        old_session = SimpleNamespace(
+            recorder=old_recorder, shutdown_complete=threading.Event())
+        new_session = SimpleNamespace(recorder=object())
+        create = Mock(return_value=new_session)
+        harness = SimpleNamespace(
+            _recording_session=old_session,
+            _new_recording_session=create,
+        )
+
+        # Cancellation can return the workflow to READY while the old
+        # RecordingSession is still starting.  It must remain the owner.
+        self.assertIsNone(app.App._new_workflow_recording_session(harness))
+        self.assertIs(harness._recording_session, old_session)
+        self.assertIs(old_session.recorder, old_recorder)
+        create.assert_not_called()
+
+        old_session.shutdown_complete.set()
+        replacement = app.App._new_workflow_recording_session(harness)
+
+        self.assertIs(replacement, new_session)
+        self.assertIsNot(replacement, old_session)
+        self.assertIs(harness._recording_session, new_session)
+
+    def test_recording_hotkeys_choose_start_then_stop_when_tk_queue_drains(self):
+        target = app.SelectionTarget(77, "editor.exe")
+        callbacks = []
+        dispatches = []
+        service = SimpleNamespace(
+            state=SimpleNamespace(phase=app.WorkflowPhase.READY))
+
+        def dispatch(command):
+            dispatches.append(command)
+            if isinstance(command, app.StartDictation):
+                service.state.phase = app.WorkflowPhase.RECORDING
+            elif isinstance(command, app.StopDictation):
+                service.state.phase = app.WorkflowPhase.READY
+            return True
+
+        service.dispatch = dispatch
+        harness = SimpleNamespace(
+            _workflow_service=service,
+            _workflow_target=Mock(return_value=target),
+            _workflow_dictation_target_window=None,
+            mode="prompt",
+            lang="en",
+            after=lambda _delay, callback: callbacks.append(callback),
+        )
+
+        app.App._recording_hotkey(harness)
+        app.App._recording_hotkey(harness)
+        self.assertEqual(len(callbacks), 2)
+
+        callbacks[0]()
+        callbacks[1]()
+
+        self.assertIsInstance(dispatches[0], app.StartDictation)
+        self.assertIsInstance(dispatches[1], app.StopDictation)
+        self.assertEqual(dispatches[0].target, target)
+
+
 class RewriteWorkflowTests(unittest.TestCase):
     class Harness:
         def __init__(self):
