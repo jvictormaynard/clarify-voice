@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -15,25 +17,61 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: |
             requirements.txt
             requirements-dev.txt
+            requirements-lock-windows.txt
+            requirements-lock-runtime-windows.txt
 
-      - name: Run tests
-        run: |
-          python -m pip install --disable-pip-version-check -r requirements.txt
-          python -m unittest discover -s tests -v
+      - name: Install pinned bootstrap tools
+        run: python scripts/install_bootstrap_tools.py --lock-file requirements-lock-windows.txt
+
+      - name: Install locked development dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt -c requirements-lock-windows.txt
+
+      - name: Check development dependency lock
+        run: python scripts/check_dependency_lock.py --lock-file requirements-lock-windows.txt --allow-unsafe
+
+      - name: Check runtime dependency lock
+        run: python scripts/check_dependency_lock.py --lock-file requirements-lock-runtime-windows.txt --requirements-file requirements.txt
+
+      - name: Check runtime pins match build lock
+        run: python scripts/check_runtime_lock.py
+
+      - name: Run Ruff lint
+        run: ruff check desktop_state.py windows_hotkeys.py scripts/dependency_audit.py tests/test_repository.py
+
+      - name: Run Ruff format check
+        run: ruff format --check scripts/dependency_audit.py tests/test_dependency_lock.py tests/test_repository.py
+
+      - name: Run targeted type checks
+        run: mypy desktop_state.py windows_hotkeys.py
+
+      - name: Audit dependencies
+        run: python scripts/dependency_audit.py
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile Python sources
+        run: python -m compileall -q app.py desktop_state.py windows_hotkeys.py tests scripts
 
       - name: Build portable executable
         shell: pwsh
         run: .\scripts\build.ps1
+
+      - name: Generate runtime SBOM
+        run: cyclonedx-py requirements requirements-lock-runtime-windows.txt --of JSON -o dist\ClarifyVoice.sbom.json
+
+      - name: Add bundled SoX to SBOM
+        run: python scripts/add_sbom_component.py --bom-file dist\ClarifyVoice.sbom.json --runtime-root extra\sox-14.4.2 --manifest scripts\sox-runtime-manifest.json
 
       - name: Create release assets
         shell: pwsh
@@ -54,18 +92,29 @@ jobs:
           if ($soxHash -ne "b45f598643ffbd8e363ff24d61166ccec4836fea6d3888881b8df53e3bb55f6c") {
             throw "The downloaded SoX source archive did not match the expected SHA-256."
           }
-          Compress-Archive -Path dist\ClarifyVoice.exe, LICENSE, THIRD_PARTY_NOTICES.md -DestinationPath dist\ClarifyVoice-windows-x64.zip -Force
+          Compress-Archive -Path dist\ClarifyVoice.exe, dist\ClarifyVoice.sbom.json, LICENSE, THIRD_PARTY_NOTICES.md -DestinationPath dist\ClarifyVoice-windows-x64.zip -Force
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ClarifyVoice-windows-${{ github.ref_name }}
           path: |
             dist/ClarifyVoice.exe
             dist/ClarifyVoice.exe.sha256
+            dist/ClarifyVoice.sbom.json
             dist/ClarifyVoice-windows-x64.zip
             dist/sox-14.4.2-source.tar.gz
           if-no-files-found: error
+
+      - name: Attest release artifact provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/ClarifyVoice.exe
+            dist/ClarifyVoice.exe.sha256
+            dist/ClarifyVoice.sbom.json
+            dist/ClarifyVoice-windows-x64.zip
+            dist/sox-14.4.2-source.tar.gz
 
       - name: Publish tagged GitHub release
         if: startsWith(github.ref, 'refs/tags/')
@@ -76,6 +125,7 @@ jobs:
           gh release create "${{ github.ref_name }}" `
             dist\ClarifyVoice.exe `
             dist\ClarifyVoice.exe.sha256 `
+            dist\ClarifyVoice.sbom.json `
             dist\ClarifyVoice-windows-x64.zip `
             dist\sox-14.4.2-source.tar.gz `
             --verify-tag `

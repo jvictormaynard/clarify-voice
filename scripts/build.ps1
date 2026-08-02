@@ -26,6 +26,7 @@ $icon = Join-Path $assets "branding\clarify.ico"
 $workDir = Join-Path $repoRoot "build\pyinstaller"
 $specDir = Join-Path $repoRoot "build\spec"
 $packageInput = Join-Path $repoRoot "build\package-input"
+$soxManifestPath = Join-Path $PSScriptRoot "sox-runtime-manifest.json"
 $extra = Join-Path $packageInput "extra"
 $packageSox = Join-Path $extra "sox-14.4.2"
 
@@ -38,7 +39,7 @@ function ConvertTo-ProcessArgument {
     return '"' + $Value.Replace('"', '\"') + '"'
 }
 
-foreach ($requiredPath in @($entryPoint, $repoExtra, $assets, $icon)) {
+foreach ($requiredPath in @($entryPoint, $repoExtra, $assets, $icon, $soxManifestPath)) {
     if (-not (Test-Path $requiredPath)) {
         throw "Required build input is missing: $requiredPath"
     }
@@ -49,8 +50,9 @@ Remove-Item $packageInput -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $packageSox -ItemType Directory -Force | Out-Null
 
 $repoSox = Join-Path $repoExtra "sox-14.4.2"
-Copy-Item (Join-Path $repoSox "*.dll") $packageSox -Force
-foreach ($runtimeFile in @("sox.exe", "LICENSE.GPL.txt", "README.txt", "README.win32.txt")) {
+$soxManifest = Get-Content $soxManifestPath -Raw | ConvertFrom-Json
+Copy-Item (Join-Path $repoSox $soxManifest.runtime_glob) $packageSox -Force
+foreach ($runtimeFile in @($soxManifest.runtime_files + "LICENSE.GPL.txt", "README.txt", "README.win32.txt")) {
     Copy-Item (Join-Path $repoSox $runtimeFile) $packageSox -Force
 }
 

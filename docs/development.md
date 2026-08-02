@@ -21,7 +21,39 @@ cd clarify-voice
 ```
 
 The setup script creates `.venv` and installs runtime dependencies. `-Dev` also
-installs PyInstaller for local packaging.
+installs the pinned development and packaging tools for local checks. Both modes
+consume the platform-specific `requirements-lock-linux.txt` or
+`requirements-lock-windows.txt`, generated from the human-maintained
+`requirements.txt` and `requirements-dev.txt` intent files. Generate each lock
+on its matching runner only when intentionally changing dependency intent. In
+particular, compile the Windows lock on Windows so PyInstaller's `colorama`,
+`pefile`, and `pywin32-ctypes` markers are resolved and Linux-only `keyboard`
+is omitted:
+
+```text
+python -m piptools compile --allow-unsafe --strip-extras --output-file=requirements-lock-linux.txt requirements-dev.txt
+python -m piptools compile --allow-unsafe --strip-extras --output-file=requirements-lock-windows.txt requirements-dev.txt
+python -m piptools compile --strip-extras --output-file=requirements-lock-runtime-windows.txt requirements.txt
+```
+
+Do not edit any lock file by hand. Each CI runner checks its corresponding
+file in a temporary path, so Linux and Windows platform markers are not
+silently treated as interchangeable.
+
+The `requirements-lock-windows.txt` file includes the development and packaging
+toolchain used to build and validate the executable. The separate
+`requirements-lock-runtime-windows.txt` file is compiled only from
+`requirements.txt`; it contains the runtime dependency graph and is the sole
+input to the release SBOM. Keeping these locks separate prevents Ruff, mypy,
+pip-audit, pip-tools, CycloneDX, and PyInstaller from being reported as shipped
+application components while retaining pinned, reproducible build inputs.
+Development locks are compiled with `--allow-unsafe`, so their exact
+`pip==26.1.2`, `setuptools==83.0.0`, and `pip-tools==7.6.0` versions are
+committed and installed before the rest of the toolchain. This pip release is
+compatible with pip-tools and includes fixes for the audited pip advisories.
+The runtime-only lock intentionally excludes those bootstrap tools.
+The release checks that every shared runtime package has the same version in
+both Windows locks before building or generating the SBOM.
 
 Environment variables are optional because provider settings can be entered in
 the UI. For local automation, copy `.env.example` to `.env` and fill only the
@@ -93,6 +125,32 @@ the native Windows temporary directory, builds, backs up the installed
 executable, replaces it, and restarts ClarifyVoice. Override the discovered
 target with `CLARIFYVOICE_INSTALL_PATH` when needed.
 
+## Automated quality and supply-chain checks
+
+The CI quality gate runs staged Ruff linting, a focused Ruff format check, mypy for the
+typed `desktop_state.py` and `windows_hotkeys.py` modules, the full dependency
+audit, the unit-test baseline, and Python compile checks on Ubuntu and Windows.
+The Windows packaging job is required before CI is green.
+
+`scripts/dependency_audit.py` audits the locked set with `pip-audit`. The
+reviewed-exception policy lives in `dependency-audit.json`; it is intentionally
+empty today. Any future exception must include a maintainer-approved rationale
+in that file and should be removed as soon as the dependency can be upgraded.
+
+Tagged releases also publish `ClarifyVoice.sbom.json` (CycloneDX) from the
+runtime-only `requirements-lock-runtime-windows.txt` lock, include it in the
+portable ZIP. The SBOM is augmented with the bundled SoX 14.4.2 component and
+the SHA-256 of every `sox.exe`/DLL selected by
+`scripts/sox-runtime-manifest.json`; the source-archive SHA-256 remains source
+offer evidence only. The same manifest drives `scripts/build.ps1` before GitHub
+artifact attestations are created for the release files.
+Each selected DLL is represented as its own CycloneDX library component with a
+bundle-scoped version, SPDX license, SHA-256, and a dependency edge from the
+SoX aggregate component. This avoids attributing the source archive digest to
+the executable or hiding codec/runtime libraries in a generic property.
+The attestation is verifiable with GitHub's artifact-attestation tooling and is
+separate from the existing SHA-256 checksum.
+
 ## Experimental Linux and macOS support
 
 The source contains fallback clipboard and hotkey paths, but the polished and
@@ -131,9 +189,10 @@ post-release verification.
    Windows, and packaging checks pass.
 5. Create an annotated `vX.Y.Z` tag on the exact green `master` commit and push
    only that tag.
-6. The release workflow builds on Windows, creates the executable, ZIP and
-   SHA-256 checksum, verifies the official SoX source archive, and publishes
-   all four assets to the same GitHub release.
+6. The release workflow builds on Windows, creates the executable, CycloneDX
+   SBOM, ZIP, and SHA-256 checksum, verifies the official SoX source archive,
+   publishes artifact attestations, and uploads all five assets to the same
+   GitHub release.
 7. Download the published assets, verify the executable checksum and ZIP
    contents, and confirm that `/releases/latest` resolves to the new version.
 

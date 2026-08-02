@@ -23,6 +23,13 @@ The tag, release, and executable must all originate from the same green
 - `THIRD_PARTY_NOTICES.md`
 - `requirements.txt`
 - `requirements-dev.txt`
+- `requirements-lock-linux.txt`
+- `requirements-lock-windows.txt`
+- `requirements-lock-runtime-windows.txt`
+- `scripts/check_runtime_lock.py`
+- `scripts/install_bootstrap_tools.py`
+- `scripts/add_sbom_component.py`
+- `scripts/sox-runtime-manifest.json`
 - `scripts/build.ps1`
 - `.github/workflows/ci.yml`
 - `.github/workflows/release.yml`
@@ -58,12 +65,14 @@ The GitHub release must contain exactly one of each:
 
 1. `ClarifyVoice.exe`
 2. `ClarifyVoice.exe.sha256`
-3. `ClarifyVoice-windows-x64.zip`
-4. `sox-14.4.2-source.tar.gz`
+3. `ClarifyVoice.sbom.json`
+4. `ClarifyVoice-windows-x64.zip`
+5. `sox-14.4.2-source.tar.gz`
 
 The ZIP must contain:
 
 - `ClarifyVoice.exe`
+- `ClarifyVoice.sbom.json`
 - `LICENSE`
 - `THIRD_PARTY_NOTICES.md`
 

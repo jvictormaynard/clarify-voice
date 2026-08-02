@@ -95,7 +95,7 @@ def unregister_escape_hotkey(user32, hwnd) -> None:
 
 def is_alt_pressed() -> bool:
     """Read the physical Alt state without installing a keyboard hook."""
-    return bool(ctypes.windll.user32.GetAsyncKeyState(VK_MENU) & 0x8000)
+    return bool(ctypes.windll.user32.GetAsyncKeyState(VK_MENU) & 0x8000)  # type: ignore[attr-defined]
 
 
 def _focused_control_for_foreground(user32):
@@ -219,7 +219,7 @@ def paste_focused_control(expected_text: str | None = None,
     fall back to key injection without claiming consumption.
     """
     if user32 is None:
-        user32 = ctypes.windll.user32
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
     try:
         focused = _focused_control_for_foreground(user32)
         class_name = _window_class_name(user32, focused) if focused else None
@@ -254,7 +254,7 @@ def paste_focused_control(expected_text: str | None = None,
 def send_ctrl_key(letter: str) -> bool | None:
     """Inject Ctrl plus one ASCII letter without claiming paste consumption."""
     virtual_key = ord(str(letter).upper())
-    user32 = ctypes.windll.user32
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
     key_up = 0x0002
     try:
         user32.keybd_event(0x11, 0, 0, 0)  # Ctrl down
