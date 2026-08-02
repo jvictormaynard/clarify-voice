@@ -5387,6 +5387,18 @@ class App(ctk.CTk):
         if not self._session_is_current(session):
             return
         cleanup_pending = not session._cleanup_done.is_set()
+        if (text and (session.cancel_event.is_set()
+                      or getattr(self, "app_state", "processing") != "processing")):
+            # Escape can arrive after this callback was queued but before Tk
+            # runs it. Release ownership without publishing stale text.
+            if not cleanup_pending:
+                self._recording_session = None
+            else:
+                observer = getattr(self, "_observe_recording_session_release", None)
+                if observer is None:
+                    observer = App._observe_recording_session_release.__get__(self)
+                observer(session)
+            return
         if not cleanup_pending:
             self._recording_session = None
         if text:
@@ -5507,7 +5519,13 @@ class App(ctk.CTk):
                         self.after(0, lambda: finisher(session, text=text))
                     else:
                         self._recording_session = None
-                        self.after(0, lambda: self._on_result(text))
+                        def publish_result():
+                            if (session.cancel_event.is_set()
+                                    or getattr(self, "app_state", "processing")
+                                    != "processing"):
+                                return
+                            self._on_result(text)
+                        self.after(0, publish_result)
             except RecordingCancelledError as error:
                 session.finalize("cancelled", error)
             except RecordingEncodingError as error:

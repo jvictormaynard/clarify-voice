@@ -1623,6 +1623,40 @@ class RewriteWorkflowTests(unittest.TestCase):
 
         self.assertEqual(states, ["processing", "ready"])
 
+    def test_queued_finisher_discards_result_after_escape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "recording.wav"
+            audio_path.write_bytes(b"audio")
+            recorder = SimpleNamespace(cancel=Mock())
+            session = app.RecordingSession(
+                recorder=recorder, audio_path=audio_path)
+            session.state = "completed"
+            session._cleanup_done.set()
+            callbacks = []
+            harness = SimpleNamespace(
+                app_state="processing",
+                _recording_session=session,
+                _closing=False,
+                _on_result=Mock(),
+                _set_state=lambda state, *_args: setattr(
+                    harness, "app_state", state),
+                _observe_recording_session_release=Mock(),
+                _session_is_current=lambda candidate: (
+                    harness._recording_session is candidate and not harness._closing),
+            )
+            callbacks.append(
+                lambda: app.App._finish_recording_session(
+                    harness, session, text="late result"))
+
+            # Escape publishes cancellation before the queued Tk callback runs.
+            app.App._cancel(harness)
+            self.assertEqual(harness.app_state, "ready")
+            self.assertTrue(session.cancel_event.is_set())
+            self.assertTrue(session.provider_cancel_token.cancelled)
+            callbacks.pop(0)()
+
+            harness._on_result.assert_not_called()
+
     def test_subsecond_stop_waits_for_recorder_startup(self):
         with tempfile.TemporaryDirectory() as directory:
             audio_path = Path(directory) / "recording.wav"

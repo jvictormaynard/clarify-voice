@@ -233,6 +233,13 @@ def redact_sensitive(value: Any, key: str = "") -> Any:
     return value
 
 
+class _BestEffortRotatingFileHandler(RotatingFileHandler):
+    """A file sink whose diagnostics failures stay silent and non-fatal."""
+
+    def handleError(self, _record):
+        return
+
+
 class SafeRotatingLogger:
     def __init__(self, directory: Path, *, max_bytes: int = 512 * 1024,
                  backup_count: int = 3) -> None:
@@ -251,7 +258,7 @@ class SafeRotatingLogger:
             logger = logging.getLogger(f"clarifyvoice.provider.{id(self)}")
             logger.setLevel(logging.INFO)
             logger.propagate = False
-            handler = RotatingFileHandler(
+            handler = _BestEffortRotatingFileHandler(
                 self.path, maxBytes=self.max_bytes,
                 backupCount=self.backup_count, encoding="utf-8")
             handler.setFormatter(logging.Formatter("%(message)s"))
@@ -260,12 +267,18 @@ class SafeRotatingLogger:
             return logger
 
     def write(self, event: dict[str, Any]) -> None:
-        safe_event = redact_sensitive({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            **event,
-        })
-        self._get_logger().info(json.dumps(
-            safe_event, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        # Diagnostics are strictly best-effort. A read-only profile, a full
+        # disk, or a failed rollover must never change provider behavior.
+        try:
+            safe_event = redact_sensitive({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **event,
+            })
+            self._get_logger().info(json.dumps(
+                safe_event, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":")))
+        except Exception:
+            return
 
     def close(self) -> None:
         with self._lock:
@@ -387,7 +400,12 @@ class ProviderHttpClient:
 
     def _log(self, **event: Any) -> None:
         if self.logger is not None:
-            self.logger.write(event)
+            # Keep custom/injected sinks subject to the same best-effort
+            # boundary as SafeRotatingLogger.
+            try:
+                self.logger.write(event)
+            except Exception:
+                return
 
     def _sleep(self, delay: float, token: CancellationToken | None,
                provider: str, operation: str, operation_id: str) -> None:

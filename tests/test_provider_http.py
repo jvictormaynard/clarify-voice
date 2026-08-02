@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import requests
 
@@ -228,6 +228,87 @@ class ProviderHttpPolicyTests(unittest.TestCase):
                 "POST", "https://api.example/generate",
                 provider="openai", operation="text_generation")
 
+    def test_logging_failure_before_retry_preserves_attempts(self):
+        logger = Mock()
+        logger.write.side_effect = OSError("disk full")
+        sleeps = []
+        client, session = self.make_client(
+            get=[FakeResponse(503), FakeResponse(200)],
+            logger=logger,
+            sleeper=sleeps.append,
+        )
+
+        response = client.request(
+            "GET", "https://api.example/models", provider="openai",
+            operation="validation")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(sleeps, [0.25])
+
+    def test_log_creation_failure_preserves_typed_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = SafeRotatingLogger(Path(directory) / "logs")
+            client, session = self.make_client(
+                get=[FakeResponse(401)], logger=logger)
+
+            with patch("provider_http.Path.mkdir",
+                       side_effect=OSError("profile is read-only")):
+                with self.assertRaises(AuthenticationError):
+                    client.request(
+                        "GET", "https://api.example/models",
+                        provider="openai", operation="validation")
+
+            self.assertEqual(session.get.call_count, 1)
+
+    def test_logging_failure_preserves_typed_error(self):
+        cases = (
+            (FakeResponse(401), AuthenticationError),
+            (requests.ReadTimeout(), ProviderTimeoutError),
+            (requests.ConnectionError(), NetworkError),
+        )
+        for failure, expected_error in cases:
+            with self.subTest(expected_error=expected_error.__name__):
+                logger = Mock()
+                logger.write.side_effect = OSError("read-only profile")
+                method_responses = (
+                    {"get": [failure]}
+                    if isinstance(failure, FakeResponse)
+                    else {"post": [failure]}
+                )
+                client, session = self.make_client(
+                    logger=logger, **method_responses)
+
+                with self.assertRaises(expected_error):
+                    client.request(
+                        "GET" if isinstance(failure, FakeResponse) else "POST",
+                        "https://api.example/models",
+                        provider="openai", operation="validation")
+
+                sender = session.get if isinstance(failure, FakeResponse) else session.post
+                self.assertEqual(sender.call_count, 1)
+
+    def test_log_rotation_failure_preserves_retry_policy_and_typed_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = SafeRotatingLogger(Path(directory), max_bytes=1)
+            sleeps = []
+            client, session = self.make_client(
+                get=[FakeResponse(503), FakeResponse(503), FakeResponse(503)],
+                logger=logger,
+                sleeper=sleeps.append,
+            )
+
+            with patch("provider_http.RotatingFileHandler.doRollover",
+                       side_effect=OSError("disk full")):
+                with self.assertRaises(ServiceUnavailableError):
+                    client.request(
+                        "GET", "https://api.example/models",
+                        provider="openai", operation="validation")
+
+            logger.close()
+            self.assertEqual(session.get.call_count, 3)
+            self.assertEqual(sleeps, [0.25, 0.5])
+
     def test_invalid_json_has_a_typed_content_free_error(self):
         response = FakeResponse(payload=ValueError("private response body"))
         client, _session = self.make_client(get=[response])
@@ -295,6 +376,32 @@ class ProviderHttpPolicyTests(unittest.TestCase):
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_log_sink_creation_failure_is_best_effort(self):
+        logger = SafeRotatingLogger(Path("/read-only/provider-logs"))
+
+        with patch("provider_http.Path.mkdir",
+                   side_effect=OSError("profile is read-only")):
+            logger.write({"event": "provider_http_error"})
+
+    def test_log_sink_write_failure_is_best_effort(self):
+        logger = SafeRotatingLogger(Path("unused"))
+        sink = Mock()
+        sink.info.side_effect = OSError("disk full")
+
+        with patch.object(logger, "_get_logger", return_value=sink):
+            logger.write({"event": "provider_http_error"})
+
+    def test_log_sink_rotation_failure_is_best_effort(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = SafeRotatingLogger(Path(directory), max_bytes=1)
+            logger.write({"event": "seed"})
+
+            with patch("provider_http.RotatingFileHandler.doRollover",
+                       side_effect=OSError("cannot rotate")):
+                logger.write({"event": "provider_http_error"})
+
+            logger.close()
+
     def test_recursive_redaction_removes_all_prohibited_content(self):
         sensitive = {
             "headers": {
