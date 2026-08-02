@@ -197,6 +197,7 @@ app.py                         Main UI and desktop workflows
 provider_types.py              Typed provider requests, results, and capabilities
 provider_adapters.py           Gemini and OpenAI-compatible adapters
 provider_registry.py           Provider metadata and request routing registry
+local_asr.py                    Optional local-ASR adapter, installer, and sidecar
 repositories.py                Versioned configuration and statistics storage
 update_security.py             Authenticated manifest and atomic update checks
 version.py                     Packaged application version
@@ -217,6 +218,11 @@ legacy/electron-prototype/     Archived first implementation, not built
 The current application is Python. The Electron prototype is kept only for
 historical context and is excluded from builds. See
 [Architecture](docs/architecture.md) before making structural changes.
+
+Optional local-transcription groundwork is being developed separately from the
+current product runtime. It does not add a user-facing provider or bundle a
+model. Maintainers can review the checksummed sidecar design, privacy trade-offs,
+and pending Windows acceptance work in [Local ASR](docs/local-asr.md).
 
 ## Contributing
 
