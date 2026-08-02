@@ -64,10 +64,17 @@ dependências automaticamente.
 
 ## Privacidade
 
-O ClarifyVoice não possui servidor próprio. As configurações, chaves e
-estatísticas locais ficam em `%APPDATA%\ClarifyVoice`. As chaves são armazenadas
-em texto simples para o usuário atual do Windows. Não compartilhe `config.json`
-nem o inclua em relatos de bugs.
+O ClarifyVoice não possui servidor próprio. As configurações e estatísticas
+locais ficam em `%APPDATA%\ClarifyVoice`. No Windows, as chaves ficam separadas
+em `secrets.dpapi.json`, criptografadas pela DPAPI para o usuário atual. Chaves
+antigas em texto simples são migradas e só são removidas de `config.json` depois
+da confirmação da cópia protegida. Variáveis de ambiente são substituições
+temporárias e não são persistidas.
+
+Excluir somente o executável não apaga os dados. Para remover também as
+credenciais, exclua `secrets.dpapi.json` ou toda a pasta de dados do
+ClarifyVoice. Em execuções experimentais no Linux/macOS, `secrets.json` é um
+fallback em texto simples com permissões restritas; não compartilhe esse arquivo.
 
 ## Desenvolvimento e contribuição
 

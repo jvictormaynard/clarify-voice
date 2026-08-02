@@ -129,22 +129,35 @@ startup settings such as `autostart` during round-trips. Supported provider
 choices and model canonicalization come from the provider registry while the
 on-disk keys remain unchanged.
 
+### `secret_store.py`
+
+`SecretStore` is the provider-keyed `get`/`set`/`delete` boundary. Packaged and
+source Windows runs use current-user DPAPI and persist only base64 ciphertext.
+The configuration repository performs first-read migration: it writes the
+legacy plaintext value, reads it back through the secret store, and only then
+atomically removes that provider key from `config.json`. A backend, read-back,
+or cleanup failure keeps the legacy value recoverable.
+
+Experimental Linux and macOS source runs use a separate plaintext
+`~/.clarifyvoice/secrets.json` fallback with mode `0600` where supported. This
+fallback is intentionally explicit; it does not claim OS-backed protection.
+
 ## Data ownership
 
 | Data | Location | Content |
 | --- | --- | --- |
-| Settings | `%APPDATA%\ClarifyVoice\config.json` | Provider keys, endpoints, models, and UI preferences |
+| Settings | `%APPDATA%\ClarifyVoice\config.json` | Provider endpoints, models, selections, and UI preferences; no API keys |
+| Provider secrets | `%APPDATA%\ClarifyVoice\secrets.dpapi.json` | Current-user DPAPI ciphertext keyed by provider |
 | Usage stats | `%APPDATA%\ClarifyVoice\usage_stats.json` | Counts, durations, model identifiers, and estimates; no transcript text |
 | Working audio | `%APPDATA%\ClarifyVoice\clarifyvoice-recording-*.wav` | One unique session-owned file, deleted after the provider no longer needs it |
 
 On non-Windows source runs, the equivalent data directory is
 `~/.clarifyvoice`.
 
-For startup configuration, precedence is persisted settings first, then the
-documented environment variables (`*_API_KEY`, `*_BASE_URL`, `*_MODEL`, and
-refinement variables), then built-in defaults. Environment variables therefore
-provide reliable first-run/headless defaults without overwriting a user's saved
-UI choices on later launches.
+For API keys, documented environment variables (`GEMINI_API_KEY`, legacy
+`API_KEY`, `OPENAI_API_KEY`, and `GROQ_API_KEY`) override the stored credential
+for that process and are never persisted. Other settings retain the precedence
+of persisted settings, then their environment defaults, then built-in defaults.
 
 Each recording reserves a unique temporary WAV owned by its
 `RecordingSession`. The provider reads it only during that session; cleanup

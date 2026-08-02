@@ -19,11 +19,17 @@ from typing import Any, Mapping
 
 from provider_registry import PROVIDER_IDS, PROVIDER_REGISTRY
 from provider_types import ProviderCapability
+from secret_store import SecretStore, SecretStoreError, create_secret_store
 
 
 CONFIG_SCHEMA_VERSION = 1
 STATS_SCHEMA_VERSION = 1
 SUPPORTED_PROVIDERS = PROVIDER_IDS
+PROVIDER_SECRET_KEYS = {
+    "gemini": "gemini_api_key",
+    "openai": "openai_api_key",
+    "groq": "groq_api_key",
+}
 SUPPORTED_UI_MODES = ("prompt", "transcription")
 SUPPORTED_LANGUAGES = ("en", "pt", "es", "de", "ru")
 
@@ -341,17 +347,91 @@ def _ensure_supported_schema(
 
 
 class LocalConfigRepository(ConfigRepository):
-    """JSON-backed repository for ``%APPDATA%\\ClarifyVoice\\config.json``."""
+    """JSON settings plus a provider-keyed credential-store boundary."""
 
     def __init__(
         self,
         path: str | os.PathLike[str],
         defaults: Mapping[str, Any] | None = None,
         environment: Mapping[str, str] | None = None,
+        secret_store: SecretStore | None = None,
     ) -> None:
         self.path = Path(path)
-        self.defaults = dict(defaults or environment_defaults(environment))
+        self.environment = os.environ if environment is None else environment
+        self.defaults = dict(defaults or environment_defaults(self.environment))
+        secret_stem = ("secrets" if self.path.name == "config.json"
+                       else f"{self.path.stem}.secrets")
+        self.secret_store = secret_store or create_secret_store(
+            self.path.parent, filename_stem=secret_stem)
         self._lock = threading.RLock()
+
+    def _environment_secret(self, provider: str) -> str | None:
+        names = (("GEMINI_API_KEY", "API_KEY") if provider == "gemini"
+                 else (f"{provider.upper()}_API_KEY",))
+        for name in names:
+            value = self.environment.get(name)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def _restore_secrets(self, previous: Mapping[str, str | None]) -> None:
+        for provider, value in previous.items():
+            try:
+                if value:
+                    self.secret_store.set(provider, value)
+                else:
+                    self.secret_store.delete(provider)
+            except (OSError, ValueError):
+                # The original write error remains the actionable result. A
+                # later load still preserves any untouched plaintext legacy key.
+                pass
+
+    def _load_runtime_mapping(
+        self,
+        raw: Mapping[str, Any],
+        migrated: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        runtime = dict(migrated)
+        removable: set[str] = set()
+        future_schema = _version(
+            migrated.get("schema_version")) > CONFIG_SCHEMA_VERSION
+
+        for provider, key in PROVIDER_SECRET_KEYS.items():
+            legacy = raw.get(key)
+            legacy = legacy if isinstance(legacy, str) and legacy else None
+            stored = None
+            store_available = True
+            try:
+                stored = self.secret_store.get(provider)
+            except SecretStoreError:
+                store_available = False
+
+            if legacy and store_available and not future_schema:
+                try:
+                    if stored is None:
+                        self.secret_store.set(provider, legacy)
+                        stored = self.secret_store.get(provider)
+                        if stored != legacy:
+                            stored = None
+                    if stored == legacy:
+                        removable.add(key)
+                except (SecretStoreError, ValueError):
+                    stored = None
+
+            runtime[key] = self._environment_secret(provider) or stored or legacy or ""
+
+        if removable:
+            sanitized = dict(migrated)
+            for key in removable:
+                sanitized.pop(key, None)
+            try:
+                _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
+                _atomic_write_json(self.path, sanitized)
+            except OSError:
+                # Migration remains recoverable: the plaintext source is still
+                # present and the verified secure copy can be retried next load.
+                pass
+        return runtime
 
     def load(self) -> AppConfig:
         with self._lock:
@@ -360,17 +440,21 @@ class LocalConfigRepository(ConfigRepository):
             except (OSError, ValueError, TypeError):
                 raw = {}
             migrated = migrate_config_payload(raw)
-            return AppConfig.from_mapping(migrated, self.defaults)
+            raw_mapping = raw if isinstance(raw, Mapping) else {}
+            runtime = self._load_runtime_mapping(raw_mapping, migrated)
+            return AppConfig.from_mapping(runtime, self.defaults)
 
     def save(self, config: AppConfig | Mapping[str, Any]) -> None:
         with self._lock:
             _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
+            current_payload = _read_json_mapping(self.path) or {}
             if isinstance(config, AppConfig):
                 if config.schema_version > CONFIG_SCHEMA_VERSION:
                     raise UnsupportedSchemaVersionError(
                         f"Cannot save schema version {config.schema_version} "
                         f"with supported version {CONFIG_SCHEMA_VERSION}")
                 model = config
+                supplied_keys = set(PROVIDER_SECRET_KEYS.values())
             else:
                 supplied_version = _version(config.get("schema_version"))
                 if supplied_version > CONFIG_SCHEMA_VERSION:
@@ -378,7 +462,51 @@ class LocalConfigRepository(ConfigRepository):
                         f"Cannot save schema version {supplied_version} "
                         f"with supported version {CONFIG_SCHEMA_VERSION}")
                 model = AppConfig.from_mapping(config, self.defaults)
-            _atomic_write_json(self.path, model.to_mapping())
+                supplied_keys = set(config)
+
+            values = model.to_mapping()
+            changes: dict[str, str] = {}
+            for provider, key in PROVIDER_SECRET_KEYS.items():
+                if key not in supplied_keys:
+                    continue
+                value = str(values.get(key, ""))
+                environment_value = self._environment_secret(provider)
+                if environment_value and value:
+                    # Environment credentials are runtime-only overrides. A
+                    # normal settings save must never copy them into storage.
+                    continue
+                changes[provider] = value
+
+            previous: dict[str, str | None] = {}
+            try:
+                for provider in changes:
+                    previous[provider] = self.secret_store.get(provider)
+                for provider, value in changes.items():
+                    if value:
+                        self.secret_store.set(provider, value)
+                        if self.secret_store.get(provider) != value:
+                            raise SecretStoreError(
+                                "The credential store failed its verification")
+                    else:
+                        self.secret_store.delete(provider)
+                        if self.secret_store.get(provider) is not None:
+                            raise SecretStoreError(
+                                "The credential store failed its verification")
+
+                for key in PROVIDER_SECRET_KEYS.values():
+                    values.pop(key, None)
+                # A partial settings write must not destroy an unmigrated
+                # plaintext credential. Full application saves supply every
+                # key and therefore either verify secret storage or fail.
+                for key in PROVIDER_SECRET_KEYS.values():
+                    legacy = current_payload.get(key)
+                    if (key not in supplied_keys and isinstance(legacy, str)
+                            and legacy):
+                        values[key] = legacy
+                _atomic_write_json(self.path, values)
+            except (OSError, ValueError):
+                self._restore_secrets(previous)
+                raise
 
 
 class LocalUsageStatsRepository(UsageStatsRepository):

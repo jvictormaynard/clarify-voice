@@ -120,8 +120,9 @@ result remains available for manual paste and the newer clipboard contents win.
 
 ## Providers
 
-Open **Models** to configure a provider, base URL, API key, and models. Settings
-are stored in `%APPDATA%\ClarifyVoice\config.json`.
+Open **Models** to configure a provider, base URL, API key, and models. Ordinary
+settings are stored in `%APPDATA%\ClarifyVoice\config.json`; API keys are kept
+separately with Windows Data Protection API (DPAPI).
 
 | Provider | Transcription | Text refinement | Default endpoint |
 | --- | --- | --- | --- |
@@ -138,16 +139,25 @@ instead of using an unreliable estimate.
 ClarifyVoice has no project-owned server. Provider requests go from your
 computer to the endpoint you select. The app stores:
 
-- provider settings and API keys in `%APPDATA%\ClarifyVoice\config.json`;
+- provider settings in `%APPDATA%\ClarifyVoice\config.json`;
+- DPAPI-encrypted provider keys in
+  `%APPDATA%\ClarifyVoice\secrets.dpapi.json`, decryptable only by the same
+  Windows user on the same machine;
 - anonymous usage counters in `%APPDATA%\ClarifyVoice\usage_stats.json`;
 - a unique temporary WAV file while processing a recording. It is deleted after
   the provider no longer needs it, including cancellation, failure, and app
   exit; it is not retained as a recording history.
 
+Existing plaintext keys are migrated on first load and removed from
+`config.json` only after the encrypted copy has been read back successfully.
+Environment variables remain runtime-only overrides and are never copied into
+either settings or secret storage.
+
+Removing the portable executable does not remove its data. Delete
+`%APPDATA%\ClarifyVoice\secrets.dpapi.json` (or the whole ClarifyVoice data
+directory after preserving any settings you want) to remove stored keys.
 Transcript and selected-text contents are not written to usage statistics.
-API keys are stored as plain text for the current Windows user, so do not share
-your config file or include it in bug reports. Read [Security](SECURITY.md) for
-responsible reporting guidance.
+Read [Security](SECURITY.md) for responsible reporting guidance.
 
 ## Build a portable executable
 

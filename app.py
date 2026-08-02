@@ -405,6 +405,14 @@ def _save_app_config(repositories=None):
     _storage_repositories(repositories).config.save(APP_CONFIG)
 
 
+def _provider_key_candidate(provider, entered=""):
+    """Use a newly entered key or preserve the already loaded credential."""
+    value = str(entered or "").strip()
+    if value:
+        return value
+    return str(APP_CONFIG.get(f"{provider}_api_key", "")).strip()
+
+
 def _activate_repositories(repositories):
     """Load injected config into the legacy compatibility state.
 
@@ -1513,7 +1521,7 @@ STRINGS = {
         "validate_save": "Validate & save", "back": "Back",
         "deactivate": "Deactivate provider", "credentials_valid": "Credentials validated",
         "no_active_models": "No active providers. Add one to choose a model.",
-        "api_key": "API key", "api_key_placeholder": "Paste the provider API key",
+        "api_key": "API key", "api_key_placeholder": "Leave blank to keep the saved key",
         "base_url": "Custom URL", "custom_endpoint": "Custom endpoint", "model": "Model",
         "refresh_models": "Refresh models", "loading_models": "Loading models…",
         "models_found": "{count} audio model(s) available",
@@ -1560,7 +1568,7 @@ STRINGS = {
         "validate_save": "Validar e salvar", "back": "Voltar",
         "deactivate": "Desativar provedor", "credentials_valid": "Credenciais validadas",
         "no_active_models": "Nenhum provedor ativo. Adicione um para escolher um modelo.",
-        "api_key": "Chave de API", "api_key_placeholder": "Cole a chave do provedor",
+        "api_key": "Chave de API", "api_key_placeholder": "Deixe em branco para manter a chave salva",
         "base_url": "URL personalizada", "custom_endpoint": "Endpoint personalizado",
         "model": "Modelo",
         "refresh_models": "Atualizar modelos", "loading_models": "Carregando modelos…",
@@ -1608,7 +1616,7 @@ STRINGS = {
         "validate_save": "Validar y guardar", "back": "Volver",
         "deactivate": "Desactivar proveedor", "credentials_valid": "Credenciales validadas",
         "no_active_models": "No hay proveedores activos. Añade uno para elegir un modelo.",
-        "api_key": "Clave de API", "api_key_placeholder": "Pega la clave de API del proveedor",
+        "api_key": "Clave de API", "api_key_placeholder": "Déjalo en blanco para conservar la clave guardada",
         "base_url": "URL personalizada", "custom_endpoint": "Endpoint personalizado",
         "model": "Modelo",
         "refresh_models": "Actualizar modelos", "loading_models": "Cargando modelos…",
@@ -1656,7 +1664,7 @@ STRINGS = {
         "validate_save": "Prüfen und speichern", "back": "Zurück",
         "deactivate": "Anbieter deaktivieren", "credentials_valid": "Zugangsdaten validiert",
         "no_active_models": "Keine aktiven Anbieter. Fügen Sie einen hinzu, um ein Modell auszuwählen.",
-        "api_key": "API-Schlüssel", "api_key_placeholder": "API-Schlüssel des Anbieters einfügen",
+        "api_key": "API-Schlüssel", "api_key_placeholder": "Leer lassen, um den gespeicherten Schlüssel zu behalten",
         "base_url": "Benutzerdefinierte URL", "custom_endpoint": "Benutzerdefinierter Endpunkt",
         "model": "Modell",
         "refresh_models": "Modelle aktualisieren", "loading_models": "Modelle werden geladen…",
@@ -1704,7 +1712,7 @@ STRINGS = {
         "validate_save": "Проверить и сохранить", "back": "Назад",
         "deactivate": "Отключить провайдера", "credentials_valid": "Учётные данные проверены",
         "no_active_models": "Нет активных провайдеров. Добавьте провайдера, чтобы выбрать модель.",
-        "api_key": "Ключ API", "api_key_placeholder": "Вставьте ключ API провайдера",
+        "api_key": "Ключ API", "api_key_placeholder": "Оставьте пустым, чтобы сохранить текущий ключ",
         "base_url": "Пользовательский URL", "custom_endpoint": "Пользовательский endpoint",
         "model": "Модель",
         "refresh_models": "Обновить модели", "loading_models": "Загрузка моделей…",
@@ -5377,19 +5385,19 @@ class App(ctk.CTk):
 
         drafts = {
             "gemini": {
-                "key": str(APP_CONFIG.get("gemini_api_key", "")),
+                "key": "",
                 "base": str(APP_CONFIG.get("gemini_base_url", "")),
                 "audio_model": str(APP_CONFIG.get("gemini_model", "gemini-2.5-flash")),
                 "text_model": "",
             },
             "openai": {
-                "key": str(APP_CONFIG.get("openai_api_key", "")),
+                "key": "",
                 "base": str(APP_CONFIG.get("openai_base_url", "")),
                 "audio_model": str(APP_CONFIG.get("openai_audio_model", "whisper-1")),
                 "text_model": str(APP_CONFIG.get("openai_text_model", "gpt-4o-mini")),
             },
             "groq": {
-                "key": str(APP_CONFIG.get("groq_api_key", "")),
+                "key": "",
                 "base": str(APP_CONFIG.get("groq_base_url", "")),
                 "audio_model": str(APP_CONFIG.get(
                     "groq_audio_model", "whisper-large-v3-turbo")),
@@ -5521,7 +5529,7 @@ class App(ctk.CTk):
             if not win.winfo_exists():
                 return
             provider = current_provider["id"]
-            key = key_entry.get().strip()
+            key = _provider_key_candidate(provider, key_entry.get())
             base = (base_entry.get().strip() if endpoint_switch.get()
                     else official_bases[provider])
             selected = model_menu.get().strip()
@@ -5618,18 +5626,21 @@ class App(ctk.CTk):
             store_visible_fields()
             APP_CONFIG.update({
                 "transcription_provider": current_provider["id"],
-                "gemini_api_key": drafts["gemini"]["key"],
+                "gemini_api_key": _provider_key_candidate(
+                    "gemini", drafts["gemini"]["key"]),
                 "gemini_base_url": (drafts["gemini"]["base"]
                     if drafts["gemini"]["custom_endpoint"] and drafts["gemini"]["base"]
                     else official_bases["gemini"]),
                 "gemini_model": drafts["gemini"]["audio_model"] or "gemini-2.5-flash",
-                "openai_api_key": drafts["openai"]["key"],
+                "openai_api_key": _provider_key_candidate(
+                    "openai", drafts["openai"]["key"]),
                 "openai_base_url": (drafts["openai"]["base"]
                     if drafts["openai"]["custom_endpoint"] and drafts["openai"]["base"]
                     else official_bases["openai"]),
                 "openai_audio_model": drafts["openai"]["audio_model"] or "whisper-1",
                 "openai_text_model": drafts["openai"]["text_model"] or "gpt-4o-mini",
-                "groq_api_key": drafts["groq"]["key"],
+                "groq_api_key": _provider_key_candidate(
+                    "groq", drafts["groq"]["key"]),
                 "groq_base_url": (drafts["groq"]["base"]
                     if drafts["groq"]["custom_endpoint"] and drafts["groq"]["base"]
                     else official_bases["groq"]),
@@ -5995,9 +6006,9 @@ class App(ctk.CTk):
                 font=ctk.CTkFont(size=11), anchor="w").pack(fill="x", padx=2, pady=(0, 4))
             key_entry = ctk.CTkEntry(inner, height=32, corner_radius=10,
                 fg_color="#050505", text_color=TEXT, border_color=BORDER,
-                border_width=1, show="\u2022", font=ctk.CTkFont(size=12))
+                border_width=1, show="\u2022", font=ctk.CTkFont(size=12),
+                placeholder_text=self._t("api_key_placeholder"))
             key_entry.pack(fill="x", pady=(0, 10))
-            key_entry.insert(0, str(APP_CONFIG.get(f"{provider}_api_key", "")))
 
             saved_base = str(APP_CONFIG.get(f"{provider}_base_url", default_bases[provider]))
             custom = saved_base.rstrip("/").lower() != default_bases[provider].rstrip("/").lower()
@@ -6058,7 +6069,7 @@ class App(ctk.CTk):
                 show_page("provider_detail", provider)
 
             def validate_and_save():
-                key = key_entry.get().strip()
+                key = _provider_key_candidate(provider, key_entry.get())
                 base = (base_entry.get().strip() if endpoint_switch.get()
                         else default_bases[provider])
                 if not key:
@@ -6871,9 +6882,9 @@ class App(ctk.CTk):
                 font=font_label, anchor="w").pack(fill="x", padx=2, pady=(0, 4))
             key_entry = ctk.CTkEntry(inner, height=32, corner_radius=10,
                 fg_color="#050505", text_color=TEXT, border_color=BORDER,
-                border_width=1, show="\u2022", font=font_body)
+                border_width=1, show="\u2022", font=font_body,
+                placeholder_text=self._t("api_key_placeholder"))
             key_entry.pack(fill="x", pady=(0, 10))
-            key_entry.insert(0, str(APP_CONFIG.get(f"{provider}_api_key", "")))
             saved_base = str(APP_CONFIG.get(f"{provider}_base_url", default_bases[provider]))
             allows_custom_endpoint = PROVIDER_REGISTRY.supports(
                 provider, ProviderCapability.CUSTOM_BASE_URL)
@@ -6922,7 +6933,8 @@ class App(ctk.CTk):
 
             def validate_from_page(provider_id=provider):
                 inputs = detail_inputs[provider_id]
-                key = inputs["key"].get().strip()
+                key = _provider_key_candidate(
+                    provider_id, inputs["key"].get())
                 base = (inputs["base"].get().strip() if inputs["switch"].get()
                         else default_bases[provider_id])
                 if not key:

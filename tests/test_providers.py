@@ -13,6 +13,7 @@ from unittest.mock import Mock, call, patch
 # Keep Windows test runs isolated from the developer's real ClarifyVoice config.
 _TEST_APPDATA = tempfile.TemporaryDirectory(prefix="clarifyvoice-tests-")
 os.environ["APPDATA"] = _TEST_APPDATA.name
+os.environ["HOME"] = _TEST_APPDATA.name
 for _provider_variable in (
         "API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY",
         "REFINEMENT_PROVIDER", "REFINEMENT_MODEL"):
@@ -480,6 +481,8 @@ class ProviderTests(unittest.TestCase):
             "openai_api_key": "openai-key",
             "openai_base_url": "https://api.openai.com/v1",
             "openai_text_model": "gpt-4o-mini",
+            "refinement_provider": "openai",
+            "refinement_model": "gpt-4o-mini",
         })
         post.side_effect = [
             FakeResponse({"text": "rough transcript"}),
