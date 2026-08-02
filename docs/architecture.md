@@ -160,10 +160,12 @@ cleanup failures never block startup. Recorder cancellation is serialized
 through process and microphone-stream setup. If shutdown happens during an
 upload, the non-daemon
 shutdown watcher keeps the process alive until the provider worker releases
-the file, then performs a final cleanup retry; provider requests are bounded
-to 60 seconds. Escape cancellation likewise retains ownership until recorder
-shutdown completes, preventing immediate restart from reusing the recorder
-concurrently.
+the file, then performs bounded cleanup retries; provider requests are bounded
+to 60 seconds. Shutdown is not marked complete until deletion succeeds. A
+persistent cleanup failure remains observable and retains session ownership so
+the path cannot be overwritten by a later recording. Escape cancellation
+likewise retains ownership until recorder shutdown completes, preventing
+immediate restart from reusing the recorder concurrently.
 
 ## Packaging
 

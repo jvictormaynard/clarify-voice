@@ -15,6 +15,8 @@ Notable user-facing changes are documented here. This project follows
 - Removed legacy and session-pattern WAVs left behind by an interrupted
   startup on Windows, while keeping cleanup limited to the exclusively owned
   app data directory
+- Kept failed-cleanup sessions owned until a bounded retry succeeds, preventing
+  a later recording from overwriting an unremoved temporary WAV
 
 ## [0.1.2] - 2026-07-31
 

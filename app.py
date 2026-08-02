@@ -1967,6 +1967,8 @@ class MicrophoneUnavailableError(RecordingError):
 
 
 SESSION_SHUTDOWN_JOIN_SECONDS = 2.0
+SESSION_CLEANUP_RETRY_ATTEMPTS = 3
+SESSION_CLEANUP_RETRY_DELAY_SECONDS = 0.25
 TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS = 60
 
 
@@ -2306,6 +2308,7 @@ class RecordingSession:
         self._workers_lock = threading.RLock()
         self._cleanup_lock = threading.Lock()
         self._cleanup_done = threading.Event()
+        self.cleanup_retry_exhausted = False
         self.shutdown_complete = threading.Event()
         self._shutdown_watcher_started = False
         self._shutdown_watcher = None
@@ -2366,25 +2369,43 @@ class RecordingSession:
                 return True
             try:
                 Recorder._safe_delete(self.audio_path, strict=True)
-            except RecordingCleanupError as error:
-                self.cleanup_error = error
+            except (RecordingCleanupError, OSError) as error:
+                cleanup_error = (error if isinstance(error, RecordingCleanupError)
+                                 else RecordingCleanupError(
+                                     f"Could not remove temporary audio {self.audio_path}"))
+                self.cleanup_error = cleanup_error
                 if self.error is None:
-                    self.error = error
+                    self.error = cleanup_error
                 return False
+            self.cleanup_error = None
+            self.cleanup_retry_exhausted = False
             self._cleanup_done.set()
             return True
 
     def _complete_shutdown_if_ready(self):
         if (self.terminal and not self._active_workers()
-                and (self._cleanup_done.is_set() or self.cleanup_error is not None)):
+                and self._cleanup_done.is_set()):
             self.shutdown_complete.set()
 
+    def _retry_cleanup(self):
+        for attempt in range(SESSION_CLEANUP_RETRY_ATTEMPTS):
+            if self._cleanup_once():
+                return True
+            if attempt + 1 < SESSION_CLEANUP_RETRY_ATTEMPTS:
+                time.sleep(SESSION_CLEANUP_RETRY_DELAY_SECONDS * (2 ** attempt))
+        self.cleanup_retry_exhausted = True
+        return False
+
     def _finish_shutdown(self):
-        for worker in self._active_workers():
-            if worker.ident is not None:
-                worker.join()
-        self._cleanup_once()
-        self._complete_shutdown_if_ready()
+        try:
+            for worker in self._active_workers():
+                if worker.ident is not None:
+                    worker.join()
+            self._retry_cleanup()
+            self._complete_shutdown_if_ready()
+        finally:
+            with self._workers_lock:
+                self._shutdown_watcher_started = False
 
     def _ensure_shutdown_watcher(self):
         with self._workers_lock:
@@ -2429,8 +2450,11 @@ class RecordingSession:
         if self._active_workers_except_current():
             self._ensure_shutdown_watcher()
         else:
-            if not self._cleanup_once() and self.state == "cancelled":
+            cleaned = self._cleanup_once()
+            if not cleaned and self.state == "cancelled":
                 self.state = "failed"
+            if not cleaned:
+                self._ensure_shutdown_watcher()
             self._complete_shutdown_if_ready()
         return True
 
@@ -2452,6 +2476,8 @@ class RecordingSession:
             with self._lock:
                 if not self.terminal or self.state == outcome:
                     self.state = "failed"
+        if not cleaned:
+            self._ensure_shutdown_watcher()
         self._complete_shutdown_if_ready()
         return True
 
@@ -3807,8 +3833,9 @@ class App(ctk.CTk):
         session = getattr(self, "_recording_session", None)
         if session is not None:
             session.cancel()
-            session.wait_for_shutdown(timeout)
-            if getattr(self, "_recording_session", None) is session:
+            shutdown_complete = session.wait_for_shutdown(timeout)
+            if (shutdown_complete
+                    and getattr(self, "_recording_session", None) is session):
                 self._recording_session = None
             return
         recorder = getattr(self, "recorder", None)
@@ -4377,8 +4404,10 @@ class App(ctk.CTk):
             if session is not None:
                 def cancel_session():
                     session.cancel()
-                    session.wait_for_shutdown()
-                    if getattr(self, "_recording_session", None) is session:
+                    shutdown_complete = session.wait_for_shutdown(
+                        SESSION_SHUTDOWN_JOIN_SECONDS)
+                    if (shutdown_complete
+                            and getattr(self, "_recording_session", None) is session):
                         self._recording_session = None
                 threading.Thread(target=cancel_session, daemon=True).start()
             else:
