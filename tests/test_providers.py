@@ -869,6 +869,12 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(app.STRINGS["de"]["settings_section"], "Einstellungen")
         self.assertEqual(app.STRINGS["ru"]["settings_section"], "Настройки")
 
+    def test_credential_failure_feedback_is_localized_and_secret_free(self):
+        for language in app.SUPPORTED_LANGUAGES:
+            message = app.STRINGS[language]["credential_update_failed"]
+            self.assertTrue(message)
+            self.assertNotIn("stored-test-credential", message)
+
     def test_language_button_cycles_through_every_supported_language(self):
         language = "en"
         visited = []

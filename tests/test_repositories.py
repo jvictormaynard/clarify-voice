@@ -30,6 +30,18 @@ os.environ["HOME"] = _TEST_HOME.name
 os.environ["APPDATA"] = _TEST_HOME.name
 
 
+class DeleteUnavailableStore(MemorySecretStore):
+    def delete(self, _provider):
+        raise SecretStoreUnavailableError(
+            "The credential store could not be updated")
+
+
+class DeleteReadbackStore(MemorySecretStore):
+    def delete(self, _provider):
+        # Simulate a backend that reports success without removing the entry.
+        return None
+
+
 class ConfigurationRepositoryTests(unittest.TestCase):
     def test_missing_refinement_preserves_legacy_capability_defaults(self):
         gemini = AppConfig.from_mapping({
@@ -114,7 +126,7 @@ class ConfigurationRepositoryTests(unittest.TestCase):
             self.assertEqual(
                 repository.load().openai.api_key, "test-openai-credential")
 
-    def test_environment_key_overrides_without_becoming_persistent(self):
+    def test_submitted_environment_key_is_not_persisted_after_override_removal(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             secrets = MemorySecretStore({
@@ -128,15 +140,110 @@ class ConfigurationRepositoryTests(unittest.TestCase):
 
             loaded = repository.load()
             repository.save(loaded)
+            restarted = LocalConfigRepository(
+                path, environment={}, secret_store=secrets).load()
 
             self.assertEqual(
                 loaded.openai.api_key, "environment-test-credential")
             self.assertEqual(
                 secrets.get("openai"), "stored-test-credential")
+            self.assertEqual(
+                restarted.openai.api_key, "stored-test-credential")
             self.assertNotIn(
                 "openai_api_key",
                 json.loads(path.read_text(encoding="utf-8")),
             )
+
+    def test_explicit_key_different_from_environment_persists_for_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            secrets = MemorySecretStore({
+                "openai": "stored-test-credential",
+            })
+            repository = LocalConfigRepository(
+                path,
+                environment={"OPENAI_API_KEY": "environment-test-credential"},
+                secret_store=secrets,
+            )
+            submitted = repository.load().to_legacy_mapping()
+            submitted["openai_api_key"] = "explicit-test-credential"
+
+            repository.save(submitted)
+            while_environment_is_present = repository.load()
+            after_environment_removal = LocalConfigRepository(
+                path, environment={}, secret_store=secrets).load()
+
+            self.assertEqual(
+                secrets.get("openai"), "explicit-test-credential")
+            self.assertEqual(
+                while_environment_is_present.openai.api_key,
+                "environment-test-credential",
+            )
+            self.assertEqual(
+                after_environment_removal.openai.api_key,
+                "explicit-test-credential",
+            )
+            self.assertNotIn(
+                "openai_api_key",
+                json.loads(path.read_text(encoding="utf-8")),
+            )
+
+    def test_deactivate_rolls_back_on_delete_unavailable_or_failed_readback(self):
+        import app
+        from repositories import ApplicationRepositories
+
+        for store_type in (DeleteUnavailableStore, DeleteReadbackStore):
+            with self.subTest(store=store_type.__name__), \
+                    tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                secrets = store_type({"openai": "stored-test-credential"})
+                repository = LocalConfigRepository(
+                    path, environment={}, secret_store=secrets)
+                bundle = ApplicationRepositories(
+                    config=repository,
+                    usage_stats=LocalUsageStatsRepository(
+                        Path(directory) / "stats.json"),
+                )
+                original = app.APP_CONFIG.copy()
+                try:
+                    app._activate_repositories(bundle)
+                    before = app.APP_CONFIG.copy()
+
+                    provider_state = {
+                        "status": "active",
+                        "models": ["whisper-1"],
+                        "text_models": ["gpt-4o-mini"],
+                        "error": "",
+                        "feedback": "",
+                        "generation": 4,
+                    }
+                    before_state = provider_state.copy()
+                    feedback = "Could not update credentials. Try again."
+
+                    succeeded = app._deactivate_provider_for_ui(
+                        "openai", "https://api.openai.com/v1",
+                        provider_state, feedback, bundle)
+
+                    self.assertFalse(succeeded)
+                    self.assertEqual(app.APP_CONFIG, before)
+                    self.assertEqual(
+                        {key: value for key, value in provider_state.items()
+                         if key != "feedback"},
+                        {key: value for key, value in before_state.items()
+                         if key != "feedback"},
+                    )
+                    self.assertEqual(provider_state["feedback"], feedback)
+                    self.assertEqual(
+                        secrets.get("openai"), "stored-test-credential")
+                    self.assertEqual(
+                        LocalConfigRepository(
+                            path, environment={}, secret_store=secrets,
+                        ).load().openai.api_key,
+                        "stored-test-credential",
+                    )
+                finally:
+                    app.APP_CONFIG.clear()
+                    app.APP_CONFIG.update(original)
 
     def test_failed_config_write_restores_previous_secret(self):
         with tempfile.TemporaryDirectory() as directory:

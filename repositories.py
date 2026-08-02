@@ -471,9 +471,11 @@ class LocalConfigRepository(ConfigRepository):
                     continue
                 value = str(values.get(key, ""))
                 environment_value = self._environment_secret(provider)
-                if environment_value and value:
+                if environment_value and value == environment_value:
                     # Environment credentials are runtime-only overrides. A
                     # normal settings save must never copy them into storage.
+                    # A different, explicitly submitted value is user intent
+                    # and must replace the stored credential.
                     continue
                 changes[provider] = value
 
