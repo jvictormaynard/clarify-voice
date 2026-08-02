@@ -24,8 +24,11 @@ The setup script creates `.venv` and installs runtime dependencies. `-Dev` also
 installs the pinned development and packaging tools for local checks. Both modes
 consume the platform-specific `requirements-lock-linux.txt` or
 `requirements-lock-windows.txt`, generated from the human-maintained
-`requirements.txt` and `requirements-dev.txt` intent files. Generate the lock
-on the matching runner only when intentionally changing dependency intent:
+`requirements.txt` and `requirements-dev.txt` intent files. Generate each lock
+on its matching runner only when intentionally changing dependency intent. In
+particular, compile the Windows lock on Windows so PyInstaller's `colorama`,
+`pefile`, and `pywin32-ctypes` markers are resolved and Linux-only `keyboard`
+is omitted:
 
 ```text
 python -m piptools compile --allow-unsafe --strip-extras --output-file=requirements-lock-linux.txt requirements-dev.txt
@@ -44,9 +47,11 @@ toolchain used to build and validate the executable. The separate
 input to the release SBOM. Keeping these locks separate prevents Ruff, mypy,
 pip-audit, pip-tools, CycloneDX, and PyInstaller from being reported as shipped
 application components while retaining pinned, reproducible build inputs.
-Development locks are compiled with `--allow-unsafe`, so their exact `pip` and
-`setuptools` versions are committed and installed before the rest of the
-toolchain. The runtime-only lock intentionally excludes those bootstrap tools.
+Development locks are compiled with `--allow-unsafe`, so their exact
+`pip==26.1.2`, `setuptools==83.0.0`, and `pip-tools==7.6.0` versions are
+committed and installed before the rest of the toolchain. This pip release is
+compatible with pip-tools and includes fixes for the audited pip advisories.
+The runtime-only lock intentionally excludes those bootstrap tools.
 The release checks that every shared runtime package has the same version in
 both Windows locks before building or generating the SBOM.
 

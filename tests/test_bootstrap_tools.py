@@ -11,11 +11,11 @@ class BootstrapToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             lock = Path(directory) / "lock.txt"
             lock.write_text(
-                "setuptools==83.0.0\npip==25.3\npip-tools==7.6.0\n", encoding="utf-8"
+                "setuptools==83.0.0\npip==26.1.2\npip-tools==7.6.0\n", encoding="utf-8"
             )
             self.assertEqual(
                 install_bootstrap_tools._pins(lock),
-                ["pip==25.3", "setuptools==83.0.0", "pip-tools==7.6.0"],
+                ["pip==26.1.2", "setuptools==83.0.0", "pip-tools==7.6.0"],
             )
 
     def test_rejects_lock_without_bootstrap_pin(self):
@@ -39,7 +39,7 @@ class BootstrapToolTests(unittest.TestCase):
         self.assertTrue(install_command[-4].endswith("requirements-lock-linux.txt"))
         self.assertEqual(
             install_command[-3:],
-            ["pip==25.3", "setuptools==83.0.0", "pip-tools==7.6.0"],
+            ["pip==26.1.2", "setuptools==83.0.0", "pip-tools==7.6.0"],
         )
         self.assertEqual(
             run.call_args_list[1].args[0][-4:],

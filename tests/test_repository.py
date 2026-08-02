@@ -133,6 +133,12 @@ class RepositorySafetyTests(unittest.TestCase):
             self.assertRegex(dev_lock, r"(?im)^pip==[^\n]+$")
             self.assertRegex(dev_lock, r"(?im)^setuptools==[^\n]+$")
         self.assertNotRegex(runtime_lock, r"(?im)^(pip|setuptools)==")
+        windows_lock = (ROOT / "requirements-lock-windows.txt").read_text(
+            encoding="utf-8"
+        )
+        for windows_only in ("colorama", "pefile", "pywin32-ctypes"):
+            self.assertRegex(windows_lock, rf"(?im)^{windows_only}==")
+        self.assertNotRegex(windows_lock, r"(?im)^keyboard==")
         for development_tool in (
             "cyclonedx-bom",
             "mypy",
