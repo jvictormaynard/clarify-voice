@@ -348,6 +348,10 @@ class SignatureValidationTests(unittest.TestCase):
                 + _AUTHENTICODE_TIMESTAMP_INSPECTOR
                 + "\n'@;"
                 "Add-Type -TypeDefinition $source -Language CSharp;"
+                "Import-Module Microsoft.PowerShell.Security;"
+                "if(-not (Get-PSDrive -Name Cert -ErrorAction SilentlyContinue)){"
+                "New-PSDrive -Name Cert -PSProvider Certificate -Root "
+                "CurrentUser\\My | Out-Null};"
                 "$fixture=$env:CLARIFYVOICE_INSPECTOR_FIXTURE;"
                 "$certificate=$null;"
                 "try{"
