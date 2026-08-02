@@ -24,8 +24,8 @@ Notable user-facing changes are documented here. This project follows
   rewrite a published `completed` or `cancelled` state
 - Retained rapid stop requests issued before recorder startup publication and
   bounded provider-worker shutdown joins without deleting an in-use WAV
-- Kept a finite non-daemon provider grace owner through the request window so
-  late upload detach still triggers cleanup before process termination
+- Snapshotted recording bytes before long provider uploads so cleanup no longer
+  depends on a Requests read timeout or an in-flight provider file handle
 
 ## [0.1.2] - 2026-07-31
 

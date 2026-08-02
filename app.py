@@ -1781,7 +1781,8 @@ def _provider_connection(provider: str) -> ProviderConnection:
 
 
 def _call_provider_audio(
-        provider: str, audio_path: Path, mode: str, lang: str = "en") -> str:
+        provider: str, audio_path: Path, mode: str, lang: str = "en",
+        audio_bytes: bytes | None = None) -> str:
     try:
         metadata = PROVIDER_REGISTRY.describe(provider)
         connection = _provider_connection(provider)
@@ -1797,6 +1798,7 @@ def _call_provider_audio(
             prompt=("Transcribe this audio." if mode == "transcription"
                 else "Transcribe and rewrite this audio for clarity."),
             temperature=0.0 if mode == "transcription" else 0.1,
+            audio_bytes=audio_bytes,
         )
         transcript = PROVIDER_REGISTRY.transcribe(
             provider, request, connection).text
@@ -1937,10 +1939,13 @@ def call_groq(audio_path: Path, mode: str, lang: str = "en") -> str:
     return _call_provider_audio("groq", audio_path, mode, lang)
 
 
-def call_transcription_provider(audio_path: Path, mode: str, lang: str = "en") -> str:
+def call_transcription_provider(audio_path: Path, mode: str, lang: str = "en",
+        audio_bytes: bytes | None = None) -> str:
+    provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
+    if audio_bytes is None:
+        return _call_provider_audio(provider, audio_path, mode, lang)
     return _call_provider_audio(
-        str(APP_CONFIG.get("transcription_provider", "gemini")),
-        audio_path, mode, lang)
+        provider, audio_path, mode, lang, audio_bytes=audio_bytes)
 
 # ---------------------------------------------------------------------------
 # Recorder
@@ -2313,6 +2318,10 @@ class RecordingSession:
         self.cleanup_error = None
         self.started_at = time.time()
         self.start_finished = threading.Event()
+        # Set after the worker snapshots the WAV into memory.  Provider
+        # adapters then upload bytes, not the path, so cleanup is independent
+        # of a request whose read timeout is not a total deadline.
+        self.audio_snapshot_complete = threading.Event()
         self.cancel_event = threading.Event()
         self._lock = threading.RLock()
         self._workers = set()
@@ -2378,6 +2387,9 @@ class RecordingSession:
         with self._workers_lock:
             self._workers.add(worker)
 
+    def mark_audio_snapshot_complete(self):
+        self.audio_snapshot_complete.set()
+
     def detach_worker(self, worker):
         with self._workers_lock:
             self._workers.discard(worker)
@@ -2422,8 +2434,9 @@ class RecordingSession:
             return True
 
     def _complete_shutdown_if_ready(self):
-        if (self.terminal and not self._active_workers()
-                and self._cleanup_done.is_set()):
+        if (self.terminal and self._cleanup_done.is_set()
+                and (not self._active_workers()
+                     or self.audio_snapshot_complete.is_set())):
             with self._lock:
                 self.shutdown_complete.set()
                 self.cleanup_terminal.set()
@@ -2460,6 +2473,13 @@ class RecordingSession:
                     worker.join(remaining)
             remaining_workers = self._active_workers()
             if remaining_workers:
+                if self.audio_snapshot_complete.is_set():
+                    # The provider owns only an in-memory snapshot now. Run
+                    # bounded cleanup immediately instead of tying the WAV
+                    # lifetime to a potentially unbounded read timeout.
+                    self._retry_cleanup()
+                    self._complete_shutdown_if_ready()
+                    return
                 self.shutdown_timed_out = True
                 grace_deadline = _REAL_TIME.monotonic() + SESSION_WORKER_GRACE_SECONDS
                 while self._active_workers():
@@ -5243,8 +5263,13 @@ class App(ctk.CTk):
                 time.sleep(0.3)
                 if not session.audio_path.exists() or session.audio_path.stat().st_size < 1000:
                     raise RecordingEncodingError("No usable audio was produced")
+                audio_bytes = session.audio_path.read_bytes()
+                session.mark_audio_snapshot_complete()
+                if session.cancel_event.is_set():
+                    raise RecordingCancelledError("Recording cancelled")
                 text = call_transcription_provider(
-                    session.audio_path, self.mode, self.lang)
+                    session.audio_path, self.mode, self.lang,
+                    audio_bytes=audio_bytes)
                 if session.cancel_event.is_set():
                     raise RecordingCancelledError("Recording cancelled")
                 if not text or text.startswith("[Error"):

@@ -171,6 +171,29 @@ class ProviderRegistryContractTests(unittest.TestCase):
         self.assertEqual(
             http.calls[2][1], "https://proxy.example/v1/chat/completions")
 
+    def test_audio_upload_uses_snapshot_without_opening_recording_path(self):
+        http = FakeHttp(FakeResponse({"text": "snapshot transcript"}))
+        uploaded = []
+        original_post = http.post
+
+        def capture_post(url, **kwargs):
+            uploaded.append(kwargs["files"]["file"][1].read())
+            return original_post(url, **kwargs)
+
+        http.post = capture_post
+        registry = ProviderRegistry()
+        registry.register_openai_compatible(compatible_metadata(), http)
+        request = TranscriptionRequest(
+            self.audio_path, "whisper-compatible", "en", "unused", "unused",
+            0.0, audio_bytes=b"snapshot-bytes")
+        self.audio_path.unlink()
+
+        result = registry.transcribe(
+            "compatible", request, ProviderConnection("key", "https://proxy.example/v1"))
+
+        self.assertEqual(result.text, "snapshot transcript")
+        self.assertEqual(uploaded, [b"snapshot-bytes"])
+
     def test_compatible_provider_routes_without_changes_to_workflow_code(self):
         http = FakeHttp(
             FakeResponse({"text": "transcribed"}),

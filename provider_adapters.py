@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import mimetypes
 from pathlib import Path
 from typing import Any, Mapping
@@ -208,7 +209,9 @@ class GeminiAdapter(ProviderAdapter):
     def transcribe(self, request: TranscriptionRequest,
             connection: ProviderConnection) -> TranscriptionResult:
         self.require(ProviderCapability.MULTIMODAL_AUDIO)
-        audio_b64 = base64.b64encode(request.audio_path.read_bytes()).decode()
+        audio_bytes = (request.audio_bytes if request.audio_bytes is not None
+                       else request.audio_path.read_bytes())
+        audio_b64 = base64.b64encode(audio_bytes).decode()
         body = {
             "contents": [{"parts": [
                 {"inlineData": {
@@ -357,7 +360,13 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 f"No {self.metadata.display_name} audio model",
                 ProviderCapability.AUDIO_TRANSCRIPTION,
             )
-        with request.audio_path.open("rb") as audio_file:
+        # Snapshot bytes before entering the long request.  Requests' read
+        # timeout is not a total wall-clock deadline, but the provider worker
+        # no longer holds the recording path after this point.
+        audio_bytes = (request.audio_bytes if request.audio_bytes is not None
+                       else request.audio_path.read_bytes())
+        audio_file = io.BytesIO(audio_bytes)
+        try:
             response = self.http.post(
                 normalize_provider_url(
                     connection.base_url, self._VERSION, "audio/transcriptions"),
@@ -373,6 +382,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 },
                 timeout=60,
             )
+        finally:
+            audio_file.close()
         response.raise_for_status()
         payload = response.json()
         text = str(payload.get("text", "")).strip() if isinstance(

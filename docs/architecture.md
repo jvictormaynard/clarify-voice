@@ -161,14 +161,13 @@ directory exclusively, the same recovery removes only the legacy
 orphan deletion because they do not have equivalent inter-process ownership;
 cleanup failures never block startup. Recorder cancellation is serialized
 through process and microphone-stream setup. If shutdown happens during an
-upload, the non-daemon
-shutdown watcher keeps the process alive until the provider worker releases
-the file, then performs bounded cleanup retries. The initial worker join is
-five seconds, followed by a finite 60-second non-daemon grace owner aligned to
-the provider request window. A provider that releases during that grace is
-cleaned safely; if it exceeds the total window, cleanup is skipped, the path
-remains owned, and a diagnostic is retained so process shutdown can finish
-without deleting an open file. Shutdown is not marked complete until deletion
+upload, the worker snapshots the WAV into memory before entering provider
+network I/O. Adapters upload that snapshot, so the filesystem handle is closed
+before a request whose read timeout might be extended indefinitely; bounded
+cleanup can therefore delete the WAV without waiting for the provider. The
+non-daemon shutdown watcher still performs bounded retries and joins workers
+for a finite initial/grace policy, retaining ownership and diagnostics when a
+provider has not yet released. Shutdown is not marked complete until deletion
 succeeds. A
 persistent cleanup failure remains observable and retains session ownership so
 the path cannot be overwritten by a later recording. UI ownership observers

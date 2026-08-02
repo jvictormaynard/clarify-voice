@@ -385,6 +385,37 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertEqual(cleanup.call_count, 1)
             self.assertFalse(path.exists())
 
+    def test_snapshot_releases_wav_before_unbounded_provider_returns(self):
+        provider_release = threading.Event()
+        provider_started = threading.Event()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recording.wav"
+            path.write_bytes(b"0" * 1001)
+            session = app.RecordingSession(recorder=Mock(), audio_path=path)
+            session.state = "processing"
+
+            def provider_worker():
+                session.mark_audio_snapshot_complete()
+                provider_started.set()
+                provider_release.wait(2)
+                session.detach_worker(threading.current_thread())
+
+            worker = threading.Thread(target=provider_worker, daemon=True)
+            session.attach_worker(worker)
+            worker.start()
+            self.assertTrue(provider_started.wait(1))
+
+            with patch.object(app, "SESSION_WORKER_JOIN_SECONDS", 0.01):
+                session.finalize("completed")
+                self.assertTrue(session.wait_for_shutdown(1))
+                self.assertTrue(session.cleanup_terminal.is_set())
+                self.assertFalse(path.exists())
+                self.assertFalse(session._shutdown_watcher.is_alive())
+
+            provider_release.set()
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+
     def test_late_worker_detach_rearms_shutdown_handoff_once(self):
         release_provider = threading.Event()
         active_checked = threading.Event()

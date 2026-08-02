@@ -1627,7 +1627,8 @@ class RewriteWorkflowTests(unittest.TestCase):
                 for callback in callbacks:
                     callback()
 
-            provider.assert_called_once_with(audio_path, "transcribe", "en")
+            provider.assert_called_once_with(
+                audio_path, "transcribe", "en", audio_bytes=b"0" * 1001)
             self.assertEqual(states, [("processing", ""), ("ready", "error")])
             self.assertIsInstance(session.error, app.RecordingError)
             self.assertEqual(session.state, "failed")
