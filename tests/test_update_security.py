@@ -348,9 +348,8 @@ class SignatureValidationTests(unittest.TestCase):
                 + _AUTHENTICODE_TIMESTAMP_INSPECTOR
                 + "\n'@;"
                 "Add-Type -TypeDefinition $source -Language CSharp;"
-                "if(-not (Get-PSDrive -Name Cert -ErrorAction SilentlyContinue)){"
-                "Import-Module Microsoft.PowerShell.Security "
-                "-ErrorAction SilentlyContinue 2>$null};"
+                "if(-not (Get-Module Microsoft.PowerShell.Security)){"
+                "Import-Module Microsoft.PowerShell.Security -ErrorAction Stop};"
                 "if(-not (Get-PSDrive -Name Cert -ErrorAction SilentlyContinue)){"
                 "$certificateProvider=Get-PSProvider | Where-Object "
                 "Name -eq 'Certificate';"
