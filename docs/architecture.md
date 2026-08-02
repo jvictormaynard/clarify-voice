@@ -88,10 +88,61 @@ Dictation, rewrite, translation, and model-picker workflows require no new
 provider-specific branch. A protocol that is not OpenAI-compatible should use a
 new adapter implementing the same typed operations, then be registered once.
 
+### `workflows.py`
+
+Defines the staged, UI-independent application-service boundary for dictation,
+rewrite, and translation. The service accepts explicit command dataclasses and
+publishes immutable workflow states. It owns overlap prevention and assigns a
+monotonic operation ID to every session; workers check that ID before provider
+results can change the clipboard, statistics, or current state.
+
+Gateway calls never run while the service lock is held. Dictation delivers its
+terminal `COMPLETED` state before claiming clipboard/statistics publication;
+rewrite and translation deliver a non-cancellable `PUBLISHING` barrier first.
+Cancellation or shutdown that wins before a claim performs neither output nor
+usage accounting. An accepted publication records usage once, and terminal
+release waits for a blocked external gateway so the UI cannot announce `READY`
+before its effect has returned.
+
+```text
+Tk command dispatcher                 Tk state renderer
+          |                                  ^
+          v                                  |
+   WorkflowService ---- immutable WorkflowState
+          |
+          +---- ProviderGateway (typed registry facade)
+          +---- AudioGateway
+          +---- ClipboardGateway
+          +---- WorkflowConfig
+          +---- StatisticsGateway
+          +---- Scheduler / Clock
+```
+
+The gateway protocols describe ownership boundaries; they do not reimplement
+provider routing, HTTP policy, recording lifecycle, clipboard transactions, or
+configuration persistence. `ProviderGateway` is the workflow-facing facade for
+the typed requests and results routed by `ProviderRegistry`; workflows never
+branch on provider IDs or call adapter HTTP directly.
+
+The recording boundary is connected to the real `RecordingSession` lifecycle
+from issue #18 through `RecordingAudioGateway`. A stop waits for startup to
+become terminal and returns an immutable `RecordingSnapshot` containing both
+the owned path and in-memory bytes. The session can therefore complete cleanup
+as soon as the snapshot exists without tying its temporary WAV to a slow
+provider request. The active Tk path uses the same stop/snapshot/terminal
+methods, so the scaffolding does not duplicate start-stop or cleanup policy.
+
+The runtime adapters in `app.py` connect the service to the typed provider
+registry, the real `RecordingSession`, and the focus-safe Windows clipboard.
+The hotkeys capture the original `SelectionTarget` before Tk can take focus and
+dispatch explicit workflow commands; legacy helpers remain only for narrow
+compatibility tests until their callers are retired.
+
 ### `desktop_state.py`
 
-Contains the small `WorkflowController` that prevents rewrite and translation
-flows from overlapping.
+Contains the legacy `WorkflowController` used by the current Tk path to prevent
+rewrite and translation from overlapping. It remains until `app.py` dispatches
+the explicit commands from `workflows.py`.
 
 ### `provider_http.py`
 
@@ -128,6 +179,13 @@ adapter owns only inference cancellation and sidecar shutdown. The current
 application therefore does not import this module, start the sidecar, or
 download assets.
 
+The workflow capture path requires a sequence-bearing snapshot; it retries
+transient snapshot contention and otherwise fails closed rather than falling
+back to an unsafe text-only check-and-set. The copy records the sequence before
+Ctrl+C and the sequence observed by that copy, then uses the adapter's atomic
+ownership check for restoration. A concurrent clipboard write therefore keeps
+the user's newer contents intact, even when the copied selection has no text.
+
 ### `update_security.py`
 
 Owns the manual update trust boundary. A Windows-trusted, publisher-pinned CAB
@@ -140,6 +198,8 @@ launch. It does not own UI confirmation and never runs an installer by itself.
 
 The unit suite tests provider routing, URL construction, configuration,
 clipboard safety, workflow state, usage statistics, and geometry calculations.
+`tests/test_workflows.py` is deliberately separate from the provider suite and
+runs the core application services without importing or constructing Tk.
 Windows UI acceptance still requires a real installed build because mocked
 tests cannot reveal transparency, focus, DPI, or hotkey integration defects.
 

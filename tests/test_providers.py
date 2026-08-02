@@ -27,7 +27,12 @@ from provider_http import AuthenticationError
 from version import __version__
 from update_security import UpdateTransportError
 import windows_hotkeys
-from windows_clipboard import CF_UNICODETEXT, ClipboardFormat, ClipboardSnapshot
+from windows_clipboard import (
+    CF_DIB,
+    CF_UNICODETEXT,
+    ClipboardFormat,
+    ClipboardSnapshot,
+)
 from PIL import Image as PILImage
 from PIL import ImageDraw as PILImageDraw
 
@@ -1013,6 +1018,462 @@ class UpdateUiTests(unittest.TestCase):
         update_status.configure.assert_called_once_with(
             text=("Update blocked: secure update service is temporarily unavailable"),
             text_color="#d17878")
+
+
+class WorkflowClipboardAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.target = app.SelectionTarget(77, "editor.exe")
+
+    def test_capture_without_text_preserves_foreign_non_text_clipboard(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        foreign = ClipboardSnapshot((ClipboardFormat(
+            CF_DIB, b"foreign-image"),), 12)
+
+        class ForeignClipboard:
+            def __init__(self):
+                self.state = previous
+
+            def sequence(self):
+                return self.state.sequence
+
+            def snapshot(self):
+                return self.state
+
+            def text(self):
+                return self.state.text
+
+            def restore_if_owned(self, *_args):
+                raise AssertionError("non-text clipboard must not be restored")
+
+        clipboard = ForeignClipboard()
+
+        def copy_to_foreign_clipboard(_chord):
+            clipboard.state = foreign
+
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_WINDOWS_CLIPBOARD", clipboard), \
+                patch.object(app, "_send_key_chord",
+                             side_effect=copy_to_foreign_clipboard) as send_key:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        send_key.assert_called_once_with("ctrl+c")
+        self.assertIs(clipboard.state, foreign)
+
+    def test_capture_retries_snapshot_after_contention(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             side_effect=[OSError("busy"), previous]), \
+                patch.object(app, "_copy_selected_text_with_sequence",
+                             return_value=("selected", 10, 11)):
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNotNone(capture)
+        self.assertIs(capture.context["previous"], previous)
+        self.assertEqual(capture.context["copy_observed_sequence"], 11)
+
+    def test_capture_rechecks_focus_after_snapshot_before_copy(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          side_effect=[True, False]), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_copy_selected_text_with_sequence") as copy:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        copy.assert_not_called()
+
+    def test_capture_rechecks_focus_immediately_before_copy_chord(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          side_effect=[True, True, False]), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_clipboard_sequence_number", return_value=10), \
+                patch.object(app, "_send_key_chord") as send_key:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        send_key.assert_not_called()
+
+    def test_capture_rejects_clipboard_change_before_copy_chord(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_clipboard_sequence_number", return_value=11), \
+                patch.object(app, "_send_key_chord") as send_key:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        send_key.assert_not_called()
+
+    def test_capture_without_snapshot_fails_closed(self):
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard", return_value=None), \
+                patch.object(app, "_copy_selected_text_with_sequence") as copy:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        copy.assert_not_called()
+
+    def test_capture_with_unrestorable_snapshot_fails_closed(self):
+        previous = ClipboardSnapshot(
+            (ClipboardFormat(9001, b"unsupported"),), 10, restorable=False)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_copy_selected_text_with_sequence") as copy:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        copy.assert_not_called()
+
+    def test_capture_without_text_never_restores_by_sequence_alone(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_copy_selected_text_with_sequence",
+                             return_value=(None, 10, 11)), \
+                patch.object(app, "_restore_clipboard_snapshot_if_owned",
+                             return_value=False) as restore:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        restore.assert_not_called()
+
+    def test_apply_result_focus_change_copies_without_verification_chord(self):
+        capture = app.SelectionCapture(self.target, "selected")
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=False), \
+                patch.object(app, "_copy_selected_text") as copy, \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_paste_generated_text", return_value=False) as copy_result:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        copy.assert_not_called()
+        send_key.assert_not_called()
+        copy_result.assert_called_once_with("generated", should_paste=False)
+
+    def test_apply_result_without_snapshot_fails_closed_before_copy(self):
+        capture = app.SelectionCapture(self.target, "selected")
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=None), \
+                patch.object(app, "_copy_selected_text_with_sequence") as copy, \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_paste_generated_text",
+                             return_value=False) as copy_result:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        copy.assert_not_called()
+        send_key.assert_not_called()
+        copy_result.assert_called_once_with("generated", should_paste=False)
+
+    def test_apply_result_with_nonrestorable_snapshot_fails_closed_before_copy(
+            self):
+        capture = app.SelectionCapture(self.target, "selected")
+        before = ClipboardSnapshot(
+            (ClipboardFormat(9001, b"unsupported"),), 10, restorable=False)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=before), \
+                patch.object(app, "_copy_selected_text_with_sequence") as copy, \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_paste_generated_text",
+                             return_value=False) as copy_result:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        copy.assert_not_called()
+        send_key.assert_not_called()
+        copy_result.assert_called_once_with("generated", should_paste=False)
+
+    def test_apply_result_rechecks_focus_after_clipboard_snapshot(self):
+        capture = app.SelectionCapture(self.target, "selected")
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          side_effect=[True, False]), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_copy_selected_text") as copy, \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_paste_generated_text", return_value=False) as copy_result:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        copy.assert_not_called()
+        send_key.assert_not_called()
+        copy_result.assert_called_once_with("generated", should_paste=False)
+
+    def test_apply_result_rechecks_focus_inside_paste_transaction(self):
+        capture = app.SelectionCapture(self.target, "selected")
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        focus = {"window": 77}
+
+        def current(target):
+            return focus["window"] == target.window
+
+        def write_result(_text):
+            focus["window"] = 88
+
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          side_effect=current), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             side_effect=[previous, previous]), \
+                patch.object(app, "_copy_selected_text_with_sequence",
+                             return_value=("selected", 10, 11)), \
+                patch.object(app, "_restore_clipboard_snapshot_if_owned"), \
+                patch.object(app, "_set_windows_clipboard_text",
+                             side_effect=write_result), \
+                patch.object(app, "_send_key_chord") as send_key:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        send_key.assert_not_called()
+
+    def test_apply_result_rechecks_focus_inside_verification_copy(self):
+        capture = app.SelectionCapture(self.target, "selected")
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          side_effect=[True, True, False, False]), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=None), \
+                patch.object(app, "_clipboard_sequence_number",
+                             return_value=10), \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_paste_generated_text",
+                             return_value=False) as copy_result:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        send_key.assert_not_called()
+        copy_result.assert_called_once_with("generated", should_paste=False)
+
+
+class WorkflowAppBridgeTests(unittest.TestCase):
+    def test_dictation_uses_platform_copy_and_paste_on_non_windows(self):
+        target = app.SelectionTarget(77, "editor.exe")
+        with patch.object(app, "IS_WIN", False), \
+                patch.object(app.AppWorkflowClipboard, "is_target_current",
+                             return_value=True), \
+                patch.object(app, "copy_and_paste") as copy:
+            disposition = app.AppWorkflowClipboard.write_dictation_result(
+                target, "result")
+
+        self.assertEqual(disposition, app.SelectionDisposition.PASTED)
+        copy.assert_called_once()
+        self.assertEqual(copy.call_args.args, ("result",))
+        self.assertTrue(callable(copy.call_args.kwargs["paste_predicate"]))
+
+    def test_dictation_non_windows_focus_change_copies_without_pasting(self):
+        target = app.SelectionTarget(77, "editor.exe")
+        with patch.object(app, "IS_WIN", False), \
+                patch.object(app.AppWorkflowClipboard, "is_target_current",
+                             return_value=False), \
+                patch.object(app, "copy_and_paste") as copy:
+            disposition = app.AppWorkflowClipboard.write_dictation_result(
+                target, "result")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        copy.assert_called_once_with("result", should_paste=False)
+
+    def test_mac_copy_and_paste_uses_command_v_path(self):
+        with patch.object(app, "IS_WIN", False), \
+                patch.object(app, "IS_MAC", True), \
+                patch.object(app.subprocess, "run") as run:
+            self.assertTrue(app.copy_and_paste("result"))
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0], ["pbcopy"])
+        command = run.call_args_list[1].args[0]
+        self.assertEqual(command[0], "osascript")
+        self.assertIn("command down", command[-1])
+
+    def test_workflow_recording_factory_keeps_startup_owner_until_shutdown(self):
+        old_recorder = object()
+        old_session = SimpleNamespace(
+            recorder=old_recorder, shutdown_complete=threading.Event())
+        new_session = SimpleNamespace(recorder=object())
+        create = Mock(return_value=new_session)
+        harness = SimpleNamespace(
+            _recording_session=old_session,
+            _new_recording_session=create,
+        )
+
+        # Cancellation can return the workflow to READY while the old
+        # RecordingSession is still starting.  It must remain the owner.
+        self.assertIsNone(app.App._new_workflow_recording_session(harness))
+        self.assertIs(harness._recording_session, old_session)
+        self.assertIs(old_session.recorder, old_recorder)
+        create.assert_not_called()
+
+        old_session.shutdown_complete.set()
+        replacement = app.App._new_workflow_recording_session(harness)
+
+        self.assertIs(replacement, new_session)
+        self.assertIsNot(replacement, old_session)
+        self.assertIs(harness._recording_session, new_session)
+
+    def test_recording_hotkeys_choose_start_then_stop_when_tk_queue_drains(self):
+        target = app.SelectionTarget(77, "editor.exe")
+        callbacks = []
+        dispatches = []
+        service = SimpleNamespace(
+            state=SimpleNamespace(phase=app.WorkflowPhase.READY))
+
+        def dispatch(command):
+            dispatches.append(command)
+            if isinstance(command, app.StartDictation):
+                service.state.phase = app.WorkflowPhase.RECORDING
+            elif isinstance(command, app.StopDictation):
+                service.state.phase = app.WorkflowPhase.READY
+            return True
+
+        service.dispatch = dispatch
+        harness = SimpleNamespace(
+            _workflow_service=service,
+            _workflow_target=Mock(return_value=target),
+            _workflow_dictation_target_window=None,
+            mode="prompt",
+            lang="en",
+            after=lambda _delay, callback: callbacks.append(callback),
+        )
+
+        app.App._recording_hotkey(harness)
+        app.App._recording_hotkey(harness)
+        self.assertEqual(len(callbacks), 2)
+
+        callbacks[0]()
+        callbacks[1]()
+
+        self.assertIsInstance(dispatches[0], app.StartDictation)
+        self.assertIsInstance(dispatches[1], app.StopDictation)
+        self.assertEqual(dispatches[0].target, target)
+
+    def test_hidden_non_windows_recording_reveals_once_and_rehides_on_ready(self):
+        visible = {"value": False}
+        reveals = []
+
+        def reveal():
+            reveals.append(True)
+            visible["value"] = True
+
+        def hide():
+            visible["value"] = False
+
+        harness = SimpleNamespace(
+            _workflow_dictation_target_window=None,
+            _was_hidden_before_recording=False,
+            winfo_viewable=lambda: visible["value"],
+            _show_without_activation=reveal,
+            _update_focused_icon=Mock(),
+            result_frame=SimpleNamespace(winfo_manager=lambda: False),
+            _tray_icon=None,
+            app_state="ready",
+            _microphone_alert_job=None,
+            _wave_running=False,
+            _timer_running=False,
+            _recording_overlay=None,
+            _saved_pos=None,
+            winfo_x=lambda: 10,
+            winfo_y=lambda: 20,
+            _primary_mon=(1920, 1080),
+            geometry=Mock(),
+            idle_card=SimpleNamespace(
+                pack_forget=Mock(), pack=Mock()),
+            rec_card=SimpleNamespace(
+                pack_forget=Mock(), pack=Mock()),
+            _idle_card_pad=0,
+            lbl=SimpleNamespace(configure=Mock()),
+            sub=SimpleNamespace(configure=Mock()),
+            attributes=Mock(),
+            _focused_icon_tick=Mock(),
+            _wave_tick=Mock(),
+            _sync_escape_hotkey=Mock(),
+            _t=lambda key: key,
+            withdraw=hide,
+        )
+        harness._reveal_workflow_pill_if_hidden = lambda: (
+            app.App._reveal_workflow_pill_if_hidden(harness))
+        harness._set_state = lambda *args, **kwargs: app.App._set_state(
+            harness, *args, **kwargs)
+
+        with patch.object(app, "IS_WIN", False):
+            app.App._on_workflow_state(
+                harness,
+                SimpleNamespace(
+                    phase=app.WorkflowPhase.RECORDING,
+                    target_executable="editor.exe",
+                ),
+            )
+
+            self.assertTrue(visible["value"])
+            self.assertEqual(len(reveals), 1)
+            self.assertTrue(harness._was_hidden_before_recording)
+            self.assertEqual(harness.app_state, "recording")
+
+            # Cancellation and normal completion both deliver READY through
+            # this same bridge path; the origin flag restores hidden state.
+            app.App._set_state(harness, "ready", _skip_pill_fade=True)
+
+        self.assertFalse(visible["value"])
+        self.assertFalse(harness._was_hidden_before_recording)
+
+    def test_hidden_non_windows_microphone_failure_reveals_pill(self):
+        visible = {"value": False}
+        reveal = Mock(side_effect=lambda: visible.__setitem__("value", True))
+        harness = SimpleNamespace(
+            _was_hidden_before_recording=False,
+            winfo_viewable=lambda: visible["value"],
+            _show_without_activation=reveal,
+            _set_state=Mock(),
+        )
+        harness._reveal_workflow_pill_if_hidden = lambda: (
+            app.App._reveal_workflow_pill_if_hidden(harness))
+
+        with patch.object(app, "IS_WIN", False):
+            app.App._on_workflow_state(
+                harness,
+                SimpleNamespace(
+                    phase=app.WorkflowPhase.MICROPHONE_UNAVAILABLE),
+            )
+            app.App._on_workflow_state(
+                harness,
+                SimpleNamespace(
+                    phase=app.WorkflowPhase.MICROPHONE_UNAVAILABLE),
+            )
+
+        reveal.assert_called_once_with()
+        self.assertTrue(visible["value"])
+        self.assertTrue(harness._was_hidden_before_recording)
+        harness._set_state.assert_called_with("microphone_unavailable")
 
 
 class RewriteWorkflowTests(unittest.TestCase):

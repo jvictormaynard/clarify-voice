@@ -202,6 +202,7 @@ repositories.py                Versioned configuration and statistics storage
 update_security.py             Authenticated manifest and atomic update checks
 version.py                     Packaged application version
 desktop_state.py               Small workflow state controller
+workflows.py                  Headless workflow commands and orchestration service
 windows_hotkeys.py             Native Windows hotkey helpers
 assets/                        Product branding and provider marks
 extra/sox-14.4.2/              Bundled Windows audio runtime and license

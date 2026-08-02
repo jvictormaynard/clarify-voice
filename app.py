@@ -36,8 +36,11 @@ from provider_types import (
     ProviderConnection,
     ProviderError,
     RewriteRequest,
+    RewriteResult,
     TranscriptionRequest,
+    TranscriptionResult,
     TranslationRequest,
+    TranslationResult,
 )
 from repositories import (
     ApplicationRepositories,
@@ -61,6 +64,25 @@ from windows_hotkeys import (
     send_ctrl_key,
     unregister_escape_hotkey,
     unregister_global_hotkeys,
+)
+from workflows import (
+    CancelDictation,
+    CancelTranslation,
+    ChooseTranslationLanguage,
+    DismissMicrophoneUnavailable,
+    MicrophoneUnavailableError as WorkflowMicrophoneUnavailableError,
+    NoUsableAudioError,
+    RecordingSnapshot,
+    SelectionCapture,
+    SelectionDisposition,
+    SelectionTarget,
+    StartDictation,
+    StartRewrite,
+    StartTranslation,
+    StopDictation,
+    WorkflowKind,
+    WorkflowPhase,
+    WorkflowService,
 )
 
 try:
@@ -2218,7 +2240,7 @@ class RecordingProcessError(RecordingError):
     """Raised when the SoX process cannot be shut down safely."""
 
 
-class RecordingEncodingError(RecordingError):
+class RecordingEncodingError(RecordingError, NoUsableAudioError):
     """Raised when a recorder did not produce usable audio bytes."""
 
 
@@ -2226,7 +2248,7 @@ class RecordingCleanupError(RecordingError):
     """Raised when temporary audio cannot be removed after retries."""
 
 
-class MicrophoneUnavailableError(RecordingError):
+class MicrophoneUnavailableError(RecordingError, WorkflowMicrophoneUnavailableError):
     """Raised when Windows has no active microphone input to record."""
 
 
@@ -2582,6 +2604,7 @@ class RecordingSession:
         self._pending_usage_event = None
         self._lock = threading.RLock()
         self._workers = set()
+        self._workflow_workers = set()
         self._workers_lock = threading.RLock()
         self._cleanup_lock = threading.Lock()
         self._cleanup_done = threading.Event()
@@ -2640,9 +2663,54 @@ class RecordingSession:
         finally:
             self.start_finished.set()
 
+    def wait_until_started(self):
+        """Wait for startup's terminal signal and preserve its typed outcome."""
+        self.start_finished.wait()
+        with self._lock:
+            if self.state == "cancelled" or self.cancel_event.is_set():
+                raise self.error or RecordingCancelledError(
+                    "Recording cancelled during startup")
+            if self.state == "failed":
+                raise self.error or RecordingError("Recording startup failed")
+
+    def stop(self):
+        """Stop capture and return an in-memory provider snapshot."""
+        self.wait_until_started()
+        with self._lock:
+            if self.state == "recording":
+                self._set_state_locked("processing")
+            elif self.state != "processing":
+                raise RecordingError(
+                    f"Cannot stop session in state {self.state}")
+        self.stop_recorder()
+        time.sleep(0.3)
+        if not self.audio_path.exists() or self.audio_path.stat().st_size < 1000:
+            raise RecordingEncodingError("No usable audio was produced")
+        snapshot = RecordingSnapshot(
+            audio_path=self.audio_path,
+            audio_bytes=self.audio_path.read_bytes(),
+            cancel_token=self.provider_cancel_token,
+        )
+        self.mark_audio_snapshot_complete()
+        if self.cancel_event.is_set():
+            raise RecordingCancelledError("Recording cancelled")
+        return snapshot
+
+    def complete(self):
+        return self.finalize("completed")
+
+    def fail(self, error):
+        return self.finalize("failed", error)
+
     def attach_worker(self, worker):
         with self._workers_lock:
             self._workers.add(worker)
+
+    def attach_workflow_worker(self, worker):
+        """Attach a worker that must finish before this owner is released."""
+        with self._workers_lock:
+            self._workers.add(worker)
+            self._workflow_workers.add(worker)
 
     def mark_audio_snapshot_complete(self):
         self.audio_snapshot_complete.set()
@@ -2650,6 +2718,7 @@ class RecordingSession:
     def detach_worker(self, worker):
         with self._workers_lock:
             self._workers.discard(worker)
+            self._workflow_workers.discard(worker)
             if self._shutdown_watcher_started and self.shutdown_timed_out:
                 # Persist the handoff request while the old watcher is still
                 # tearing down; its finally block will consume this under the
@@ -2664,6 +2733,10 @@ class RecordingSession:
     def _active_workers(self):
         with self._workers_lock:
             return tuple(self._workers)
+
+    def _active_workflow_workers(self):
+        with self._workers_lock:
+            return tuple(self._workflow_workers)
 
     def _active_workers_except_current(self):
         current = threading.current_thread()
@@ -2692,6 +2765,7 @@ class RecordingSession:
 
     def _complete_shutdown_if_ready(self):
         if (self.terminal and self._cleanup_done.is_set()
+                and not self._active_workflow_workers()
                 and (not self._active_workers()
                      or self.audio_snapshot_complete.is_set())):
             with self._lock:
@@ -2890,6 +2964,20 @@ class RecordingSession:
         self._complete_shutdown_if_ready()
         return True
 
+
+class RecordingAudioGateway:
+    """Workflow adapter that creates the lifecycle owner from issue #18."""
+
+    def __init__(self, session_factory=None, microphone_probe=None):
+        self._session_factory = session_factory or RecordingSession
+        self._microphone_probe = microphone_probe or _has_active_microphone
+
+    def microphone_available(self):
+        return self._microphone_probe()
+
+    def create_session(self):
+        return self._session_factory()
+
 # ---------------------------------------------------------------------------
 # Clipboard
 # ---------------------------------------------------------------------------
@@ -2967,7 +3055,7 @@ def _restore_clipboard_snapshot_if_owned(snapshot, expected_sequence, expected_t
 
 
 def _paste_generated_text(text, *, should_paste=True,
-        restore_delay=CLIPBOARD_RESTORE_DELAY_SECONDS):
+        restore_delay=CLIPBOARD_RESTORE_DELAY_SECONDS, paste_predicate=None):
     """Write, optionally paste, and conditionally restore one result.
 
     The lock covers the bounded restore window so a second ClarifyVoice
@@ -2993,6 +3081,12 @@ def _paste_generated_text(text, *, should_paste=True,
 
         if not should_paste:
             return False
+        if paste_predicate is not None:
+            try:
+                if not paste_predicate():
+                    return False
+            except Exception:
+                return False
         try:
             paste_result = _send_key_chord("ctrl+v", expected_text=str(text))
         except Exception:
@@ -3026,16 +3120,50 @@ def _send_key_chord(chord, *, expected_text=None):
         return keyboard.send(chord)
 
 
-def _copy_selected_text(timeout=0.7):
-    """Copy a selection and return text only when the clipboard changed."""
+def _copy_selected_text_with_sequence(
+        timeout=0.7, *, expected_sequence=None, suppress_read_errors=False,
+        before_copy=None):
+    """Copy a selection and retain the sequence observed by that copy.
+
+    The caller uses the two sequence values to prove that the clipboard
+    changed during this copy, without assuming that Win32 increments by one
+    when an application publishes multiple formats.  Restoration still uses
+    the adapter's atomic sequence/text ownership check.
+    """
     previous_sequence = _clipboard_sequence_number()
+    if (
+        expected_sequence is not None
+        and previous_sequence != expected_sequence
+    ):
+        return None, previous_sequence, previous_sequence
+    if before_copy is not None and not before_copy():
+        return None, previous_sequence, previous_sequence
     _send_key_chord("ctrl+c")
     deadline = time.monotonic() + timeout
+    observed_sequence = previous_sequence
     while time.monotonic() < deadline:
-        if _clipboard_sequence_number() != previous_sequence:
-            return _get_windows_clipboard_text()
+        try:
+            observed_sequence = _clipboard_sequence_number()
+        except Exception:
+            return None, previous_sequence, None
+        if observed_sequence != previous_sequence:
+            try:
+                selected = _get_windows_clipboard_text()
+            except Exception:
+                if not suppress_read_errors:
+                    raise
+                selected = None
+            return selected, previous_sequence, observed_sequence
         time.sleep(0.02)
-    return None
+    return None, previous_sequence, observed_sequence
+
+
+def _copy_selected_text(timeout=0.7, *, before_copy=None):
+    """Copy a selection and return text only when the clipboard changed."""
+    selected, _previous_sequence, _observed_sequence = (
+        _copy_selected_text_with_sequence(
+            timeout, before_copy=before_copy))
+    return selected
 
 
 def _same_selected_text(left, right):
@@ -3060,15 +3188,338 @@ def _result_window_height(header_height, result_height):
     # Header has 10px vertical pack padding; the root card has 2px.
     return min(360, max(96, int(header_height) + 20 + int(result_height) + 4))
 
-def copy_and_paste(text):
+def copy_and_paste(text, *, should_paste=True, paste_predicate=None):
     if IS_WIN:
-        return _paste_generated_text(text)
-    elif IS_MAC:
+        if should_paste:
+            return _paste_generated_text(
+                text, paste_predicate=paste_predicate)
+        return _paste_generated_text(text, should_paste=False)
+    paste_allowed = should_paste
+    if IS_MAC:
         subprocess.run(["pbcopy"], input=text.encode(), check=False)
-        subprocess.run(["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'], check=False)
     else:
         subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=False)
-        subprocess.run(["xdotool", "key", "ctrl+v"], check=False)
+    if should_paste and paste_predicate is not None:
+        try:
+            paste_allowed = bool(paste_predicate())
+        except Exception:
+            paste_allowed = False
+    if IS_MAC:
+        if paste_allowed:
+            subprocess.run(["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'], check=False)
+    else:
+        if paste_allowed:
+            subprocess.run(["xdotool", "key", "ctrl+v"], check=False)
+    return bool(not should_paste or paste_allowed)
+
+
+class AppWorkflowScheduler:
+    """Bridge WorkflowService scheduling to Tk and owned worker threads."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def call_soon(self, callback):
+        try:
+            self.app.after(0, callback)
+        except tk.TclError:
+            if not getattr(self.app, "_closing", False):
+                raise
+
+    def run_in_background(self, callback):
+        threading.Thread(
+            target=callback, name="ClarifyVoiceWorkflow", daemon=True
+        ).start()
+
+    def run_recording(self, recording, callback):
+        """Run a recording worker while its session owns the thread.
+
+        ``RecordingSession`` cannot safely publish shutdown completion until
+        every startup, stop, and cancellation worker has detached.  Register
+        before ``start`` so cancellation cannot observe a missing worker, and
+        detach in the worker's finally block even when the callback raises.
+        """
+        def run():
+            try:
+                callback()
+            finally:
+                recording.detach_worker(threading.current_thread())
+
+        worker = threading.Thread(
+            target=run, name="ClarifyVoiceRecording", daemon=True
+        )
+        attach = getattr(
+            recording, "attach_workflow_worker", recording.attach_worker)
+        attach(worker)
+        try:
+            worker.start()
+        except BaseException:
+            recording.detach_worker(worker)
+            raise
+
+
+class AppWorkflowProvider:
+    """Typed provider facade backed by the merged registry and HTTP policy."""
+
+    @staticmethod
+    def transcribe(audio_source, mode, language):
+        provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
+        text = call_transcription_provider(
+            audio_source.audio_path,
+            mode,
+            language,
+            audio_bytes=audio_source.audio_bytes,
+            cancel_token=audio_source.cancel_token,
+        )
+        if not text or text.startswith("[Error"):
+            raise RuntimeError(text or "Transcription returned no text")
+        model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
+        return TranscriptionResult(text, provider, model)
+
+    @staticmethod
+    def rewrite(text):
+        source = str(text).strip()
+        provider = str(APP_CONFIG.get("refinement_provider", "")).strip().lower()
+        model = str(APP_CONFIG.get("refinement_model", "")).strip()
+        if not source:
+            raise RuntimeError("No text selected")
+        if not model or not PROVIDER_REGISTRY.supports(
+                provider, ProviderCapability.TEXT_GENERATION):
+            raise RuntimeError("No text refinement model configured")
+        request = RewriteRequest(
+            text=source,
+            model=model,
+            language="en",
+            instruction=SELECTION_REWRITE_INSTRUCTION,
+            source_message=_source_text_message(source),
+            temperature=0.1,
+        )
+        result = PROVIDER_REGISTRY.rewrite(
+            provider, request, _provider_connection(provider))
+        if not result.text or not result.text.strip():
+            raise RuntimeError("Provider returned an empty rewrite")
+        return RewriteResult(result.text.strip(), result.provider_id, result.model)
+
+    @staticmethod
+    def translate(text, target_language):
+        source = str(text)
+        provider = str(APP_CONFIG.get("refinement_provider", "")).strip().lower()
+        model = str(APP_CONFIG.get("refinement_model", "")).strip()
+        if not source.strip():
+            raise RuntimeError("No text selected")
+        if target_language not in SUPPORTED_LANGUAGES:
+            raise RuntimeError("Unsupported target language")
+        if not model or not PROVIDER_REGISTRY.supports(
+                provider, ProviderCapability.TEXT_GENERATION):
+            raise RuntimeError("No text refinement model configured")
+        request = TranslationRequest(
+            text=source,
+            model=model,
+            target_language=target_language,
+            instruction=TRANSLATION_INSTRUCTION.format(
+                target_language=LANG_NAMES[target_language]),
+            source_message=_translation_source_message(source),
+            temperature=0.0,
+        )
+        result = PROVIDER_REGISTRY.translate(
+            provider, request, _provider_connection(provider))
+        if not result.text or not result.text.strip():
+            raise RuntimeError("Provider returned an empty translation")
+        return TranslationResult(
+            result.text.strip(), result.provider_id, result.model,
+            target_language,
+        )
+
+
+class AppWorkflowClipboard:
+    """Focus-safe clipboard transactions for the real Tk runtime."""
+
+    @staticmethod
+    def capture_target():
+        window = _foreground_window_handle()
+        if not window:
+            return None
+        return SelectionTarget(window, _foreground_executable())
+
+    @staticmethod
+    def is_target_current(target):
+        return bool(target.window) and _foreground_window_handle() == target.window
+
+    @staticmethod
+    def capture_selection(target):
+        if not AppWorkflowClipboard.is_target_current(target):
+            return None
+        try:
+            previous = _snapshot_windows_clipboard()
+        except OSError:
+            try:
+                # Clipboard contention is transient; retry once before
+                # abandoning the transaction without an ownership snapshot.
+                previous = _snapshot_windows_clipboard()
+            except OSError:
+                previous = None
+        if not isinstance(previous, ClipboardSnapshot) or not previous.restorable:
+            return None
+        # Recheck after the snapshot/retry window and again inside the copy
+        # helper immediately before Ctrl+C.  A focus change must not make the
+        # chord act on an unrelated foreground application.
+        if not AppWorkflowClipboard.is_target_current(target):
+            return None
+        selected, _, copy_observed_sequence = (
+            _copy_selected_text_with_sequence(
+                expected_sequence=previous.sequence,
+                suppress_read_errors=True,
+                before_copy=lambda: AppWorkflowClipboard.is_target_current(
+                    target)))
+        if (not isinstance(selected, str)
+                or copy_observed_sequence is None):
+            # A sequence change without verifiable text may belong to a
+            # concurrent non-text clipboard write.  Restore would be unsafe;
+            # preserve the current clipboard and fail closed.
+            return None
+        context = {
+            "previous": previous,
+            "selected": selected,
+            "copy_observed_sequence": copy_observed_sequence,
+        }
+        return SelectionCapture(target, selected, context)
+
+    @staticmethod
+    def restore(capture):
+        context = capture.context if isinstance(capture.context, dict) else {}
+        previous = context.get("previous")
+        selected = context.get("selected", capture.text)
+        copy_observed_sequence = context.get("copy_observed_sequence")
+        if not isinstance(previous, ClipboardSnapshot):
+            return
+        if copy_observed_sequence is None:
+            return
+        _restore_clipboard_snapshot_if_owned(
+            previous, copy_observed_sequence, selected)
+
+    @staticmethod
+    def apply_result(capture, result):
+        # A focus change must never send Ctrl+C to the unrelated foreground
+        # application.  The generated result remains available through the
+        # copy-only path, which performs no verification chord or paste.
+        if not AppWorkflowClipboard.is_target_current(capture.target):
+            _paste_generated_text(result, should_paste=False)
+            return SelectionDisposition.COPIED
+        try:
+            before = _snapshot_windows_clipboard()
+        except OSError:
+            before = None
+        # Verification would replace the user's clipboard with the selected
+        # text.  Without an owned, restorable snapshot we cannot safely put it
+        # back, so fail closed before sending any Ctrl+C and keep only the
+        # generated result available.
+        if not isinstance(before, ClipboardSnapshot) or not before.restorable:
+            _paste_generated_text(result, should_paste=False)
+            return SelectionDisposition.COPIED
+        # Snapshotting can briefly yield to another application; recheck at
+        # the linearization point immediately before Ctrl+C as well.
+        if not AppWorkflowClipboard.is_target_current(capture.target):
+            _paste_generated_text(result, should_paste=False)
+            return SelectionDisposition.COPIED
+        current, _, copy_observed_sequence = (
+            _copy_selected_text_with_sequence(
+                before_copy=lambda: AppWorkflowClipboard.is_target_current(
+                    capture.target)))
+        safe = (
+            AppWorkflowClipboard.is_target_current(capture.target)
+            and isinstance(current, str)
+            and _same_selected_text(current, capture.text)
+        )
+        if isinstance(current, str):
+            _restore_clipboard_snapshot_if_owned(
+                before, copy_observed_sequence, current)
+        if safe and AppWorkflowClipboard.is_target_current(capture.target):
+            pasted = _paste_generated_text(
+                result,
+                paste_predicate=lambda: AppWorkflowClipboard.is_target_current(
+                    capture.target),
+            )
+            return (
+                SelectionDisposition.PASTED
+                if pasted else SelectionDisposition.COPIED
+            )
+        _paste_generated_text(result, should_paste=False)
+        return SelectionDisposition.COPIED
+
+    @staticmethod
+    def write_dictation_result(target, text):
+        safe = target is None or AppWorkflowClipboard.is_target_current(target)
+        if not IS_WIN:
+            if safe:
+                if target is None:
+                    pasted = copy_and_paste(text)
+                else:
+                    pasted = copy_and_paste(
+                        text,
+                        paste_predicate=lambda: AppWorkflowClipboard.is_target_current(
+                            target),
+                    )
+                return (
+                    SelectionDisposition.PASTED
+                    if pasted else SelectionDisposition.COPIED
+                )
+            copy_and_paste(text, should_paste=False)
+            return SelectionDisposition.COPIED
+        pasted = _paste_generated_text(
+            text,
+            should_paste=safe,
+            paste_predicate=(
+                None
+                if target is None
+                else lambda: AppWorkflowClipboard.is_target_current(target)
+            ),
+        )
+        return (
+            SelectionDisposition.PASTED
+            if safe and pasted else SelectionDisposition.COPIED
+        )
+
+    @staticmethod
+    def activate(target):
+        _activate_window(target.window)
+
+    @staticmethod
+    def alt_pressed():
+        return bool(is_alt_pressed())
+
+
+class AppWorkflowConfig:
+    @staticmethod
+    def recording_usage_context(mode):
+        context = _recording_usage_context()
+        context["mode"] = mode
+        return context
+
+
+class AppWorkflowStatistics:
+    def __init__(self, repositories):
+        self.repositories = repositories
+
+    def record_dictation(self, context, duration_seconds, result):
+        _record_usage_event(
+            _build_recording_usage_event(context, duration_seconds, result),
+            self.repositories,
+        )
+
+    def record_rewrite(self, provider, model, source, result):
+        _record_usage_event(
+            _build_rewrite_usage_event(provider, model, source, result),
+            self.repositories,
+        )
+
+    def record_translation(
+            self, provider, model, source, result, target_language):
+        _record_usage_event(
+            _build_translation_usage_event(
+                provider, model, source, result, target_language),
+            self.repositories,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Flag icons (drawn with Pillow)
@@ -4010,10 +4461,16 @@ class SmoothTkBackdrop:
 class App(ctk.CTk):
     @property
     def _rewrite_active(self):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None:
+            state = service.state
+            return state.kind is WorkflowKind.REWRITE and state.phase is not WorkflowPhase.READY
         return self._workflow.is_active("rewrite")
 
     @_rewrite_active.setter
     def _rewrite_active(self, value):
+        if getattr(self, "_workflow_service", None) is not None:
+            return
         if value:
             self._workflow.start("rewrite")
         else:
@@ -4021,10 +4478,16 @@ class App(ctk.CTk):
 
     @property
     def _translation_active(self):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None:
+            state = service.state
+            return state.kind is WorkflowKind.TRANSLATION and state.phase is not WorkflowPhase.READY
         return self._workflow.is_active("translation")
 
     @_translation_active.setter
     def _translation_active(self, value):
+        if getattr(self, "_workflow_service", None) is not None:
+            return
         if value:
             self._workflow.start("translation")
         else:
@@ -4077,6 +4540,11 @@ class App(ctk.CTk):
         self._closing = False
         self._tray_actions = queue.SimpleQueue()
         self._tray_icon = None
+        self._workflow_picker_mode = False
+        self._workflow_pending_result = None
+        self._workflow_pending_status = None
+        self._workflow_pending_operation = None
+        self._workflow_release_requested = False
 
         sw = self.winfo_screenwidth()
         self.geometry(f"380x48+{sw - 400}+16")
@@ -4084,6 +4552,19 @@ class App(ctk.CTk):
         self._build_ui()
         self._configure_overlay_window()
         self._main_backdrop = SmoothTkBackdrop(self, 24) if IS_WIN else None
+        self._workflow_clipboard = AppWorkflowClipboard()
+        self._workflow_service = WorkflowService(
+            AppWorkflowProvider(),
+            RecordingAudioGateway(
+                session_factory=self._new_workflow_recording_session,
+                microphone_probe=_has_active_microphone,
+            ),
+            self._workflow_clipboard,
+            AppWorkflowConfig(),
+            AppWorkflowStatistics(self.repositories),
+            AppWorkflowScheduler(self),
+        )
+        self._workflow_service.subscribe(self._on_workflow_state)
         self.bind("<Escape>", self._on_escape)
         if not IS_WIN and keyboard is not None:
             keyboard.add_hotkey("alt+l", self._recording_hotkey)
@@ -4143,6 +4624,13 @@ class App(ctk.CTk):
                     0x0001 | 0x0002 | 0x0010 | 0x0040)  # NOSIZE|NOMOVE|NOACTIVATE|SHOWWINDOW
             except Exception:
                 pass
+
+    def _reveal_workflow_pill_if_hidden(self):
+        """Reveal the non-Windows pill while retaining its hidden origin."""
+        if IS_WIN or self.winfo_viewable():
+            return
+        self._was_hidden_before_recording = True
+        self._show_without_activation()
 
     def _show_with_fade(self):
         is_visible = self.winfo_viewable()
@@ -4239,6 +4727,13 @@ class App(ctk.CTk):
 
     def _shutdown_recording(self, timeout=None):
         """Stop the active session and leave a watcher for late upload cleanup."""
+        service = getattr(self, "_workflow_service", None)
+        if service is not None and service.state.phase is not WorkflowPhase.READY:
+            service.cancel_active()
+            session = getattr(self, "_recording_session", None)
+            if session is not None:
+                session.wait_for_shutdown(timeout)
+            return
         session = getattr(self, "_recording_session", None)
         if session is not None:
             session.cancel()
@@ -4585,7 +5080,12 @@ class App(ctk.CTk):
     def _dismiss_microphone_alert(self):
         self._microphone_alert_job = None
         if self.app_state == "microphone_unavailable":
-            self._set_state("ready")
+            service = getattr(self, "_workflow_service", None)
+            if (service is not None
+                    and service.state.phase is WorkflowPhase.MICROPHONE_UNAVAILABLE):
+                service.dispatch(DismissMicrophoneUnavailable())
+            else:
+                self._set_state("ready")
 
     def _show_success_then(self, callback, delay=850):
         """Show a completed check long enough to register before restoring UI."""
@@ -4807,6 +5307,22 @@ class App(ctk.CTk):
             self.sub.configure(text=self._t("hint_stop"))
 
     def _cancel(self, e=None):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None and service.state.phase is not WorkflowPhase.READY:
+            if service.state.phase is WorkflowPhase.RECORDING:
+                service.dispatch(CancelDictation())
+            elif service.state.phase in (
+                WorkflowPhase.PUBLISHING,
+                WorkflowPhase.COMPLETED,
+                WorkflowPhase.FAILED,
+            ):
+                # Publication and terminal animations are non-cancellable.
+                # Shutdown still uses cancel_active directly, which invalidates
+                # queued work and defers READY for an accepted publication.
+                return
+            else:
+                service.cancel_active()
+            return
         if self.app_state in ("recording", "processing"):
             self._set_state("ready")
             session = getattr(self, "_recording_session", None)
@@ -4827,6 +5343,22 @@ class App(ctk.CTk):
     def _on_escape(self, e=None):
         if self._translation_picker is not None:
             self._cancel_translation_picker()
+        elif getattr(self, "_workflow_service", None) is not None:
+            phase = self._workflow_service.state.phase
+            if phase is WorkflowPhase.RECORDING:
+                self._workflow_service.dispatch(CancelDictation())
+            elif phase is WorkflowPhase.MICROPHONE_UNAVAILABLE:
+                self._workflow_service.dispatch(DismissMicrophoneUnavailable())
+            elif phase in (
+                WorkflowPhase.PUBLISHING,
+                WorkflowPhase.COMPLETED,
+                WorkflowPhase.FAILED,
+            ):
+                return
+            elif phase is not WorkflowPhase.READY:
+                self._workflow_service.cancel_active()
+            elif self.result_frame.winfo_manager():
+                self._hide_result()
         elif self.app_state in ("recording", "processing"): self._cancel()
         elif self.result_frame.winfo_manager(): self._hide_result()
 
@@ -4873,6 +5405,19 @@ class App(ctk.CTk):
 
     # -- Selected-text translation --
     def _translation_hotkey(self):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None:
+            if not IS_WIN or service.state.phase is not WorkflowPhase.READY:
+                return
+            target = self._workflow_target()
+            if target is None:
+                return
+            self._translation_target_executable = target.executable
+            self.after(
+                0,
+                lambda target=target: service.dispatch(StartTranslation(target)),
+            )
+            return
         if (not IS_WIN or self.app_state != "ready"
                 or self._rewrite_active or self._translation_active):
             return
@@ -5041,7 +5586,8 @@ class App(ctk.CTk):
             self._translation_picker_window = None
 
     def _show_translation_picker(
-            self, target_window, selected_text, previous_clipboard):
+            self, target_window=None, selected_text=None,
+            previous_clipboard=None):
         if not self._translation_active:
             return
         if self.result_frame.winfo_manager():
@@ -5054,7 +5600,8 @@ class App(ctk.CTk):
             win = self._create_translation_picker_window()
 
         self._translation_picker = win
-        self._translation_payload = (
+        workflow_picker_mode = getattr(self, "_workflow_picker_mode", False)
+        self._translation_payload = None if workflow_picker_mode else (
             target_window, selected_text, previous_clipboard)
         win._clarify_fading_out = False
         win._translation_selected_index["value"] = 0
@@ -5079,6 +5626,7 @@ class App(ctk.CTk):
     def _cancel_translation_picker(self):
         win = self._translation_picker
         payload = self._translation_payload
+        workflow_mode = getattr(self, "_workflow_picker_mode", False)
         self._translation_picker = None
         self._translation_payload = None
 
@@ -5088,9 +5636,15 @@ class App(ctk.CTk):
                     win.withdraw()
                 except tk.TclError:
                     pass
-            if payload:
+            if workflow_mode:
+                self._workflow_picker_mode = False
+                service = getattr(self, "_workflow_service", None)
+                if service is not None:
+                    service.dispatch(CancelTranslation())
+            elif payload:
                 _activate_window(payload[0])
-            self._translation_active = False
+            else:
+                self._translation_active = False
 
         if win is not None:
             self._collapse_translation_picker(win, finish)
@@ -5113,8 +5667,25 @@ class App(ctk.CTk):
             return
         payload = self._translation_payload
         win = self._translation_picker
+        workflow_mode = getattr(self, "_workflow_picker_mode", False)
         self._translation_picker = None
         self._translation_payload = None
+        if workflow_mode:
+            def begin_workflow():
+                if win is not None:
+                    try:
+                        win.withdraw()
+                    except tk.TclError:
+                        pass
+                self._workflow_picker_mode = False
+                self._workflow_service.dispatch(
+                    ChooseTranslationLanguage(target_language))
+
+            if win is not None:
+                self._collapse_translation_picker(win, begin_workflow)
+            else:
+                begin_workflow()
+            return
         if not payload:
             self._translation_active = False
             return
@@ -5212,6 +5783,19 @@ class App(ctk.CTk):
 
     # -- Selected-text rewrite --
     def _rewrite_hotkey(self):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None:
+            if not IS_WIN or service.state.phase is not WorkflowPhase.READY:
+                return
+            target = self._workflow_target()
+            if target is None:
+                return
+            self._rewrite_target_executable = target.executable
+            self.after(
+                0,
+                lambda target=target: service.dispatch(StartRewrite(target)),
+            )
+            return
         if (not IS_WIN or self.app_state != "ready"
                 or self._rewrite_active
                 or getattr(self, "_translation_active", False)):
@@ -5334,8 +5918,179 @@ class App(ctk.CTk):
                 self._restore_clipboard_text(previous_clipboard)
             self.after(0, lambda: self._finish_rewrite(status_key="rewrite_failed"))
 
+    def _workflow_target(self):
+        clipboard = getattr(self, "_workflow_clipboard", None)
+        if clipboard is None:
+            return None
+        return clipboard.capture_target()
+
+    def _new_workflow_recording_session(self):
+        current = getattr(self, "_recording_session", None)
+        if current is not None:
+            shutdown_complete = getattr(current, "shutdown_complete", None)
+            if shutdown_complete is None or not shutdown_complete.is_set():
+                # Keep the old RecordingSession as the sole owner until its
+                # cleanup has completed; otherwise a new hotkey could reuse
+                # self.recorder while the old startup/stop worker is alive.
+                return None
+        session = self._new_recording_session()
+        self._recording_session = session
+        return session
+
+    def _on_workflow_state(self, state):
+        """Render WorkflowService state on Tk and release terminal operations."""
+        if state.phase in (
+                WorkflowPhase.RECORDING,
+                WorkflowPhase.MICROPHONE_UNAVAILABLE):
+            self._reveal_workflow_pill_if_hidden()
+        if state.phase is WorkflowPhase.READY:
+            release_requested = self._workflow_release_requested
+            self._workflow_release_requested = False
+            pending_result = self._workflow_pending_result
+            pending_status = self._workflow_pending_status
+            self._workflow_pending_result = None
+            self._workflow_pending_status = None
+            self._workflow_pending_operation = None
+            if self._translation_picker is not None and self._workflow_picker_mode:
+                self._close_workflow_picker_window()
+            if not release_requested:
+                # READY can be published by shutdown/cancellation before a
+                # queued publication claim. Do not surface that stale result.
+                pending_result = None
+                pending_status = None
+            if pending_result and self.app_state == "ready":
+                self._show_result(pending_result)
+            elif self.app_state != "ready":
+                self._set_state(
+                    "ready",
+                    self._t(pending_status) if pending_status else "",
+                    after_ready=(
+                        (lambda: self._show_result(pending_result))
+                        if pending_result else None
+                    ),
+                )
+            elif pending_status:
+                self.lbl.configure(text=self._t(pending_status))
+            recording_session = getattr(self, "_recording_session", None)
+            if (
+                recording_session is not None
+                and getattr(recording_session, "shutdown_complete", None) is not None
+                and recording_session.shutdown_complete.is_set()
+            ):
+                self._recording_session = None
+            return
+
+        if state.phase is WorkflowPhase.RECORDING:
+            self._recording_target_window = getattr(
+                self, "_workflow_dictation_target_window", None)
+            if self.result_frame.winfo_manager():
+                self._hide_result()
+            self._update_focused_icon(state.target_executable)
+            self._set_state("recording")
+        elif state.phase is WorkflowPhase.PROCESSING:
+            self._set_state("processing")
+        elif state.phase is WorkflowPhase.REWRITING:
+            self._rewrite_target_executable = state.target_executable
+            self._begin_rewrite_feedback()
+        elif state.phase is WorkflowPhase.PREPARING_TRANSLATION:
+            if self.result_frame.winfo_manager():
+                self._hide_result()
+        elif state.phase is WorkflowPhase.TRANSLATION_PICKER:
+            self._show_workflow_translation_picker()
+        elif state.phase is WorkflowPhase.TRANSLATING:
+            self._translation_target_executable = state.target_executable
+            self._begin_translation_feedback()
+        elif state.phase is WorkflowPhase.PUBLISHING:
+            # The workflow has delivered its non-cancellable publication
+            # barrier. Render a bounded processing pill while keeping Escape
+            # disabled until the focus-safe adapter reports the final
+            # disposition.
+            self._set_state("processing")
+        elif state.phase is WorkflowPhase.MICROPHONE_UNAVAILABLE:
+            self._set_state("microphone_unavailable")
+        elif state.phase is WorkflowPhase.COMPLETED:
+            self._workflow_pending_result = state.result_text
+            self._workflow_pending_status = state.status_key
+            self._workflow_pending_operation = state.operation_id
+            self._show_success_then(
+                lambda operation_id=state.operation_id:
+                self._finish_workflow_operation(operation_id)
+            )
+        elif state.phase is WorkflowPhase.FAILED:
+            self._workflow_pending_status = state.status_key or "error"
+            self._workflow_pending_operation = state.operation_id
+            self._set_state(
+                "ready",
+                self._t(self._workflow_pending_status),
+                after_ready=(
+                    lambda operation_id=state.operation_id:
+                    self._finish_workflow_operation(operation_id)
+                ),
+            )
+
+    def _finish_workflow_operation(self, operation_id):
+        self._workflow_release_requested = True
+        return self._workflow_service.finish(operation_id)
+
+    def _show_workflow_translation_picker(self):
+        self._workflow_picker_mode = True
+        self._show_translation_picker()
+
+    def _close_workflow_picker_window(self):
+        win = self._translation_picker
+        self._translation_picker = None
+        self._translation_payload = None
+        self._workflow_picker_mode = False
+        if win is None:
+            return
+        try:
+            win.withdraw()
+        except tk.TclError:
+            pass
+
     # -- Recording --
     def _recording_hotkey(self):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None:
+            phase = service.state.phase
+            if phase in (
+                WorkflowPhase.REWRITING,
+                WorkflowPhase.PREPARING_TRANSLATION,
+                WorkflowPhase.TRANSLATION_PICKER,
+                WorkflowPhase.TRANSLATING,
+                WorkflowPhase.PUBLISHING,
+            ):
+                return
+            if phase is not WorkflowPhase.READY:
+                if phase not in (
+                    WorkflowPhase.RECORDING,
+                    WorkflowPhase.MICROPHONE_UNAVAILABLE,
+                ):
+                    return
+                target = None
+            else:
+                # Capture the target synchronously, before yielding to Tk.
+                target = self._workflow_target()
+                self._workflow_dictation_target_window = (
+                    target.window if target is not None else None
+                )
+            mode = self.mode
+            language = self.lang
+
+            def dispatch_current_phase():
+                current_phase = service.state.phase
+                if current_phase is WorkflowPhase.READY:
+                    service.dispatch(StartDictation(target, mode, language))
+                elif current_phase is WorkflowPhase.RECORDING:
+                    service.dispatch(StopDictation())
+                elif current_phase is WorkflowPhase.MICROPHONE_UNAVAILABLE:
+                    service.dispatch(DismissMicrophoneUnavailable())
+
+            # Re-read the phase after earlier queued hotkeys have run.  Two
+            # events received before Tk drains its queue therefore become
+            # Start then Stop instead of two Starts.
+            self.after(0, dispatch_current_phase)
+            return
         if (self._rewrite_active
                 or getattr(self, "_translation_active", False)):
             return
@@ -5557,17 +6312,10 @@ class App(ctk.CTk):
             lambda candidate: getattr(self, "_recording_session", None) is candidate)
         def run():
             try:
-                session.stop_recorder()
-                time.sleep(0.3)
-                if not session.audio_path.exists() or session.audio_path.stat().st_size < 1000:
-                    raise RecordingEncodingError("No usable audio was produced")
-                audio_bytes = session.audio_path.read_bytes()
-                session.mark_audio_snapshot_complete()
-                if session.cancel_event.is_set():
-                    raise RecordingCancelledError("Recording cancelled")
+                audio_source = session.stop()
                 text = call_transcription_provider(
-                    session.audio_path, self.mode, self.lang,
-                    audio_bytes=audio_bytes,
+                    audio_source.audio_path, self.mode, self.lang,
+                    audio_bytes=audio_source.audio_bytes,
                     cancel_token=session.provider_cancel_token)
                 if session.cancel_event.is_set():
                     raise RecordingCancelledError("Recording cancelled")
@@ -5577,7 +6325,7 @@ class App(ctk.CTk):
                     session,
                     _build_recording_usage_event(
                         getattr(session, "usage_context", {}), elapsed, text))
-                if not session.finalize("completed"):
+                if not session.complete():
                     _take_pending_recording_usage(session)
                     return
                 if is_current(session):
