@@ -21,6 +21,23 @@ GMEM_MOVEABLE = 0x0002
 MAX_FORMAT_BYTES = 16 * 1024 * 1024
 
 
+def _decode_unicode_clipboard_text(data: bytes) -> str | None:
+    """Decode CF_UNICODETEXT through its first aligned UTF-16 terminator."""
+    if len(data) % 2:
+        return None
+    terminator = None
+    for offset in range(0, len(data), 2):
+        if data[offset:offset + 2] == b"\x00\x00":
+            terminator = offset
+            break
+    if terminator is None:
+        return None
+    try:
+        return data[:terminator].decode("utf-16-le")
+    except UnicodeDecodeError:
+        return None
+
+
 @dataclass(frozen=True)
 class ClipboardFormat:
     format_id: int
@@ -37,10 +54,7 @@ class ClipboardSnapshot:
     def text(self) -> str | None:
         for item in self.formats:
             if item.format_id == CF_UNICODETEXT:
-                try:
-                    return item.data.decode("utf-16-le").rstrip("\x00")
-                except UnicodeDecodeError:
-                    return None
+                return _decode_unicode_clipboard_text(item.data)
         for item in self.formats:
             if item.format_id == CF_TEXT:
                 encoding = "mbcs" if platform.system() == "Windows" else "latin-1"

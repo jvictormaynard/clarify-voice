@@ -214,6 +214,26 @@ class ClipboardSnapshotTests(unittest.TestCase):
             (ClipboardFormat(CF_UNICODETEXT, "rich text\x00".encode("utf-16-le")),), 1)
         self.assertEqual(snapshot.text, "rich text")
 
+    def test_unicode_snapshot_ignores_capacity_bytes_after_terminator(self):
+        data = "rich text\x00".encode("utf-16-le") + b"\xff\xfe\x01\x02"
+        snapshot = ClipboardSnapshot((ClipboardFormat(CF_UNICODETEXT, data),), 1)
+        self.assertEqual(snapshot.text, "rich text")
+
+    def test_unicode_snapshot_decodes_surrogate_pair(self):
+        data = "A \U0001f600\x00".encode("utf-16-le")
+        snapshot = ClipboardSnapshot((ClipboardFormat(CF_UNICODETEXT, data),), 1)
+        self.assertEqual(snapshot.text, "A \U0001f600")
+
+    def test_unicode_snapshot_rejects_odd_length_buffer(self):
+        data = "valid\x00".encode("utf-16-le") + b"\x01"
+        snapshot = ClipboardSnapshot((ClipboardFormat(CF_UNICODETEXT, data),), 1)
+        self.assertIsNone(snapshot.text)
+
+    def test_unicode_snapshot_rejects_missing_terminator(self):
+        data = "missing terminator".encode("utf-16-le")
+        snapshot = ClipboardSnapshot((ClipboardFormat(CF_UNICODETEXT, data),), 1)
+        self.assertIsNone(snapshot.text)
+
     def test_unsupported_only_clipboard_is_not_a_restorable_empty_snapshot(self):
         adapter = _EnumeratingAdapter([9001], {})
         snapshot = adapter.snapshot()
