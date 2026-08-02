@@ -237,6 +237,22 @@ class ProviderRegistryContractTests(unittest.TestCase):
         for _method, _url, kwargs in http.calls:
             self.assertNotIn("timeout", kwargs)
 
+    def test_openai_compatible_contract_accepts_models_catalog_key(self):
+        http = FakeHttp(FakeResponse({"models": [
+            {"id": "whisper-compatible"},
+            {"id": "chat-compatible"},
+        ]}))
+        registry = ProviderRegistry()
+        registry.register_openai_compatible(compatible_metadata(), http)
+
+        catalog = registry.discover_models(
+            "compatible",
+            ProviderConnection("key", "https://proxy.example/v1"),
+        )
+
+        self.assertEqual(catalog.audio_models, ("whisper-compatible",))
+        self.assertEqual(catalog.text_models, ("chat-compatible",))
+
     def test_audio_upload_uses_snapshot_without_opening_recording_path(self):
         http = FakeHttp(FakeResponse({"text": "snapshot transcript"}))
         uploaded = []
