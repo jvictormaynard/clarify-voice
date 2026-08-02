@@ -538,6 +538,27 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertFalse(installer.install_dir.exists())
             self.assertFalse(list(fixture.root.glob(".install-*")))
 
+    def test_install_wraps_runtime_archive_deletion_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            original_unlink = Path.unlink
+
+            def fail_runtime_archive(path, *args, **kwargs):
+                if Path(path).name == "runtime.zip":
+                    raise OSError("private archive-sharing detail")
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", new=fail_runtime_archive):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.install()
+
+            self.assertEqual(len(session.calls), 1)
+            self.assertIn("runtime archive", str(raised.exception))
+            self.assertNotIn("private archive-sharing detail", str(raised.exception))
+            self.assertFalse(installer.install_dir.exists())
+            self.assertFalse(list(fixture.root.glob(".install-*")))
+
     def test_remove_wraps_partial_asset_root_deletion_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)
@@ -1466,6 +1487,54 @@ class LocalASRSidecarTests(unittest.TestCase):
 
             self.assertEqual(factory.processes[0].terminate_calls, 1)
             self.assertIsNone(manager.process_id)
+
+    def test_start_does_not_replace_unconfirmed_previous_sidecar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            class UnhealthySession(SidecarSession):
+                def get(self, url, timeout=None):
+                    self.get_calls.append((url, timeout))
+                    return FakeResponse(status_code=503)
+
+            class StubbornProcess(FakeProcess):
+                def terminate(self):
+                    self.terminate_calls += 1
+
+                def kill(self):
+                    self.kill_calls += 1
+
+                def wait(self, timeout=None):
+                    raise TimeoutError("still running")
+
+            factory = PopenFactory()
+
+            def create_process(command, **kwargs):
+                factory.calls.append((command, kwargs))
+                process = StubbornProcess()
+                factory.processes.append(process)
+                return process
+
+            manager, installer, _session, _factory = self._manager(
+                directory, session=UnhealthySession(), factory=create_process,
+                startup_timeout=0.05)
+            manager._record_process = Mock(side_effect=OSError("disk full"))
+
+            with self.assertRaises(local_asr.LocalASRSidecarError):
+                manager.start()
+
+            self.assertEqual(len(factory.processes), 1)
+            self.assertFalse(installer.process_record_path.exists())
+            self.assertIsNotNone(manager.process_id)
+
+            with self.assertRaises(local_asr.LocalASRSidecarError) as raised:
+                manager.start()
+
+            self.assertIn("previous local-ASR sidecar is still running", str(raised.exception))
+            self.assertEqual(len(factory.processes), 1)
+
+            process = factory.processes[0]
+            process.alive = False
+            process.returncode = 0
+            manager.stop()
 
     def test_unconfirmed_managed_termination_keeps_process_record(self):
         with tempfile.TemporaryDirectory() as directory:

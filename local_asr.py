@@ -753,7 +753,12 @@ class LocalASRInstaller:
                 self._download(self.asset("runtime"), runtime_archive, callback)
                 self._report(callback, "extract:runtime", 0, 1)
                 self._extract_runtime(runtime_archive, staging)
-                runtime_archive.unlink(missing_ok=True)
+                try:
+                    runtime_archive.unlink(missing_ok=True)
+                except OSError as error:
+                    raise LocalASRError(
+                        "Cannot remove the downloaded local-ASR runtime archive; "
+                        "retry the install.") from error
                 self._report(callback, "extract:runtime", 1, 1)
 
                 model = self.asset("model")
@@ -1253,7 +1258,10 @@ class LocalASRSidecarManager:
                         self._schedule_idle_shutdown_locked()
                     return 0.0
                 with self._lock:
-                    self._stop_locked(keep_sidecar_lock=True)
+                    if not self._stop_locked(keep_sidecar_lock=True):
+                        raise LocalASRSidecarError(
+                            "The previous local-ASR sidecar is still running; "
+                            "retry after it exits.")
                 self._raise_if_cancelled(cancel_event)
                 self.installer.verify(cancel_check=lambda: self._cancelled(
                     cancel_event, startup_cancel, self._shutdown_event))
@@ -1374,9 +1382,9 @@ class LocalASRSidecarManager:
         self._idle_timer = timer
         timer.start()
 
-    def _stop_locked(self, expected_process=None, *, keep_sidecar_lock=False) -> None:
+    def _stop_locked(self, expected_process=None, *, keep_sidecar_lock=False) -> bool:
         if expected_process is not None and self._process is not expected_process:
-            return
+            return False
         self._cancel_idle_shutdown_locked()
         process = self._process
         termination_confirmed = process is None or process.poll() is not None
@@ -1401,6 +1409,7 @@ class LocalASRSidecarManager:
             self._request_path = ""
             if not keep_sidecar_lock:
                 self._release_sidecar_lock_locked()
+        return termination_confirmed
 
     def stop(self) -> None:
         with self._lock:
