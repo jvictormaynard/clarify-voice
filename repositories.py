@@ -135,9 +135,13 @@ class AppConfig:
             "refinement_provider", SUPPORTED_PROVIDERS, "openai")
         if not string("refinement_provider"):
             refinement_provider = (
-                "openai" if PROVIDER_REGISTRY.supports(
-                    provider, ProviderCapability.MULTIMODAL_AUDIO)
-                else provider)
+                provider if (
+                    PROVIDER_REGISTRY.supports(
+                        provider, ProviderCapability.TEXT_GENERATION)
+                    and not PROVIDER_REGISTRY.supports(
+                        provider, ProviderCapability.MULTIMODAL_AUDIO)
+                )
+                else "openai")
 
         provider_defaults = {
             metadata.provider_id: {

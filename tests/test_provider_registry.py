@@ -12,6 +12,7 @@ from provider_types import (
     ProviderConfigurationError,
     ProviderConnection,
     ProviderMetadata,
+    ProviderResponseError,
     RewriteRequest,
     TranscriptionRequest,
     TranslationRequest,
@@ -189,6 +190,61 @@ class ProviderRegistryContractTests(unittest.TestCase):
         self.assertEqual(transcription.text, "transcribed")
         self.assertEqual(translation.text, "translated")
         self.assertEqual(translation.target_language, "de")
+
+    def test_openai_compatible_text_operations_accept_non_empty_strings(self):
+        http = FakeHttp(
+            FakeResponse({
+                "choices": [{"message": {"content": "  rewritten  "}}],
+            }),
+            FakeResponse({
+                "choices": [{"message": {"content": "  translated  "}}],
+            }),
+        )
+        registry = ProviderRegistry()
+        registry.register_openai_compatible(compatible_metadata(), http)
+        connection = ProviderConnection("key", "https://compatible.example/v1")
+
+        rewrite = registry.rewrite("compatible", RewriteRequest(
+            "Raw", "chat-compatible", "en", "Rewrite.", "SOURCE", 0.1,
+        ), connection)
+        translation = registry.translate("compatible", TranslationRequest(
+            "Hello", "chat-compatible", "de", "Translate.", "SOURCE", 0.0,
+        ), connection)
+
+        self.assertEqual(rewrite.text, "rewritten")
+        self.assertEqual(translation.text, "translated")
+
+    def test_openai_compatible_text_operations_reject_invalid_content(self):
+        requests = (
+            ("rewrite", RewriteRequest(
+                "Raw", "chat-compatible", "en", "Rewrite.", "SOURCE", 0.1,
+            )),
+            ("translate", TranslationRequest(
+                "Hello", "chat-compatible", "de", "Translate.", "SOURCE", 0.0,
+            )),
+        )
+
+        for operation, request in requests:
+            for content in (None, [], {}, "   "):
+                with self.subTest(operation=operation, content=content):
+                    http = FakeHttp(FakeResponse({
+                        "choices": [{"message": {"content": content}}],
+                    }))
+                    registry = ProviderRegistry()
+                    registry.register_openai_compatible(
+                        compatible_metadata(), http)
+
+                    with self.assertRaises(ProviderResponseError) as raised:
+                        getattr(registry, operation)(
+                            "compatible", request,
+                            ProviderConnection(
+                                "key", "https://compatible.example/v1"),
+                        )
+
+                    self.assertEqual(
+                        raised.exception.capability,
+                        ProviderCapability.TEXT_GENERATION,
+                    )
 
     def test_desktop_workflow_routes_a_registered_compatible_provider(self):
         http = FakeHttp(FakeResponse({"text": "desktop transcript"}))

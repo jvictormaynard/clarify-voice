@@ -4,6 +4,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import repositories
+from provider_adapters import OpenAICompatibleAdapter
+from provider_registry import build_provider_registry
+from provider_types import ProviderCapability, ProviderMetadata
 from repositories import (
     CONFIG_SCHEMA_VERSION,
     AppConfig,
@@ -15,6 +19,52 @@ from repositories import (
 
 
 class ConfigurationRepositoryTests(unittest.TestCase):
+    def test_missing_refinement_preserves_legacy_capability_defaults(self):
+        gemini = AppConfig.from_mapping({
+            "transcription_provider": "gemini",
+        })
+        groq = AppConfig.from_mapping({
+            "transcription_provider": "groq",
+        })
+
+        self.assertEqual(gemini.selection.refinement_provider, "openai")
+        self.assertEqual(groq.selection.refinement_provider, "groq")
+
+    def test_asr_only_provider_uses_openai_refinement_fallback_on_mapping_and_load(self):
+        registry = build_provider_registry()
+        registry.register(OpenAICompatibleAdapter(ProviderMetadata(
+            provider_id="asr-only",
+            display_name="ASR Only",
+            capabilities=frozenset({
+                ProviderCapability.AUDIO_TRANSCRIPTION,
+            }),
+            default_base_url="https://asr-only.example/v1",
+            audio_model_key="asr-only_audio_model",
+            text_model_key="asr-only_text_model",
+            default_audio_model="asr-only-v1",
+            default_text_model="",
+        ), object()))
+
+        with patch.object(repositories, "PROVIDER_REGISTRY", registry), patch.object(
+                repositories, "SUPPORTED_PROVIDERS", registry.provider_ids):
+            mapped = AppConfig.from_mapping({
+                "transcription_provider": "asr-only",
+            })
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                path.write_text(json.dumps({
+                    "transcription_provider": "asr-only",
+                }), encoding="utf-8")
+                loaded = LocalConfigRepository(
+                    path, defaults={"refinement_provider": ""}).load()
+
+        self.assertEqual(mapped.selection.transcription_provider, "asr-only")
+        self.assertEqual(mapped.selection.refinement_provider, "openai")
+        self.assertEqual(mapped.selection.refinement_model, "gpt-4o-mini")
+        self.assertEqual(loaded.selection.transcription_provider, "asr-only")
+        self.assertEqual(loaded.selection.refinement_provider, "openai")
+        self.assertEqual(loaded.selection.refinement_model, "gpt-4o-mini")
+
     def test_legacy_flat_config_loads_and_unknown_fields_are_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"

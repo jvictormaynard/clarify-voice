@@ -413,9 +413,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         )
         response.raise_for_status()
         try:
-            text = str(response.json()["choices"][0]["message"]["content"]).strip()
+            content = response.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
-            text = ""
+            content = None
+        text = content.strip() if isinstance(content, str) else ""
         if not text:
             raise ProviderResponseError(
                 self.metadata.provider_id,
