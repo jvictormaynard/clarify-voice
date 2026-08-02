@@ -87,6 +87,8 @@ class RepositorySafetyTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("scripts\\test-installer.ps1", content)
         self.assertIn("ClarifyVoice-windows-x64-baseline.msi", content)
+        self.assertIn("Install manifest dependencies", content)
+        self.assertIn("scripts/create_release_manifest.py tests", content)
         self.assertNotIn("AZURE_CLIENT_ID", content)
 
     def test_destructive_installer_smoke_is_hosted_runner_only(self):
