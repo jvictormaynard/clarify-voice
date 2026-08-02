@@ -761,10 +761,11 @@ class WorkflowService:
 
     def _translation_worker(self, session: _Session) -> None:
         try:
-            if session.selection is None:
+            selection = session.selection
+            if selection is None:
                 raise RuntimeError("Translation selection was not captured")
             provider_result = self._provider.translate(
-                session.selection.text, session.target_language
+                selection.text, session.target_language
             )
             translated = provider_result.text
             if not self._is_current(session.operation_id):
@@ -778,13 +779,13 @@ class WorkflowService:
                 return
             self._apply_selection_result(
                 session,
-                session.selection,
+                selection,
                 translated,
                 copied_status="translation_copied",
                 statistic=lambda: self._statistics.record_translation(
                     provider_result.provider_id,
                     provider_result.model,
-                    session.selection.text,
+                    selection.text,
                     translated,
                     session.target_language,
                 ),
