@@ -504,6 +504,7 @@ class LocalASRSidecarTests(unittest.TestCase):
             installer,
             session=session,
             popen_factory=factory,
+            elevation_checker=kwargs.get("elevation_checker", lambda: False),
             startup_timeout=kwargs.get("startup_timeout", 0.5),
             request_timeout=kwargs.get("request_timeout", 0.5),
             idle_seconds=kwargs.get("idle_seconds", 0),
@@ -540,14 +541,13 @@ class LocalASRSidecarTests(unittest.TestCase):
         for elevation in (True, None):
             with self.subTest(elevation=elevation), \
                     tempfile.TemporaryDirectory() as directory:
-                manager, installer, _session, factory = self._manager(directory)
+                manager, installer, _session, factory = self._manager(
+                    directory,
+                    elevation_checker=lambda elevation=elevation: elevation,
+                )
 
                 with patch.object(
-                        local_asr.platform, "system", return_value="Windows"), \
-                        patch.object(
-                            local_asr, "_windows_elevation_state",
-                            return_value=elevation,
-                        ):
+                        local_asr.platform, "system", return_value="Windows"):
                     with self.assertRaises(local_asr.LocalASRSidecarError):
                         manager.start()
 
@@ -560,10 +560,7 @@ class LocalASRSidecarTests(unittest.TestCase):
             manager, _installer, _session, factory = self._manager(directory)
 
             with patch.object(
-                    local_asr.platform, "system", return_value="Windows"), \
-                    patch.object(
-                        local_asr, "_windows_elevation_state", return_value=False,
-                    ):
+                    local_asr.platform, "system", return_value="Windows"):
                 manager.start()
 
             self.assertEqual(factory.calls[0][1]["creationflags"], 0x08000000)
@@ -582,6 +579,26 @@ class LocalASRSidecarTests(unittest.TestCase):
             self.assertTrue(url.startswith("http://127.0.0.1:"))
             self.assertTrue(url.endswith("/inference"))
             self.assertEqual(options["data"]["language"], "pt")
+            self.assertEqual(options["files"]["file"][1], b"RIFF-audio")
+            manager.shutdown()
+
+    def test_transcribe_uses_session_snapshot_without_owning_wav(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager, _installer, session, _factory = self._manager(directory)
+            released_path = Path(directory) / "recording-session.wav"
+            snapshot = b"RIFF-session-snapshot"
+
+            text = manager.transcribe(
+                released_path,
+                "en",
+                audio_bytes=snapshot,
+            )
+
+            self.assertEqual(text, "local text")
+            self.assertFalse(released_path.exists())
+            file_part = session.post_calls[0][1]["files"]["file"]
+            self.assertEqual(file_part, (
+                "recording-session.wav", snapshot, "audio/wav"))
             manager.shutdown()
 
     def test_request_failure_restarts_sidecar_once(self):
@@ -1106,7 +1123,9 @@ class LocalASRProviderAdapterTests(unittest.TestCase):
             result = registry.transcribe(
                 local_asr.PROVIDER_ID,
                 TranscriptionRequest(
-                    audio, local_asr.MODEL_ID, "pt", "unused", "unused", 0.0),
+                    audio, local_asr.MODEL_ID, "pt", "unused", "unused", 0.0,
+                    audio_bytes=b"RIFF-owned-by-recording-session",
+                ),
                 ProviderConnection("", ""),
             )
 
@@ -1121,7 +1140,11 @@ class LocalASRProviderAdapterTests(unittest.TestCase):
                 local_asr.PROVIDER_ID,
                 ProviderCapability.TEXT_GENERATION,
             ))
-            backend.transcribe.assert_called_once_with(audio, "pt")
+            backend.transcribe.assert_called_once_with(
+                audio,
+                "pt",
+                audio_bytes=b"RIFF-owned-by-recording-session",
+            )
             registry.adapter(local_asr.PROVIDER_ID).cancel()
             registry.adapter(local_asr.PROVIDER_ID).shutdown()
             backend.cancel.assert_called_once_with()

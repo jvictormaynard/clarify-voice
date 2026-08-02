@@ -2,9 +2,9 @@
 
 This document describes the isolated groundwork for issue #23. It is not yet a
 user-facing provider. The typed provider registry from #16 is now integrated by
-an explicit adapter, while default registration and application integration
-still wait for the shared recording/process lifecycle (#18) and download/update
-conventions (#22).
+an explicit adapter, and the recording lifecycle from #18 now supplies the
+in-memory audio snapshot contract. Default registration and application
+integration still wait for the download/update conventions from #22.
 
 ## Pinned implementation
 
@@ -67,8 +67,16 @@ record for a later attempt.
 `LocalASRProviderAdapter` implements the merged typed registry contract around
 the narrow `LocalTranscriptionBackend` protocol. It is deliberately not added
 to the default registry yet: the current provider UI assumes credentials and
-model discovery, while local installation/progress and shared cancellation need
-the contracts from #18 and #22.
+model discovery, while local installation/progress and final product wiring
+still need the conventions from #22.
+
+The recording lifecycle from #18 remains authoritative: `RecordingSession`
+owns and deletes its unique WAV, then passes the in-memory `audio_bytes`
+snapshot through `TranscriptionRequest`. The local adapter forwards that
+snapshot to the sidecar and never deletes or claims the recording path. Its
+`cancel()` and `shutdown()` methods own only local inference and the sidecar;
+they do not stop SoX or finalize a recording session. The standalone harness
+can still supply a path, which the manager snapshots before starting inference.
 
 ## Runtime and privacy design
 
@@ -94,8 +102,9 @@ against the committed manifest. The manager then:
   termination is confirmed;
 - restarts the sidecar once after a crash or broken request.
 
-Inference sends the WAV only to the random loopback endpoint. The sidecar does
-not need a cloud credential and the local path contains no cloud fallback. When
+Inference sends the in-memory WAV snapshot only to the random loopback endpoint.
+The sidecar does not need a cloud credential and the local path contains no
+cloud fallback. When
 integrated, switching to a cloud provider must remain an explicit user action;
 there must be no silent fallback. Prompt/refinement mode also needs a clear UI
 warning if it will send the locally produced transcript text to a cloud model.
@@ -119,7 +128,7 @@ py scripts\local_asr_harness.py --root "$env:TEMP\clarify-local-asr" benchmark `
 ```
 
 No Windows benchmark or product acceptance result is claimed by this groundwork
-PR. The following remains pending after #18 and #22 merge:
+PR. The following remains pending after the #22 integration:
 
 | Check | Required evidence | Current state |
 | --- | --- | --- |
@@ -127,11 +136,11 @@ PR. The following remains pending after #18 and #22 merge:
 | Memory | Peak working set from the Windows sidecar process | Pending |
 | Quality | Versioned audio fixture, reference transcript, WER plus transcript review | Pending |
 | Offline | Successful second transcription with network disabled after installation | Pending |
-| Cancellation | Cancel during inference; no sidecar and no temporary WAV remain | Pending integration |
-| Exit cleanup | Quit during inference; no owned process or temporary WAV remains | Pending integration |
+| Cancellation | Cancel during inference; no sidecar and no temporary WAV remain | Unit seam covered; product/Windows pending |
+| Exit cleanup | Quit during inference; no owned process or temporary WAV remains | Unit seam covered; product/Windows pending |
 | Crash recovery | Kill sidecar during inference and observe one bounded restart | Unit covered; Windows pending |
 | Removal | Asset root absent after removal | Unit covered; Windows pending |
 | Cloud regression | Existing provider contract suite unchanged | Typed adapter unit covered; default registration pending |
 
-Do not mark issue #23 closed until those results and the final UI/provider and
-shared-lifecycle integration are in a reviewed follow-up.
+Do not mark issue #23 closed until those results and the final UI/provider
+integration are in a reviewed follow-up.

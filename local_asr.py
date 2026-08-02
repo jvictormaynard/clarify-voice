@@ -65,6 +65,8 @@ class LocalTranscriptionBackend(Protocol):
         audio_path: Path,
         language: str = "en",
         cancel_event: threading.Event | None = None,
+        *,
+        audio_bytes: bytes | None = None,
     ) -> str:
         ...
 
@@ -713,8 +715,10 @@ def cleanup_recorded_sidecar(record_path: Path, expected_executable: Path) -> No
         pass
 
 
-def _require_unelevated_windows_process() -> None:
-    elevation = _windows_elevation_state()
+def _require_unelevated_windows_process(
+    elevation_checker: Callable[[], bool | None],
+) -> None:
+    elevation = elevation_checker()
     if elevation is True:
         raise LocalASRSidecarError(
             "Local ASR refuses to start from an elevated Windows process. "
@@ -737,6 +741,7 @@ class LocalASRSidecarManager:
         request_timeout: float = 120.0,
         session=None,
         popen_factory=None,
+        elevation_checker=None,
     ):
         self.installer = installer or LocalASRInstaller()
         self.idle_seconds = float(idle_seconds)
@@ -746,6 +751,7 @@ class LocalASRSidecarManager:
         if hasattr(self._session, "trust_env"):
             self._session.trust_env = False
         self._popen = popen_factory or subprocess.Popen
+        self._elevation_checker = elevation_checker or _windows_elevation_state
         self._process = None
         self._port = 0
         self._request_path = ""
@@ -844,7 +850,7 @@ class LocalASRSidecarManager:
                     cancel_event, startup_cancel, self._shutdown_event))
                 self._raise_if_cancelled(startup_cancel)
                 self._raise_if_cancelled(cancel_event)
-                _require_unelevated_windows_process()
+                _require_unelevated_windows_process(self._elevation_checker)
                 cleanup_recorded_sidecar(
                     self.installer.process_record_path, self.installer.executable_path)
                 self._raise_if_cancelled(startup_cancel)
@@ -1002,19 +1008,24 @@ class LocalASRSidecarManager:
         self._shutdown_event.set()
         self.cancel()
 
-    def _post_inference(self, audio_path: Path, language: str, result: queue.Queue) -> None:
+    def _post_inference(
+        self,
+        audio_name: str,
+        audio_bytes: bytes,
+        language: str,
+        result: queue.Queue,
+    ) -> None:
         try:
-            with Path(audio_path).open("rb") as audio_file:
-                response = self._session.post(
-                    f"{self.base_url}/inference",
-                    files={"file": (Path(audio_path).name, audio_file, "audio/wav")},
-                    data={
-                        "response_format": "json",
-                        "temperature": "0.0",
-                        "language": language,
-                    },
-                    timeout=(5, self.request_timeout),
-                )
+            response = self._session.post(
+                f"{self.base_url}/inference",
+                files={"file": (audio_name, audio_bytes, "audio/wav")},
+                data={
+                    "response_format": "json",
+                    "temperature": "0.0",
+                    "language": language,
+                },
+                timeout=(5, self.request_timeout),
+            )
             response.raise_for_status()
             payload = response.json()
             text = str(payload.get("text", "")).strip()
@@ -1026,7 +1037,8 @@ class LocalASRSidecarManager:
 
     def _transcribe_once(
         self,
-        audio_path: Path,
+        audio_name: str,
+        audio_bytes: bytes,
         language: str,
         cancel_event: threading.Event | None,
     ) -> str:
@@ -1034,7 +1046,7 @@ class LocalASRSidecarManager:
         result: queue.Queue = queue.Queue(maxsize=1)
         worker = threading.Thread(
             target=self._post_inference,
-            args=(audio_path, language, result),
+            args=(audio_name, audio_bytes, language, result),
             daemon=True,
         )
         worker.start()
@@ -1065,10 +1077,23 @@ class LocalASRSidecarManager:
         audio_path: Path,
         language: str = "en",
         cancel_event: threading.Event | None = None,
+        *,
+        audio_bytes: bytes | None = None,
     ) -> str:
         audio_path = Path(audio_path)
-        if not audio_path.is_file():
-            raise LocalASRError(f"Audio file does not exist: {audio_path}")
+        if audio_bytes is None:
+            try:
+                audio_snapshot = audio_path.read_bytes()
+            except FileNotFoundError as error:
+                raise LocalASRError(
+                    f"Audio file does not exist: {audio_path}") from error
+            except OSError as error:
+                raise LocalASRError(
+                    f"Could not read local audio snapshot: {audio_path.name}") from error
+        else:
+            audio_snapshot = bytes(audio_bytes)
+        if not audio_snapshot:
+            raise LocalASRError("Local audio snapshot is empty")
         operation_cancel = threading.Event()
         with self._lock:
             if self._cancelled(cancel_event, self._shutdown_event):
@@ -1090,7 +1115,7 @@ class LocalASRSidecarManager:
             for attempt in range(2):
                 try:
                     return self._transcribe_once(
-                        audio_path, language, combined_cancel)
+                        audio_path.name, audio_snapshot, language, combined_cancel)
                 except (LocalASRCancelledError, LocalASRInstallRequiredError,
                         LocalASRIntegrityError):
                     raise
@@ -1142,7 +1167,11 @@ class LocalASRProviderAdapter(ProviderAdapter):
                 ProviderCapability.AUDIO_TRANSCRIPTION,
             )
         try:
-            text = self.backend.transcribe(request.audio_path, request.language)
+            text = self.backend.transcribe(
+                request.audio_path,
+                request.language,
+                audio_bytes=request.audio_bytes,
+            )
         except (LocalASRInstallRequiredError, LocalASRIntegrityError) as error:
             raise ProviderConfigurationError(
                 PROVIDER_ID, str(error),
