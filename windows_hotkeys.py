@@ -219,7 +219,7 @@ def paste_focused_control(expected_text: str | None = None,
     fall back to key injection without claiming consumption.
     """
     if user32 is None:
-        user32 = ctypes.windll.user32
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
     try:
         focused = _focused_control_for_foreground(user32)
         class_name = _window_class_name(user32, focused) if focused else None
