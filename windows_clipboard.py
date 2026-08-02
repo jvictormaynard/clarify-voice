@@ -174,13 +174,14 @@ class WindowsClipboardAdapter:
             kernel32.GlobalUnlock(handle)
         return handle
 
-    def _write_open_clipboard_text(self, text: str, user32) -> bool:
+    def _write_open_clipboard_text(self, text: str, user32, handle=None) -> bool:
         """Write text while ``user32.OpenClipboard`` is held."""
         user32.EmptyClipboard.restype = ctypes.c_int
         user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
         user32.SetClipboardData.restype = ctypes.c_void_p
-        data = (str(text) + "\x00").encode("utf-16-le")
-        handle = self._allocate_global_memory(data)
+        if handle is None:
+            data = (str(text) + "\x00").encode("utf-16-le")
+            handle = self._allocate_global_memory(data)
         transferred = False
         try:
             if not user32.EmptyClipboard():
@@ -202,14 +203,20 @@ class WindowsClipboardAdapter:
         user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
         user32.SetClipboardData.restype = ctypes.c_void_p
         entries = []
+        fallback_handle = None
         try:
             # Prepare every allocation before clearing the generated result.
             for item in snapshot.formats:
                 entries.append([
                     item.format_id, self._allocate_global_memory(item.data)])
+            if fallback_text is not None:
+                fallback_handle = self._allocate_global_memory(
+                    (str(fallback_text) + "\x00").encode("utf-16-le"))
         except Exception:
             for _format_id, handle in entries:
                 self._kernel32().GlobalFree(handle)
+            if fallback_handle is not None:
+                self._kernel32().GlobalFree(fallback_handle)
             raise
 
         cleared = False
@@ -228,9 +235,12 @@ class WindowsClipboardAdapter:
             # A format can fail after EmptyClipboard. Re-publish the known
             # owner text before releasing the clipboard lock, so a user write
             # cannot race with a later best-effort repair.
-            if cleared and fallback_text is not None:
+            if cleared and fallback_text is not None and fallback_handle is not None:
+                handle = fallback_handle
+                fallback_handle = None
                 try:
-                    self._write_open_clipboard_text(fallback_text, user32)
+                    self._write_open_clipboard_text(
+                        fallback_text, user32, handle=handle)
                 except Exception:
                     pass
             raise
@@ -238,6 +248,8 @@ class WindowsClipboardAdapter:
             for _format_id, handle in entries:
                 if handle is not None:
                     self._kernel32().GlobalFree(handle)
+            if fallback_handle is not None:
+                self._kernel32().GlobalFree(fallback_handle)
 
     def write_text(self, text: str) -> bool:
         if not self.is_windows:

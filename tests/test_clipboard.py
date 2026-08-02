@@ -257,6 +257,7 @@ class ClipboardSnapshotTests(unittest.TestCase):
 
         self.assertEqual(len(adapter.user32.set_calls), 2)
         self.assertEqual(adapter.user32.empty_calls, 2)
+        self.assertEqual(adapter.allocation_empty_counts, [0, 0])
 
 
 class _FakeFunction:
@@ -311,6 +312,7 @@ class _RestoreAdapter(WindowsClipboardAdapter):
         self.user32 = _RestoreUser32(set_failure_at)
         self.allocation_failure_at = allocation_failure_at
         self.allocations = 0
+        self.allocation_empty_counts = []
 
     def _user32(self):
         return self.user32
@@ -320,6 +322,7 @@ class _RestoreAdapter(WindowsClipboardAdapter):
 
     def _allocate_global_memory(self, data):
         self.allocations += 1
+        self.allocation_empty_counts.append(self.user32.empty_calls)
         if self.allocations == self.allocation_failure_at:
             raise OSError("allocation failed")
         return self.allocations
