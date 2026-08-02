@@ -30,6 +30,7 @@ class RepositorySafetyTests(unittest.TestCase):
     def test_deploy_stages_all_python_modules(self):
         content = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
         self.assertIn('Join-Path $repoRoot "*.py"', content)
+        self.assertIn("${distribution};distribution", content)
         self.assertNotIn('Join-Path $soxDir "*.txt"', content)
         self.assertNotIn('Join-Path $soxDir "LICENSE.GPL.txt"', content)
 
@@ -63,12 +64,161 @@ class RepositorySafetyTests(unittest.TestCase):
             content,
         )
 
+    def test_release_requires_managed_signing_and_provenance(self):
+        content = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "environment: release-signing",
+            "id-token: write",
+            "azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3",
+            "azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2",
+            "scripts\\verify-signature.ps1",
+            "actions/attest-build-provenance@",
+            "ClarifyVoice-windows-x64.msi.sha256",
+            "ClarifyVoice-release-manifest.cab.sha256",
+        ):
+            self.assertIn(required, content)
+        policy = (ROOT / "distribution" / "update-policy.json").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"require_rfc3161_timestamp": true', policy)
+        self.assertNotIn("AZURE_CLIENT_SECRET", content)
+        azure_refs = re.findall(
+            r"uses:\s+(azure/(?:login|artifact-signing-action))@([^\s#]+)",
+            content,
+        )
+        self.assertEqual(len(azure_refs), 4)
+        self.assertEqual(
+            [action for action, _ref in azure_refs].count(
+                "azure/artifact-signing-action"
+            ),
+            3,
+        )
+        for action, action_ref in azure_refs:
+            with self.subTest(action=action):
+                self.assertRegex(action_ref, r"^[0-9a-f]{40}$")
+        self.assertNotRegex(
+            content,
+            r"uses:\s+azure/(?:login|artifact-signing-action)@v\d+",
+        )
+
+    def test_signature_verification_requires_independent_rfc3161_check(self):
+        content = (ROOT / "scripts" / "verify-signature.ps1").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "Get-AuthenticodeSignature",
+            "signtool.exe",
+            "CryptQueryObject",
+            "CryptMsgGetParam",
+            "CmsgSignerUnauthAttrParam",
+            "Marshal.SizeOf",
+            "IntPtr.Add",
+            "CertQueryContentPkcs7SignedEmbed",
+            "CertQueryFormatBinary",
+            "1.2.840.113549.1.9.16.2.14",
+            "1.2.840.113549.1.9.6",
+            "verify /pa /all /tw",
+            "Timestamp status: $timestampStatus",
+            "Timestamp protocol: $timestampProtocol",
+            "Timestamp signer:",
+            "Timestamp thumbprint:",
+        ):
+            self.assertIn(required, content)
+        self.assertNotIn("Index  Algorithm  Timestamp", content)
+        self.assertNotIn("$timestampProtocols", content)
+        self.assertNotIn("/v", content)
+        self.assertNotIn("Marshal.ReadIntPtr", content)
+
+    def test_ci_exercises_installer_lifecycle_without_signing_secrets(self):
+        content = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("scripts\\test-installer.ps1", content)
+        self.assertIn("ClarifyVoice-windows-x64-baseline.msi", content)
+        self.assertIn("-PayloadIdentity baseline-msi-0.1.1", content)
+        self.assertIn("-SourceExe dist\\baseline\\ClarifyVoice.exe", content)
+        self.assertIn("-BaselinePayloadSha256", content)
+        self.assertIn("-CurrentPayloadSha256", content)
+        self.assertIn("payloads must be byte-distinct", content)
+        self.assertIn("Install manifest dependencies", content)
+        self.assertIn("scripts/create_release_manifest.py tests", content)
+        self.assertNotIn("AZURE_CLIENT_ID", content)
+
+    def test_destructive_installer_smoke_is_hosted_runner_only(self):
+        content = (ROOT / "scripts" / "test-installer.ps1").read_text(encoding="utf-8")
+        guard_call = content.index("Assert-DisposableHostedRunner\n\n$baseline")
+        first_write = content.index("New-Item $configDirectory")
+        clean_target_call = content.index("Assert-CleanSmokeTarget\nNew-Item")
+
+        self.assertLess(guard_call, first_write)
+        self.assertLess(clean_target_call, first_write)
+        for required in (
+            'CI = "true"',
+            'GITHUB_ACTIONS = "true"',
+            'RUNNER_ENVIRONMENT = "github-hosted"',
+            'RUNNER_OS = "Windows"',
+            "GITHUB_WORKSPACE",
+            "RUNNER_TEMP",
+            "pre-existing ClarifyVoice state",
+            "pre-existing ClarifyVoice autostart entry",
+            "no longer the smoke-test sentinel",
+        ):
+            self.assertIn(required, content)
+
+        for operation, expected_hash in (
+            ("clean install", "$baselinePayloadHash"),
+            ("upgrade", "$currentPayloadHash"),
+            ("repair", "$currentPayloadHash"),
+            ("manual rollback", "$baselinePayloadHash"),
+        ):
+            self.assertIn(f'Assert-Installed "{operation}" {expected_hash}', content)
+        self.assertIn("Get-FileHash $installedExe -Algorithm SHA256", content)
+        self.assertIn("Uninstall left the installed executable behind", content)
+
+    def test_installer_and_update_contract_files_exist(self):
+        required = [
+            "distribution/update-policy.json",
+            "installer/ClarifyVoice.wxs",
+            "scripts/build-installer.ps1",
+            "scripts/test-installer.ps1",
+            "scripts/create_release_manifest.py",
+            "scripts/build-manifest-container.ps1",
+            "scripts/verify-signature.ps1",
+            "update_security.py",
+            "version.py",
+        ]
+        for relative_path in required:
+            self.assertTrue((ROOT / relative_path).is_file(), relative_path)
+
+        build = (ROOT / "scripts" / "build.ps1").read_text(encoding="utf-8")
+        self.assertIn("${distribution};distribution", build)
+
+        installer = (ROOT / "installer" / "ClarifyVoice.wxs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('Id="RemoveAutostartOnUninstall"', installer)
+        self.assertIn(
+            'Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"',
+            installer,
+        )
+        self.assertNotIn("<RemoveRegistryValue", installer)
+
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn("if not _is_msi_installed_build():", app_source)
+        self.assertNotIn(
+            'if not IS_WIN or not getattr(sys, "frozen", False):\n'
+            "                update_status.configure(",
+            app_source,
+        )
+
     def test_package_scripts_are_documented_maintainer_aliases(self):
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertTrue(package["private"])
         self.assertEqual(
             set(package["scripts"]),
-            {"test", "check", "build", "setup", "deploy"},
+            {"test", "check", "build", "installer", "setup", "deploy"},
         )
 
     def test_open_source_community_files_exist(self):

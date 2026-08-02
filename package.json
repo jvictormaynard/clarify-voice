@@ -5,6 +5,7 @@
     "test": "python3 -m unittest discover -s tests -v",
     "check": "python3 -m compileall -q app.py repositories.py secret_store.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_registry.py tests",
     "build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build.ps1",
+    "installer": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-installer.ps1",
     "setup": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup.ps1 -Dev",
     "deploy": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/deploy.ps1"
   }

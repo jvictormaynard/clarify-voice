@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $repoExtra = Join-Path $repoRoot "extra"
 $repoAssets = Join-Path $repoRoot "assets"
+$repoDistribution = Join-Path $repoRoot "distribution"
 $buildRoot = Join-Path $env:TEMP "clarify-voice-build"
 $venvDir = Join-Path $buildRoot "venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
@@ -144,9 +145,11 @@ New-Item $sourceDir, $distDir, $workDir, $specDir -ItemType Directory -Force | O
 $source = Join-Path $sourceDir "app.py"
 $extra = Join-Path $sourceDir "extra"
 $assets = Join-Path $sourceDir "assets"
+$distribution = Join-Path $sourceDir "distribution"
 Copy-Item (Join-Path $repoRoot "*.py") $sourceDir -Force
 Copy-Item $repoExtra $extra -Recurse -Force
 Copy-Item $repoAssets $assets -Recurse -Force
+Copy-Item $repoDistribution $distribution -Recurse -Force
 # Keep the linked SoX runtime intact, but omit files unused by the app.
 Remove-Item (Join-Path $extra "sox.zip") -Force -ErrorAction SilentlyContinue
 $soxDir = Join-Path $extra "sox-14.4.2"
@@ -168,6 +171,7 @@ $pyinstallerArgs = @(
     "--specpath", $specDir,
     "--add-data", "${extra};extra",
     "--add-data", "${assets};assets",
+    "--add-data", "${distribution};distribution",
     "--hidden-import", "sounddevice",
     "--hidden-import", "_sounddevice_data",
     "--exclude-module", "numpy",

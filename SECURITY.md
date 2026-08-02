@@ -44,6 +44,9 @@ be coordinated after impact and remediation are understood.
   where the filesystem supports them. Do not share that file.
 - Portable executables are not currently code-signed. Verify the SHA-256 file
   attached to a release.
+- The managed signing and secure update rollout is tracked in
+  [Windows distribution security](docs/windows-distribution.md) and must remain
+  fail-closed until its prerequisites and manual acceptance gates are complete.
 - Custom endpoints can receive the same content as an official provider. Only
   configure endpoints you trust.
 - The app intentionally does not bundle `.env`; a build that contains one must
@@ -55,3 +58,10 @@ Git history before publication.
 
 Deleting only `ClarifyVoice.exe` leaves local data in place. Remove the secret
 file or the whole ClarifyVoice data directory to erase stored credentials.
+
+For a suspected release-signing compromise, immediately disable the federated
+release identity and signer role, revoke the affected Artifact Signing profile,
+preserve audit evidence, remove the compromised manifest/release without
+replacing assets in place, publish an advisory, and recover on a new commit and
+tag. The complete procedure is in
+[Windows distribution security](docs/windows-distribution.md#rotation-and-emergency-revocation).

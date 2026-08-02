@@ -28,7 +28,14 @@ REQUIRED_FILES = (
     "scripts/install_bootstrap_tools.py",
     "scripts/add_sbom_component.py",
     "scripts/sox-runtime-manifest.json",
+    "version.py",
     "scripts/build.ps1",
+    "scripts/build-installer.ps1",
+    "scripts/test-installer.ps1",
+    "scripts/create_release_manifest.py",
+    "scripts/verify-signature.ps1",
+    "distribution/update-policy.json",
+    "docs/windows-distribution.md",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
 )
@@ -37,6 +44,10 @@ REQUIRED_ASSETS = (
     "ClarifyVoice.exe",
     "ClarifyVoice.exe.sha256",
     "ClarifyVoice.sbom.json",
+    "ClarifyVoice-windows-x64.msi",
+    "ClarifyVoice-windows-x64.msi.sha256",
+    "ClarifyVoice-release-manifest.cab",
+    "ClarifyVoice-release-manifest.cab.sha256",
     "ClarifyVoice-windows-x64.zip",
     "sox-14.4.2-source.tar.gz",
 )
@@ -98,6 +109,15 @@ def main() -> int:
             print(f"FAIL: {failure}")
         return 1
 
+    version_source = (repo / "version.py").read_text(encoding="utf-8")
+    version_match = re.search(
+        r'^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"$',
+        version_source,
+        re.MULTILINE,
+    )
+    if not version_match or version_match.group(1) != version:
+        failures.append("version.py does not match the proposed release version")
+
     tags = version_tags(repo)
     existing_tags = {existing_tag for _, existing_tag in tags}
     if tag in existing_tags:
@@ -148,6 +168,23 @@ def main() -> int:
         failures.append("release SBOM is not generated from the runtime lock")
     if "attest-build-provenance" not in release_workflow:
         failures.append("release workflow does not publish artifact provenance")
+    for required_gate in (
+        "azure/login@",
+        "azure/artifact-signing-action@",
+        "verify-signature.ps1",
+        "actions/attest-build-provenance@",
+    ):
+        if required_gate not in release_workflow:
+            failures.append(f"release workflow is missing gate: {required_gate}")
+    azure_action_refs = re.findall(
+        r"uses:\s+(azure/(?:login|artifact-signing-action))@([^\s#]+)",
+        release_workflow,
+    )
+    if len(azure_action_refs) != 4:
+        failures.append("release workflow must contain exactly four Azure action uses")
+    for action, action_ref in azure_action_refs:
+        if not re.fullmatch(r"[0-9a-f]{40}", action_ref):
+            failures.append(f"release workflow uses mutable {action} ref: {action_ref}")
 
     readme = (repo / "README.md").read_text(encoding="utf-8")
     readme_pt = (repo / "docs/README.pt-BR.md").read_text(encoding="utf-8")

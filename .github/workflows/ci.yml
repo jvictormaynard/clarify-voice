@@ -83,7 +83,10 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Compile Python sources
-        run: python -m compileall -q app.py repositories.py secret_store.py desktop_state.py windows_hotkeys.py windows_clipboard.py tests
+        run: >-
+          python -m compileall -q app.py desktop_state.py repositories.py
+          secret_store.py update_security.py version.py windows_clipboard.py
+          windows_hotkeys.py scripts/create_release_manifest.py tests
 
   package:
     name: Package Windows executable
@@ -109,14 +112,64 @@ jobs:
       - name: Install locked build dependencies
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt -c requirements-lock-windows.txt
 
+      - name: Install manifest dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
       - name: Build portable executable
         shell: pwsh
-        run: .\scripts\build.ps1
+        run: |
+          .\scripts\build.ps1
+          .\scripts\build.ps1 `
+            -OutputDirectory dist\baseline `
+            -PayloadIdentity baseline-msi-0.1.1
+
+          $baselinePayload = "dist\baseline\ClarifyVoice.exe"
+          $currentPayload = "dist\ClarifyVoice.exe"
+          $baselineHash = (Get-FileHash $baselinePayload -Algorithm SHA256).Hash
+          $currentHash = (Get-FileHash $currentPayload -Algorithm SHA256).Hash
+          if ($baselineHash -eq $currentHash) {
+            throw "Baseline and current executable payloads must be byte-distinct."
+          }
+
+      - name: Build baseline and current installers
+        shell: pwsh
+        run: |
+          .\scripts\build-installer.ps1 `
+            -Version 0.1.1 `
+            -SourceExe dist\baseline\ClarifyVoice.exe `
+            -OutputPath dist\ClarifyVoice-windows-x64-baseline.msi
+          .\scripts\build-installer.ps1 `
+            -SourceExe dist\ClarifyVoice.exe `
+            -OutputPath dist\ClarifyVoice-windows-x64.msi
+
+      - name: Test install, upgrade, repair, rollback, and uninstall
+        shell: pwsh
+        run: |
+          .\scripts\test-installer.ps1 `
+            -BaselineInstaller dist\ClarifyVoice-windows-x64-baseline.msi `
+            -CurrentInstaller dist\ClarifyVoice-windows-x64.msi `
+            -BaselinePayloadSha256 $((Get-FileHash dist\baseline\ClarifyVoice.exe -Algorithm SHA256).Hash) `
+            -CurrentPayloadSha256 $((Get-FileHash dist\ClarifyVoice.exe -Algorithm SHA256).Hash)
+
+      - name: Validate release manifest contract
+        shell: pwsh
+        run: |
+          $version = python -c "from version import __version__; print(__version__)"
+          python .\scripts\create_release_manifest.py `
+            --version $version `
+            --installer dist\ClarifyVoice-windows-x64.msi `
+            --output dist\release-manifest.json
+          .\scripts\build-manifest-container.ps1 `
+            -Manifest dist\release-manifest.json `
+            -OutputPath dist\ClarifyVoice-release-manifest.cab
 
       - name: Upload smoke-test build
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ClarifyVoice-windows-${{ github.sha }}
-          path: dist/ClarifyVoice.exe
+          path: |
+            dist/ClarifyVoice.exe
+            dist/ClarifyVoice-windows-x64.msi
+            dist/ClarifyVoice-release-manifest.cab
           if-no-files-found: error
           retention-days: 7

@@ -850,6 +850,69 @@ class ProviderTests(unittest.TestCase):
         app._set_autostart(False, registry)
         self.assertFalse(app._is_autostart_enabled(registry))
 
+    @patch("app.IS_WIN", True)
+    def test_msi_install_registration_enables_secure_updates(self):
+        class Key:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Registry:
+            HKEY_CURRENT_USER = 1
+            REG_SZ = 1
+
+            @staticmethod
+            def OpenKey(_root, path):
+                self.assertEqual(path, r"Software\ClarifyVoice")
+                return Key()
+
+            @staticmethod
+            def QueryValueEx(_key, name):
+                self.assertEqual(name, "InstallLocation")
+                return "C:\\Users\\runner\\AppData\\Local\\Programs\\ClarifyVoice\\", 1
+
+        with patch.object(app.sys, "frozen", True, create=True):
+            self.assertTrue(app._is_msi_installed_build(
+                Registry(),
+                r"c:\users\RUNNER\AppData\Local\Programs\ClarifyVoice\ClarifyVoice.exe",
+            ))
+
+    @patch("app.IS_WIN", True)
+    def test_portable_frozen_build_cannot_enable_msi_updates(self):
+        class Key:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Registry:
+            HKEY_CURRENT_USER = 1
+            REG_SZ = 1
+
+            @staticmethod
+            def OpenKey(_root, _path):
+                return Key()
+
+            @staticmethod
+            def QueryValueEx(_key, _name):
+                return r"C:\Users\runner\AppData\Local\Programs\ClarifyVoice", 1
+
+        with patch.object(app.sys, "frozen", True, create=True):
+            self.assertFalse(app._is_msi_installed_build(
+                Registry(), r"D:\Portable\ClarifyVoice.exe"))
+
+        class MissingRegistry(Registry):
+            @staticmethod
+            def OpenKey(_root, _path):
+                raise FileNotFoundError("InstallLocation")
+
+        with patch.object(app.sys, "frozen", True, create=True):
+            self.assertFalse(app._is_msi_installed_build(
+                MissingRegistry(), r"D:\Portable\ClarifyVoice.exe"))
+
     def test_models_and_settings_labels_follow_interface_language(self):
         self.assertEqual(app.STRINGS["en"]["models_section"], "Models")
         self.assertEqual(app.STRINGS["pt"]["models_section"], "Modelos")

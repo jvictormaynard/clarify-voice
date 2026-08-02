@@ -28,6 +28,17 @@ textos selecionados usando Gemini, OpenAI, Groq ou endpoints compatíveis.
 
 ## Instalação no Windows
 
+### Instalador Windows (em preparação)
+
+O repositório já contém o contrato fail-closed do MSI e da atualização
+autenticada, mas o recurso não deve ser publicado ou considerado pronto antes
+dos gates de assinatura gerenciada, armazenamento seguro de credenciais,
+proveniência e validação manual. Quando uma release futura incluir o arquivo
+`ClarifyVoice-windows-x64.msi`, instale somente se o publisher Authenticode e o
+SHA-256 corresponderem à release. Consulte [segurança da distribuição e das
+atualizações](windows-distribution.md) para os comportamentos de instalação,
+upgrade, reparo, rollback e desinstalação.
+
 ### Executável portátil
 
 1. Abra a [versão mais recente](https://github.com/jvictormaynard/clarify-voice/releases/latest).
@@ -36,7 +47,7 @@ textos selecionados usando Gemini, OpenAI, Groq ou endpoints compatíveis.
 4. Entre em **Models**, adicione sua chave, valide o provedor e escolha os
    modelos de transcrição e refinamento.
 
-O executável ainda não possui assinatura de código. Por isso, o Windows
+Os executáveis publicados até a v0.1.2 ainda não possuem assinatura de código. Por isso, o Windows
 SmartScreen pode pedir confirmação no primeiro uso. Cada release inclui um
 arquivo SHA-256 para conferir a integridade do download.
 

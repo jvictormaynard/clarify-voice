@@ -1,0 +1,116 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="ClarifyVoice"
+    Manufacturer="Joao Victor Maynard Mota"
+    Version="$(var.Version)"
+    UpgradeCode="{630EBBE5-7E4A-4F41-9280-BC9DA551AB21}"
+    Scope="perUser"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <SummaryInformation
+      Description="ClarifyVoice per-user Windows installer"
+      Manufacturer="Joao Victor Maynard Mota" />
+    <MajorUpgrade AllowDowngrades="yes" Schedule="afterInstallExecute" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="ClarifyVoiceIcon" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="ClarifyVoiceIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/jvictormaynard/clarify-voice" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDirectory" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="ClarifyVoice">
+          <Component Id="ApplicationFiles" Guid="{F56E794A-CC8F-4140-A609-95DF2DD6D1AB}">
+            <File
+              Id="ClarifyVoiceExecutable"
+              Source="$(var.SourceExe)"
+              Name="ClarifyVoice.exe"
+              KeyPath="yes"
+              Checksum="yes" />
+            <File Id="LicenseFile" Source="$(var.LicenseFile)" Name="LICENSE.txt" />
+            <File
+              Id="ThirdPartyNotices"
+              Source="$(var.NoticesFile)"
+              Name="THIRD_PARTY_NOTICES.md" />
+          </Component>
+          <Component Id="InstallMetadata" Guid="{3142B30C-6E1E-47A9-BDE2-23FC4D5ACCC1}">
+            <RegistryValue
+              Root="HKCU"
+              Key="Software\ClarifyVoice"
+              Name="InstallLocation"
+              Type="string"
+              Value="[INSTALLFOLDER]"
+              KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ClarifyVoiceProgramMenuFolder" Name="ClarifyVoice">
+        <Component Id="StartMenuShortcut" Guid="{D5CF5163-F585-46A9-8832-9232873943B3}">
+          <Shortcut
+            Id="StartMenuClarifyVoice"
+            Name="ClarifyVoice"
+            Description="Voice transcription and text refinement"
+            Target="[INSTALLFOLDER]ClarifyVoice.exe"
+            WorkingDirectory="INSTALLFOLDER"
+            Icon="ClarifyVoiceIcon" />
+          <RemoveFolder Id="RemoveProgramMenuFolder" On="uninstall" />
+          <RegistryValue
+            Root="HKCU"
+            Key="Software\ClarifyVoice"
+            Name="StartMenuShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="{17AA135F-0670-4256-8527-9AD3020D8201}">
+        <Shortcut
+          Id="DesktopClarifyVoice"
+          Name="ClarifyVoice"
+          Description="Voice transcription and text refinement"
+          Target="[INSTALLFOLDER]ClarifyVoice.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="ClarifyVoiceIcon" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\ClarifyVoice"
+          Name="DesktopShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="ClarifyVoice" Level="1">
+      <ComponentRef Id="ApplicationFiles" />
+      <ComponentRef Id="InstallMetadata" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+
+    <!-- Windows Installer cannot remove one arbitrary named registry value only
+         on uninstall. Use the fixed system reg.exe path and a fixed value name;
+         skip this cleanup while a major upgrade or manual rollback replaces the
+         product so the user's autostart preference survives. -->
+    <CustomAction
+      Id="RemoveAutostartOnUninstall"
+      Directory="SystemFolder"
+      ExeCommand="reg.exe delete &quot;HKCU\Software\Microsoft\Windows\CurrentVersion\Run&quot; /v ClarifyVoice /f"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom
+        Action="RemoveAutostartOnUninstall"
+        Before="RemoveFiles"
+        Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>
