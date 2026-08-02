@@ -20,6 +20,11 @@ from urllib.parse import urlsplit
 
 import requests
 
+from provider_types import (
+    ProviderCapability,
+    ProviderError as DomainProviderError,
+)
+
 
 TIMEOUTS = {
     "model_discovery": (3.05, 12.0),
@@ -74,7 +79,15 @@ class CancellationToken:
                 operation_id=operation_id)
 
 
-class ProviderError(RuntimeError):
+_OPERATION_CAPABILITIES = {
+    "model_discovery": ProviderCapability.MODEL_DISCOVERY,
+    "validation": ProviderCapability.MODEL_DISCOVERY,
+    "transcription": ProviderCapability.AUDIO_TRANSCRIPTION,
+    "text_generation": ProviderCapability.TEXT_GENERATION,
+}
+
+
+class ProviderError(DomainProviderError):
     code = "provider_error"
 
     def __init__(
@@ -85,7 +98,8 @@ class ProviderError(RuntimeError):
         self.operation = operation
         self.status_code = status_code
         self.operation_id = operation_id
-        super().__init__(self.code)
+        super().__init__(
+            provider, self.code, _OPERATION_CAPABILITIES.get(operation))
 
 
 class AuthenticationError(ProviderError):
@@ -421,7 +435,11 @@ class ProviderHttpClient:
             except requests.RequestException as error:
                 typed_error = _network_error(
                     error, provider, operation, operation_id)
-                should_retry = retryable and attempt < attempts
+                should_retry = (
+                    retryable
+                    and isinstance(error, (requests.ConnectionError, requests.Timeout))
+                    and attempt < attempts
+                )
                 delay = self._backoff(attempt) if should_retry else None
                 self._log(
                     event="provider_http_error", provider=provider,
@@ -470,6 +488,9 @@ class ProviderHttpClient:
                 status_code=status,
                 error_type=typed_error.code, retry_delay_seconds=delay)
             if not should_retry:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
                 raise typed_error
             close = getattr(response, "close", None)
             if callable(close):

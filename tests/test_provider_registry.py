@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import app
 from provider_adapters import GeminiAdapter, OpenAICompatibleAdapter
+from provider_http import InvalidResponseError
 from provider_registry import ProviderRegistry, build_provider_registry
 from provider_types import (
     ModelCatalog,
@@ -12,7 +13,6 @@ from provider_types import (
     ProviderConfigurationError,
     ProviderConnection,
     ProviderMetadata,
-    ProviderResponseError,
     RewriteRequest,
     TranscriptionRequest,
     TranslationRequest,
@@ -48,11 +48,12 @@ class FakeHttp:
             raise AssertionError(f"unexpected {method} request to {url}")
         return self.responses.pop(0)
 
-    def get(self, url, **kwargs):
-        return self._request("GET", url, kwargs)
+    def request(self, method, url, **kwargs):
+        return self._request(method.upper(), url, kwargs)
 
-    def post(self, url, **kwargs):
-        return self._request("POST", url, kwargs)
+    @staticmethod
+    def json(response, **_kwargs):
+        return response.json()
 
 
 def compatible_metadata(provider_id="compatible", capabilities=None):
@@ -83,7 +84,8 @@ class ProviderRegistryContractTests(unittest.TestCase):
         self.directory.cleanup()
 
     def test_default_registry_is_authoritative_for_ids_metadata_and_capabilities(self):
-        registry = build_provider_registry(FakeHttp())
+        http = FakeHttp()
+        registry = build_provider_registry(http)
 
         self.assertEqual(registry.provider_ids, ("gemini", "openai", "groq"))
         self.assertEqual(registry.describe("openai").display_name, "OpenAI")
@@ -93,6 +95,9 @@ class ProviderRegistryContractTests(unittest.TestCase):
             "gemini", ProviderCapability.MULTIMODAL_AUDIO))
         self.assertFalse(registry.supports(
             "groq", ProviderCapability.MULTIMODAL_AUDIO))
+        for provider_id in registry.provider_ids:
+            with self.subTest(provider_id=provider_id):
+                self.assertIs(registry.adapter(provider_id).http, http)
 
     def test_gemini_contract_discovers_canonical_ids_and_uses_custom_proxy_auth(self):
         http = FakeHttp(
@@ -133,6 +138,11 @@ class ProviderRegistryContractTests(unittest.TestCase):
             http.calls[1][1],
             "https://proxy.example/v1beta/models/gemini-3-flash:generateContent",
         )
+        self.assertEqual(http.calls[0][2]["operation"], "model_discovery")
+        self.assertEqual(http.calls[1][2]["operation"], "transcription")
+        self.assertFalse(http.calls[1][2]["safe_to_retry"])
+        self.assertNotIn("timeout", http.calls[0][2])
+        self.assertNotIn("timeout", http.calls[1][2])
 
     def test_openai_compatible_contract_filters_catalog_and_uses_api_ids(self):
         http = FakeHttp(
@@ -170,17 +180,24 @@ class ProviderRegistryContractTests(unittest.TestCase):
             http.calls[1][2]["data"]["model"], "whisper-compatible")
         self.assertEqual(
             http.calls[2][1], "https://proxy.example/v1/chat/completions")
+        self.assertEqual(http.calls[0][2]["operation"], "model_discovery")
+        self.assertEqual(http.calls[1][2]["operation"], "transcription")
+        self.assertEqual(http.calls[2][2]["operation"], "text_generation")
+        self.assertFalse(http.calls[1][2]["safe_to_retry"])
+        self.assertFalse(http.calls[2][2]["safe_to_retry"])
+        for _method, _url, kwargs in http.calls:
+            self.assertNotIn("timeout", kwargs)
 
     def test_audio_upload_uses_snapshot_without_opening_recording_path(self):
         http = FakeHttp(FakeResponse({"text": "snapshot transcript"}))
         uploaded = []
-        original_post = http.post
+        original_request = http.request
 
-        def capture_post(url, **kwargs):
+        def capture_request(method, url, **kwargs):
             uploaded.append(kwargs["files"]["file"][1].read())
-            return original_post(url, **kwargs)
+            return original_request(method, url, **kwargs)
 
-        http.post = capture_post
+        http.request = capture_request
         registry = ProviderRegistry()
         registry.register_openai_compatible(compatible_metadata(), http)
         request = TranscriptionRequest(
@@ -257,7 +274,7 @@ class ProviderRegistryContractTests(unittest.TestCase):
                     registry.register_openai_compatible(
                         compatible_metadata(), http)
 
-                    with self.assertRaises(ProviderResponseError) as raised:
+                    with self.assertRaises(InvalidResponseError) as raised:
                         getattr(registry, operation)(
                             "compatible", request,
                             ProviderConnection(

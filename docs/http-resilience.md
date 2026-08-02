@@ -54,7 +54,10 @@ in an exception, log record, diagnostic export, or interface message.
 Cancellation is cooperative. Adapters pass a `CancellationToken`; the client
 checks it before a request, after the response, and around retry waits. A result
 received after cancellation raises `ProviderCancelledError` instead of being
-returned to the caller.
+returned to the caller. The underlying synchronous request cannot be interrupted
+mid-socket; cancellation becomes effective at the next check or configured
+timeout, while the UI immediately detaches from that request and ignores its
+late result.
 
 ## Local logs and export
 

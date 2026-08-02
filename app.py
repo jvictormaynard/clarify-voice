@@ -21,12 +21,16 @@ from pathlib import Path
 # Keep shutdown deadlines independent from tests/integrations that replace
 # the module-level ``time`` helper to control recorder sleeps.
 _REAL_TIME = time
-
-import requests
-
 from desktop_state import WorkflowController
 from provider_adapters import normalize_provider_url
-from provider_registry import PROVIDER_REGISTRY
+from provider_http import (
+    CancellationToken,
+    ProviderError as HttpProviderError,
+    TIMEOUTS,
+    export_diagnostics,
+    localized_error_message,
+)
+from provider_registry import PROVIDER_HTTP, PROVIDER_REGISTRY
 from provider_types import (
     ProviderCapability,
     ProviderConnection,
@@ -116,6 +120,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_PATH = DATA_DIR / "temp_recording.wav"
 CONFIG_PATH = DATA_DIR / "config.json"
 STATS_PATH = DATA_DIR / "usage_stats.json"
+HTTP_LOG_DIR = DATA_DIR / "logs"
+APP_VERSION = "0.1.2"
 _STATS_LOCK = threading.Lock()
 PILL_FADE_IN_SECONDS = 0.12
 PILL_FADE_OUT_SECONDS = 0.14
@@ -1611,6 +1617,10 @@ STRINGS = {
         "prompt_model": "Text refinement model (Prompt mode)",
         "openai_prompt_hint": "Whisper transcribes; this model organizes the result.",
         "gemini_proxy_hint": "Proxy requires /v1beta/models/{model}:generateContent",
+        "diagnostic_export": "Export diagnostics",
+        "diagnostic_export_hint": "Save safe version, environment, and recent error metadata. No audio or text is included.",
+        "diagnostic_exported": "Diagnostic file saved in the ClarifyVoice data folder.",
+        "diagnostic_export_failed": "Could not export diagnostics.",
         "apply": "Apply", "save": "Save", "cancel": "Cancel",
     },
     "pt": {
@@ -1667,6 +1677,10 @@ STRINGS = {
         "prompt_model": "Modelo de refinamento do texto (modo Prompt)",
         "openai_prompt_hint": "O Whisper transcreve; este modelo organiza o resultado.",
         "gemini_proxy_hint": "O proxy precisa expor /v1beta/models/{model}:generateContent",
+        "diagnostic_export": "Exportar diagnóstico",
+        "diagnostic_export_hint": "Salva versão, ambiente e erros recentes seguros. Nenhum áudio ou texto é incluído.",
+        "diagnostic_exported": "Arquivo de diagnóstico salvo na pasta de dados do ClarifyVoice.",
+        "diagnostic_export_failed": "Não foi possível exportar o diagnóstico.",
         "apply": "Aplicar", "save": "Salvar", "cancel": "Cancelar",
     },
     "es": {
@@ -1723,6 +1737,10 @@ STRINGS = {
         "prompt_model": "Modelo de refinamiento de texto (modo Prompt)",
         "openai_prompt_hint": "Whisper transcribe; este modelo organiza el resultado.",
         "gemini_proxy_hint": "El proxy debe exponer /v1beta/models/{model}:generateContent",
+        "diagnostic_export": "Exportar diagnóstico",
+        "diagnostic_export_hint": "Guarda versión, entorno y errores recientes seguros. No incluye audio ni texto.",
+        "diagnostic_exported": "Archivo de diagnóstico guardado en la carpeta de datos de ClarifyVoice.",
+        "diagnostic_export_failed": "No se pudo exportar el diagnóstico.",
         "apply": "Aplicar", "save": "Guardar", "cancel": "Cancelar",
     },
     "de": {
@@ -1779,6 +1797,10 @@ STRINGS = {
         "prompt_model": "Modell zur Textverfeinerung (Prompt-Modus)",
         "openai_prompt_hint": "Whisper transkribiert; dieses Modell strukturiert das Ergebnis.",
         "gemini_proxy_hint": "Der Proxy muss /v1beta/models/{model}:generateContent bereitstellen",
+        "diagnostic_export": "Diagnosedaten exportieren",
+        "diagnostic_export_hint": "Speichert sichere Versions-, Umgebungs- und Fehlermetadaten. Audio und Text sind nicht enthalten.",
+        "diagnostic_exported": "Diagnosedatei im ClarifyVoice-Datenordner gespeichert.",
+        "diagnostic_export_failed": "Diagnosedaten konnten nicht exportiert werden.",
         "apply": "Anwenden", "save": "Speichern", "cancel": "Abbrechen",
     },
     "ru": {
@@ -1835,6 +1857,10 @@ STRINGS = {
         "prompt_model": "Модель редактирования текста (режим «Промпт»)",
         "openai_prompt_hint": "Whisper выполняет транскрипцию; эта модель структурирует результат.",
         "gemini_proxy_hint": "Прокси должен предоставлять /v1beta/models/{model}:generateContent",
+        "diagnostic_export": "Экспорт диагностики",
+        "diagnostic_export_hint": "Сохраняет безопасные сведения о версии, среде и ошибках. Аудио и текст не включаются.",
+        "diagnostic_exported": "Файл диагностики сохранён в папке данных ClarifyVoice.",
+        "diagnostic_export_failed": "Не удалось экспортировать диагностику.",
         "apply": "Применить", "save": "Сохранить", "cancel": "Отмена",
     },
 }
@@ -1845,12 +1871,40 @@ def _provider_url(base_url: str, version: str, endpoint: str) -> str:
 
 
 def _http_error(provider: str, error) -> str:
-    if isinstance(error, requests.HTTPError) and error.response is not None:
-        detail = error.response.text.strip().replace("\n", " ")[:300]
-        return f"[Error: {provider} HTTP {error.response.status_code}: {detail}]"
+    if isinstance(error, HttpProviderError):
+        message = localized_error_message(
+            error, str(APP_CONFIG.get("ui_language", "en")))
+        diagnostics = []
+        if error.status_code is not None:
+            diagnostics.append(f"HTTP {error.status_code}")
+        if error.operation_id:
+            diagnostics.append(f"diagnostic {error.operation_id}")
+        suffix = f" ({', '.join(diagnostics)})" if diagnostics else ""
+        return f"[Error: {provider}: {message}{suffix}]"
     if isinstance(error, ProviderError):
         return f"[Error: {error}]"
-    return f"[Error: {provider}: {error}]"
+    return f"[Error: {provider}: Provider operation failed]"
+
+
+def _provider_error_detail(error) -> str:
+    if isinstance(error, HttpProviderError):
+        message = localized_error_message(
+            error, str(APP_CONFIG.get("ui_language", "en")))
+        return (f"{message} (HTTP {error.status_code})"
+                if error.status_code is not None else message)
+    if isinstance(error, ProviderError):
+        return str(error).replace("\n", " ")[:120]
+    return "Provider operation failed."
+
+
+def export_safe_diagnostics(destination: Path | None = None) -> Path:
+    """Create a user-requested export with safe runtime/error metadata."""
+    if destination is None:
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        destination = DATA_DIR / f"clarifyvoice-diagnostics-{stamp}.json"
+    return export_diagnostics(
+        destination, log_directory=HTTP_LOG_DIR,
+        application_version=APP_VERSION)
 
 
 def _parse_audio_models(provider: str, payload) -> list[str]:
@@ -1861,22 +1915,30 @@ def _parse_text_models(provider: str, payload) -> list[str]:
     return list(PROVIDER_REGISTRY.parse_text_models(provider, payload))
 
 
-def _fetch_provider_models(provider: str, api_key: str, base_url: str) -> list[str]:
+def _fetch_provider_models(
+        provider: str, api_key: str, base_url: str,
+        cancel_token: CancellationToken | None = None) -> list[str]:
     """Return only transcription-capable models announced by the provider."""
     return list(PROVIDER_REGISTRY.fetch_audio_models(
-        provider, ProviderConnection(api_key.strip(), base_url.strip().rstrip("/"))))
+        provider, ProviderConnection(api_key.strip(), base_url.strip().rstrip("/")),
+        cancel_token))
 
 
-def _validate_provider_credentials(provider: str, api_key: str, base_url: str) -> dict:
+def _validate_provider_credentials(
+        provider: str, api_key: str, base_url: str,
+        cancel_token: CancellationToken | None = None) -> dict:
     """Validate a provider key using its non-generative model-list endpoint."""
     return dict(PROVIDER_REGISTRY.validate(
-        provider, ProviderConnection(api_key.strip(), base_url.strip().rstrip("/"))))
+        provider, ProviderConnection(api_key.strip(), base_url.strip().rstrip("/")),
+        cancel_token))
 
 
 def _discover_provider_models(
-        provider: str, api_key: str, base_url: str) -> tuple[list[str], list[str]]:
+        provider: str, api_key: str, base_url: str,
+        cancel_token: CancellationToken | None = None) -> tuple[list[str], list[str]]:
     catalog = PROVIDER_REGISTRY.discover_models(
-        provider, ProviderConnection(api_key.strip(), base_url.strip().rstrip("/")))
+        provider, ProviderConnection(api_key.strip(), base_url.strip().rstrip("/")),
+        cancel_token)
     return list(catalog.audio_models), list(catalog.text_models)
 
 
@@ -1893,8 +1955,11 @@ def _make_provider_icon(provider: str, size: int = 64):
         return None
 
 
-def call_gemini(audio_path: Path, mode: str, lang: str = "en") -> str:
-    return _call_provider_audio("gemini", audio_path, mode, lang)
+def call_gemini(
+        audio_path: Path, mode: str, lang: str = "en",
+        cancel_token: CancellationToken | None = None) -> str:
+    return _call_provider_audio(
+        "gemini", audio_path, mode, lang, cancel_token=cancel_token)
 
 
 def _provider_connection(provider: str) -> ProviderConnection:
@@ -1903,7 +1968,8 @@ def _provider_connection(provider: str) -> ProviderConnection:
 
 def _call_provider_audio(
         provider: str, audio_path: Path, mode: str, lang: str = "en",
-        audio_bytes: bytes | None = None) -> str:
+        audio_bytes: bytes | None = None,
+        cancel_token: CancellationToken | None = None) -> str:
     try:
         metadata = PROVIDER_REGISTRY.describe(provider)
         connection = _provider_connection(provider)
@@ -1922,10 +1988,10 @@ def _call_provider_audio(
             audio_bytes=audio_bytes,
         )
         transcript = PROVIDER_REGISTRY.transcribe(
-            provider, request, connection).text
+            provider, request, connection, cancel_token).text
         if (mode == "prompt" and not metadata.supports(
                 ProviderCapability.MULTIMODAL_AUDIO)):
-            return _refine_transcript(transcript, lang)
+            return _refine_transcript(transcript, lang, cancel_token)
         return transcript
     except Exception as error:
         try:
@@ -1941,10 +2007,11 @@ def _call_provider_audio(
 def _rewrite_openai_compatible(
         provider: str, transcript: str, lang: str, model_override: str = "",
         instruction: str = "", temperature: float = 0.1,
-        source_message: str = "") -> str:
+        source_message: str = "",
+        cancel_token: CancellationToken | None = None) -> str:
     return _rewrite_with_provider(
         provider, transcript, lang, model_override, instruction,
-        temperature, source_message)
+        temperature, source_message, cancel_token)
 
 
 def _rewrite_openai(transcript: str, lang: str) -> str:
@@ -1953,16 +2020,18 @@ def _rewrite_openai(transcript: str, lang: str) -> str:
 
 def _rewrite_gemini_text(
         transcript: str, lang: str, model: str, instruction: str = "",
-        temperature: float = 0.1, source_message: str = "") -> str:
+        temperature: float = 0.1, source_message: str = "",
+        cancel_token: CancellationToken | None = None) -> str:
     return _rewrite_with_provider(
         "gemini", transcript, lang, model, instruction,
-        temperature, source_message)
+        temperature, source_message, cancel_token)
 
 
 def _rewrite_with_provider(
         provider: str, transcript: str, lang: str, model_override: str = "",
         instruction: str = "", temperature: float = 0.1,
-        source_message: str = "") -> str:
+        source_message: str = "",
+        cancel_token: CancellationToken | None = None) -> str:
     try:
         model = PROVIDER_REGISTRY.text_model_from_legacy(
             provider, APP_CONFIG, model_override)
@@ -1976,7 +2045,7 @@ def _rewrite_with_provider(
             temperature=temperature,
         )
         return PROVIDER_REGISTRY.rewrite(
-            provider, request, _provider_connection(provider)).text
+            provider, request, _provider_connection(provider), cancel_token).text
     except Exception as error:
         try:
             label = f"{PROVIDER_REGISTRY.describe(provider).display_name} refinement"
@@ -1985,12 +2054,15 @@ def _rewrite_with_provider(
         return _http_error(label, error)
 
 
-def _refine_transcript(transcript: str, lang: str) -> str:
+def _refine_transcript(
+        transcript: str, lang: str,
+        cancel_token: CancellationToken | None = None) -> str:
     provider = str(APP_CONFIG.get("refinement_provider", "openai"))
     model = str(APP_CONFIG.get("refinement_model", "")).strip()
     if not model:
         return "[Error: No text refinement model configured]"
-    return _rewrite_with_provider(provider, transcript, lang, model)
+    return _rewrite_with_provider(
+        provider, transcript, lang, model, cancel_token=cancel_token)
 
 
 def rewrite_selected_text(text: str) -> str:
@@ -2047,26 +2119,35 @@ def translate_selected_text(text: str, target_language: str) -> str:
     return result.strip()
 
 
-def call_openai(audio_path: Path, mode: str, lang: str = "en") -> str:
-    return _call_provider_audio("openai", audio_path, mode, lang)
+def call_openai(
+        audio_path: Path, mode: str, lang: str = "en",
+        cancel_token: CancellationToken | None = None) -> str:
+    return _call_provider_audio(
+        "openai", audio_path, mode, lang, cancel_token=cancel_token)
 
 
 def _call_openai_compatible_audio(
-        provider: str, audio_path: Path, mode: str, lang: str = "en") -> str:
-    return _call_provider_audio(provider, audio_path, mode, lang)
-
-
-def call_groq(audio_path: Path, mode: str, lang: str = "en") -> str:
-    return _call_provider_audio("groq", audio_path, mode, lang)
-
-
-def call_transcription_provider(audio_path: Path, mode: str, lang: str = "en",
-        audio_bytes: bytes | None = None) -> str:
-    provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
-    if audio_bytes is None:
-        return _call_provider_audio(provider, audio_path, mode, lang)
+        provider: str, audio_path: Path, mode: str, lang: str = "en",
+        cancel_token: CancellationToken | None = None) -> str:
     return _call_provider_audio(
-        provider, audio_path, mode, lang, audio_bytes=audio_bytes)
+        provider, audio_path, mode, lang, cancel_token=cancel_token)
+
+
+def call_groq(
+        audio_path: Path, mode: str, lang: str = "en",
+        cancel_token: CancellationToken | None = None) -> str:
+    return _call_provider_audio(
+        "groq", audio_path, mode, lang, cancel_token=cancel_token)
+
+
+def call_transcription_provider(
+        audio_path: Path, mode: str, lang: str = "en",
+        audio_bytes: bytes | None = None,
+        cancel_token: CancellationToken | None = None) -> str:
+    provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
+    return _call_provider_audio(
+        provider, audio_path, mode, lang, audio_bytes=audio_bytes,
+        cancel_token=cancel_token)
 
 # ---------------------------------------------------------------------------
 # Recorder
@@ -2100,7 +2181,7 @@ SESSION_SHUTDOWN_JOIN_SECONDS = 2.0
 SESSION_WORKER_JOIN_SECONDS = 5.0
 SESSION_CLEANUP_RETRY_ATTEMPTS = 3
 SESSION_CLEANUP_RETRY_DELAY_SECONDS = 0.25
-TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS = 60
+TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS = sum(TIMEOUTS["transcription"])
 # Keep a non-daemon cleanup owner alive through the provider's bounded request
 # window after the initial UI shutdown join expires. This is finite even when
 # a streaming endpoint never yields a final response.
@@ -2444,6 +2525,7 @@ class RecordingSession:
         # of a request whose read timeout is not a total deadline.
         self.audio_snapshot_complete = threading.Event()
         self.cancel_event = threading.Event()
+        self.provider_cancel_token = CancellationToken()
         self._lock = threading.RLock()
         self._workers = set()
         self._workers_lock = threading.RLock()
@@ -2669,7 +2751,8 @@ class RecordingSession:
             self._shutdown_watcher_started = True
         # This thread must keep the interpreter alive after Tk is destroyed:
         # it joins the provider worker, then retries deletion after its file
-        # handle closes. Provider HTTP calls have a bounded 60-second timeout.
+        # handle closes. The grace period follows the shared provider HTTP
+        # transcription connect/read budget.
         self._shutdown_watcher = threading.Thread(
             target=self._finish_shutdown, name="ClarifyVoiceShutdown", daemon=False)
         self._shutdown_watcher.start()
@@ -2699,6 +2782,7 @@ class RecordingSession:
             if self.terminal and self.shutdown_complete.is_set():
                 return False
             self.cancel_event.set()
+            self.provider_cancel_token.cancel()
         recorder_error = None
         try:
             self.recorder.cancel()
@@ -4658,7 +4742,7 @@ class App(ctk.CTk):
             self.sub.configure(text=self._t("hint_stop"))
 
     def _cancel(self, e=None):
-        if self.app_state == "recording":
+        if self.app_state in ("recording", "processing"):
             self._set_state("ready")
             session = getattr(self, "_recording_session", None)
             if session is not None:
@@ -4676,7 +4760,7 @@ class App(ctk.CTk):
     def _on_escape(self, e=None):
         if self._translation_picker is not None:
             self._cancel_translation_picker()
-        elif self.app_state == "recording": self._cancel()
+        elif self.app_state in ("recording", "processing"): self._cancel()
         elif self.result_frame.winfo_manager(): self._hide_result()
 
     def _copy(self):
@@ -5390,7 +5474,8 @@ class App(ctk.CTk):
                     raise RecordingCancelledError("Recording cancelled")
                 text = call_transcription_provider(
                     session.audio_path, self.mode, self.lang,
-                    audio_bytes=audio_bytes)
+                    audio_bytes=audio_bytes,
+                    cancel_token=session.provider_cancel_token)
                 if session.cancel_event.is_set():
                     raise RecordingCancelledError("Recording cancelled")
                 if not text or text.startswith("[Error"):
@@ -5636,7 +5721,7 @@ class App(ctk.CTk):
             entry.delete(0, "end")
             entry.insert(0, value)
 
-        model_request = {"generation": 0}
+        model_request = {"generation": 0, "cancel_token": None}
 
         def refresh_models():
             if not win.winfo_exists():
@@ -5646,6 +5731,11 @@ class App(ctk.CTk):
             base = (base_entry.get().strip() if endpoint_switch.get()
                     else official_bases[provider])
             selected = model_menu.get().strip()
+            previous_token = model_request["cancel_token"]
+            if previous_token is not None:
+                previous_token.cancel()
+            cancel_token = CancellationToken()
+            model_request["cancel_token"] = cancel_token
             model_request["generation"] += 1
             generation = model_request["generation"]
             model_status.configure(text=self._t("loading_models"), text_color="#666666")
@@ -5653,11 +5743,12 @@ class App(ctk.CTk):
 
             def load():
                 try:
-                    models = _fetch_provider_models(provider, key, base)
+                    models = _fetch_provider_models(
+                        provider, key, base, cancel_token)
                     error = None
                 except Exception as exc:
                     models = []
-                    error = str(exc).replace("\n", " ")[:100]
+                    error = _provider_error_detail(exc)
 
                 def finish():
                     if (not win.winfo_exists() or generation != model_request["generation"]
@@ -5851,7 +5942,7 @@ class App(ctk.CTk):
         provider_state = {
             provider: {
                 "status": "not_configured", "models": [], "error": "", "feedback": "",
-                "generation": 0,
+                "generation": 0, "cancel_token": None,
             } for provider in provider_ids
         }
         selected = {
@@ -6061,24 +6152,26 @@ class App(ctk.CTk):
 
         def validate_provider(provider, api_key, base_url, on_done=None):
             state = provider_state[provider]
+            previous_token = state.get("cancel_token")
+            if previous_token is not None:
+                previous_token.cancel()
+            cancel_token = CancellationToken()
             state["generation"] += 1
             generation = state["generation"]
-            state.update(status="validating", error="", feedback="")
+            state.update(
+                status="validating", error="", feedback="", cancel_token=cancel_token)
             if view["page"] in ("providers", "provider_detail"):
                 show_page(view["page"], view["provider"])
 
             def run():
                 try:
                     models, text_models = _discover_provider_models(
-                        provider, api_key, base_url)
+                        provider, api_key, base_url, cancel_token)
                     error = ""
                 except Exception as exc:
                     models = []
                     text_models = []
-                    if isinstance(exc, requests.HTTPError) and exc.response is not None:
-                        error = f"HTTP {exc.response.status_code}"
-                    else:
-                        error = str(exc).replace("\n", " ")[:120]
+                    error = _provider_error_detail(exc)
 
                 def finish():
                     if not win.winfo_exists() or generation != state["generation"]:
@@ -6201,6 +6294,9 @@ class App(ctk.CTk):
             validate_button.configure(command=validate_and_save)
 
             def deactivate():
+                active_token = provider_state[provider].get("cancel_token")
+                if active_token is not None:
+                    active_token.cancel()
                 if not _deactivate_provider_for_ui(
                         provider, default_bases[provider], provider_state[provider],
                         self._t("credential_update_failed"), self.repositories):
@@ -6343,7 +6439,8 @@ class App(ctk.CTk):
         }
         state = {
             provider: {"status": "not_configured", "models": [], "text_models": [],
-                       "error": "", "feedback": "", "generation": 0}
+                       "error": "", "feedback": "", "generation": 0,
+                       "cancel_token": None}
             for provider in provider_ids
         }
         selected = {
@@ -6593,8 +6690,8 @@ class App(ctk.CTk):
         refinement_menu_visible = {"value": False}
         refinement_signature = {"value": None}
 
-        # Settings contains local startup behavior and an explicit secure
-        # update action. Update checks never run in the background.
+        # Settings contains local runtime preferences, diagnostics, and an
+        # explicit secure update action. Update checks never run in the background.
         preferences_inner = ctk.CTkFrame(
             pages["settings"], fg_color="transparent")
         preferences_inner.pack(fill="both", expand=True, padx=24, pady=22)
@@ -6688,6 +6785,30 @@ class App(ctk.CTk):
             threading.Thread(target=run, daemon=True).start()
 
         update_button.configure(command=check_for_updates)
+
+        diagnostics_status = ctk.CTkLabel(
+            preferences_inner, text="", text_color=DIM, font=font_caption,
+            anchor="w", justify="left", wraplength=430)
+
+        def create_diagnostic_export():
+            try:
+                export_safe_diagnostics()
+                diagnostics_status.configure(
+                    text=self._t("diagnostic_exported"), text_color="#69c58a")
+            except OSError:
+                diagnostics_status.configure(
+                    text=self._t("diagnostic_export_failed"), text_color="#d36f6f")
+
+        ctk.CTkButton(
+            preferences_inner, text=self._t("diagnostic_export"), width=164,
+            height=32, corner_radius=16, fg_color="#242424",
+            hover_color="#303030", text_color=TEXT,
+            command=create_diagnostic_export).pack(anchor="w", pady=(24, 0))
+        ctk.CTkLabel(
+            preferences_inner, text=self._t("diagnostic_export_hint"),
+            text_color=DIM, font=font_caption, anchor="w", justify="left",
+            wraplength=430).pack(fill="x", pady=(5, 0))
+        diagnostics_status.pack(fill="x", pady=(5, 0))
 
         saved_settings = {
             "transcription": (selected["provider"], selected["model"]),
@@ -7007,23 +7128,25 @@ class App(ctk.CTk):
 
         def validate_provider(provider, api_key, base_url, persist=False):
             provider_state = state[provider]
+            previous_token = provider_state.get("cancel_token")
+            if previous_token is not None:
+                previous_token.cancel()
+            cancel_token = CancellationToken()
             provider_state["generation"] += 1
             generation = provider_state["generation"]
-            provider_state.update(status="validating", error="", feedback="")
+            provider_state.update(
+                status="validating", error="", feedback="", cancel_token=cancel_token)
             refresh_provider_ui(provider)
 
             def run():
                 try:
                     models, text_models = _discover_provider_models(
-                        provider, api_key, base_url)
+                        provider, api_key, base_url, cancel_token)
                     error = ""
                 except Exception as exc:
                     models = []
                     text_models = []
-                    if isinstance(exc, requests.HTTPError) and exc.response is not None:
-                        error = f"HTTP {exc.response.status_code}"
-                    else:
-                        error = str(exc).replace("\n", " ")[:120]
+                    error = _provider_error_detail(exc)
 
                 def finish():
                     if not win.winfo_exists() or generation != provider_state["generation"]:
@@ -7142,6 +7265,9 @@ class App(ctk.CTk):
             validate_button.configure(command=validate_from_page)
 
             def deactivate(provider_id=provider):
+                active_token = state[provider_id].get("cancel_token")
+                if active_token is not None:
+                    active_token.cancel()
                 if not _deactivate_provider_for_ui(
                         provider_id, default_bases[provider_id], state[provider_id],
                         self._t("credential_update_failed"), self.repositories):

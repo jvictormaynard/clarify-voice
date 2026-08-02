@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -25,6 +26,7 @@ from provider_http import (
     export_diagnostics,
     localized_error_message,
     redact_sensitive,
+    _retry_after_seconds,
 )
 
 
@@ -111,6 +113,15 @@ class ProviderHttpPolicyTests(unittest.TestCase):
         self.assertEqual(sleeps, [BACKOFF_CAP_SECONDS])
         self.assertTrue(first.closed)
 
+    def test_retry_after_http_date_is_supported(self):
+        now = datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            _retry_after_seconds(
+                "Sun, 02 Aug 2026 12:00:03 GMT", now=now),
+            3.0,
+        )
+
     def test_backoff_uses_bounded_jitter_without_retry_after(self):
         client, _session = self.make_client(random_fn=lambda: 1.0)
 
@@ -173,6 +184,19 @@ class ProviderHttpPolicyTests(unittest.TestCase):
                 operation="transcription", files={"file": object()})
 
         self.assertEqual(session.post.call_count, 1)
+
+    def test_permanent_request_exception_is_not_retried(self):
+        client, session = self.make_client(get=[
+            requests.exceptions.InvalidURL("invalid endpoint"),
+            FakeResponse(200),
+        ])
+
+        with self.assertRaises(NetworkError):
+            client.request(
+                "GET", "invalid-endpoint", provider="openai",
+                operation="validation")
+
+        self.assertEqual(session.get.call_count, 1)
 
     def test_http_failures_are_classified_without_exposing_response_text(self):
         cases = (
