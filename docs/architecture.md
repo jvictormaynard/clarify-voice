@@ -66,9 +66,13 @@ text generation, model discovery, or custom base URLs. It does not select a
 workflow by comparing provider names. Compatibility functions in `app.py`
 retain the existing public call surface while delegating to typed requests.
 
-The HTTP dependency is intentionally the narrow `HttpClient` protocol with
-`get` and `post`. Adapters preserve the existing request timeouts and response
-shapes; retry, session, logging, and shared error policy belong to issue #17.
+The HTTP dependency is intentionally the narrow `HttpClient` protocol with a
+single `request` method and guarded JSON decoding. Adapters preserve the
+existing request payloads and response shapes; session ownership, timeouts,
+retry, cancellation, logging, and shared error policy live in `provider_http.py`.
+Connections arrive from the repository-loaded configuration (with provider
+secrets resolved by `SecretStore`); the transport never persists credentials or
+reads environment variables itself.
 
 #### Adding an OpenAI-compatible provider
 
