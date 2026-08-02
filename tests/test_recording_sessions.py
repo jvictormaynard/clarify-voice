@@ -74,6 +74,48 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertEqual(session.state, "failed")
             self.assertFalse(path.exists())
 
+    def test_cancel_before_start_is_typed_and_signals_start_finished(self):
+        class DeferredWorker:
+            ident = None
+
+            def __init__(self, target):
+                self.target = target
+
+            def start(self):
+                pass
+
+            def run(self):
+                self.target()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recording.wav"
+            path.write_bytes(b"stale")
+            recorder = Mock()
+            session = app.RecordingSession(recorder=recorder, audio_path=path)
+            errors = []
+            worker = DeferredWorker(
+                lambda: self._run_session_start(session, errors))
+            worker.start()
+
+            session.cancel()
+            worker.run()
+
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], app.RecordingCancelledError)
+            self.assertTrue(session.start_finished.is_set())
+            self.assertEqual(session.state, "cancelled")
+            self.assertEqual(session.state_history.count("cancelled"), 1)
+            recorder.start.assert_not_called()
+            recorder.cancel.assert_called_once_with()
+            self.assertFalse(path.exists())
+
+    @staticmethod
+    def _run_session_start(session, errors):
+        try:
+            session.start()
+        except Exception as error:
+            errors.append(error)
+
     def test_cleanup_failure_does_not_rewrite_completed_terminal_state(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "recording.wav"

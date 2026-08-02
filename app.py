@@ -2321,6 +2321,7 @@ class RecordingSession:
         self.cleanup_terminal = threading.Event()
         self._shutdown_watcher_started = False
         self._shutdown_watcher = None
+        self._shutdown_handoff_requested = False
         self._owner_release_callback = None
 
     @property
@@ -2335,11 +2336,15 @@ class RecordingSession:
         self.state_history.append(state)
 
     def start(self):
-        with self._lock:
-            if self.state != "created":
-                raise RecordingError(f"Cannot start session in state {self.state}")
-            self._set_state_locked("recording")
         try:
+            with self._lock:
+                if self.state != "created":
+                    if self.state == "cancelled" or self.cancel_event.is_set():
+                        raise RecordingCancelledError(
+                            "Recording cancelled before startup")
+                    raise RecordingError(
+                        f"Cannot start session in state {self.state}")
+                self._set_state_locked("recording")
             try:
                 self.recorder.start(self.audio_path, cancel_event=self.cancel_event)
             except TypeError as error:
@@ -2368,6 +2373,12 @@ class RecordingSession:
     def detach_worker(self, worker):
         with self._workers_lock:
             self._workers.discard(worker)
+            if self._shutdown_watcher_started and self.shutdown_timed_out:
+                # Persist the handoff request while the old watcher is still
+                # tearing down; its finally block will consume this under the
+                # same lock instead of relying on a transient active-worker
+                # read.
+                self._shutdown_handoff_requested = True
         self._complete_shutdown_if_ready()
         if (self.terminal and not self._cleanup_done.is_set()
                 and not self._active_workers()):
@@ -2458,7 +2469,8 @@ class RecordingSession:
             # persistent failure it is terminal without claiming success.
             with self._workers_lock:
                 self._shutdown_watcher_started = False
-                if (self.shutdown_timed_out and not self._cleanup_done.is_set()
+                if ((self.shutdown_timed_out or self._shutdown_handoff_requested)
+                        and not self._cleanup_done.is_set()
                         and not self._active_workers()):
                     # A provider may detach in the handoff window after the
                     # deadline read but before this finally block. Claim the
@@ -2466,6 +2478,7 @@ class RecordingSession:
                     # cleanup failure does not set shutdown_timed_out and
                     # therefore cannot create an infinite watcher loop.
                     self.shutdown_timed_out = False
+                    self._shutdown_handoff_requested = False
                     self.cleanup_retry_exhausted = False
                     self.cleanup_terminal.clear()
                     self._shutdown_watcher_started = True
@@ -2484,11 +2497,13 @@ class RecordingSession:
         with self._workers_lock:
             if self._shutdown_watcher_started:
                 return
-            if (self.shutdown_timed_out and not self._cleanup_done.is_set()):
+            if ((self.shutdown_timed_out or self._shutdown_handoff_requested)
+                    and not self._cleanup_done.is_set()):
                 # A worker that exceeded the join deadline may later detach;
                 # permit one fresh bounded cleanup attempt without allowing
                 # the previous terminal signal to claim success.
                 self.shutdown_timed_out = False
+                self._shutdown_handoff_requested = False
                 self.cleanup_retry_exhausted = False
                 self.cleanup_terminal.clear()
             self._shutdown_watcher_started = True
