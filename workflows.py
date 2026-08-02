@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Protocol
 
+from provider_types import RewriteResult, TranscriptionResult, TranslationResult
+
 
 class WorkflowKind(str, Enum):
     DICTATION = "dictation"
@@ -125,11 +127,19 @@ WorkflowCommand = (
 
 
 class ProviderGateway(Protocol):
-    """Typed provider boundary; implementations raise on provider failures."""
+    """Workflow facade over typed registry requests and results.
 
-    def transcribe(self, audio_source: Any, mode: str, language: str) -> str: ...
-    def rewrite(self, text: str) -> str: ...
-    def translate(self, text: str, target_language: str) -> str: ...
+    Implementations own provider selection, request construction, connections,
+    and errors; the workflow only consumes the registry's typed results.
+    """
+
+    def transcribe(
+        self, audio_source: Any, mode: str, language: str
+    ) -> TranscriptionResult: ...
+    def rewrite(self, text: str) -> RewriteResult: ...
+    def translate(
+        self, text: str, target_language: str
+    ) -> TranslationResult: ...
 
 
 class RecordingSessionGateway(Protocol):
@@ -174,7 +184,6 @@ class ClipboardGateway(Protocol):
 
 class WorkflowConfig(Protocol):
     def recording_usage_context(self, mode: str) -> dict[str, Any]: ...
-    def refinement_identity(self) -> tuple[str, str]: ...
 
 
 class StatisticsGateway(Protocol):
@@ -485,9 +494,10 @@ class WorkflowService:
             if not self._is_current(session.operation_id):
                 return
             audio_source = session.recording.stop()
-            result = self._provider.transcribe(
+            provider_result = self._provider.transcribe(
                 audio_source, session.mode, session.language
             )
+            result = provider_result.text
             if not self._is_current(session.operation_id):
                 return
             if self._provider_failed(result):
@@ -626,7 +636,8 @@ class WorkflowService:
                         status_key="no_selection",
                     )
                     return
-            rewritten = self._provider.rewrite(capture.text)
+            provider_result = self._provider.rewrite(capture.text)
+            rewritten = provider_result.text
             if not self._is_current(session.operation_id):
                 return
             if self._provider_failed(rewritten):
@@ -640,8 +651,11 @@ class WorkflowService:
                 capture,
                 rewritten,
                 copied_status="rewrite_copied",
-                statistic=lambda provider, model: self._statistics.record_rewrite(
-                    provider, model, capture.text, rewritten
+                statistic=lambda: self._statistics.record_rewrite(
+                    provider_result.provider_id,
+                    provider_result.model,
+                    capture.text,
+                    rewritten,
                 ),
             )
         except Exception:
@@ -735,9 +749,10 @@ class WorkflowService:
         try:
             if session.selection is None:
                 raise RuntimeError("Translation selection was not captured")
-            translated = self._provider.translate(
+            provider_result = self._provider.translate(
                 session.selection.text, session.target_language
             )
+            translated = provider_result.text
             if not self._is_current(session.operation_id):
                 return
             if self._provider_failed(translated):
@@ -752,9 +767,9 @@ class WorkflowService:
                 session.selection,
                 translated,
                 copied_status="translation_copied",
-                statistic=lambda provider, model: self._statistics.record_translation(
-                    provider,
-                    model,
+                statistic=lambda: self._statistics.record_translation(
+                    provider_result.provider_id,
+                    provider_result.model,
                     session.selection.text,
                     translated,
                     session.target_language,
@@ -790,7 +805,7 @@ class WorkflowService:
         result: str,
         *,
         copied_status: str,
-        statistic: Callable[[str, str], None],
+        statistic: Callable[[], None],
     ) -> None:
         with self._lock:
             if not self._is_current_locked(session.operation_id):
@@ -804,9 +819,8 @@ class WorkflowService:
                 if disposition is SelectionDisposition.PASTED
                 else copied_status
             )
-            provider, model = self._config.refinement_identity()
             try:
-                statistic(provider, model)
+                statistic()
             except OSError:
                 pass
         self._transition(

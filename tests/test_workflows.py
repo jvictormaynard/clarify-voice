@@ -8,6 +8,7 @@ import unittest
 from collections.abc import Callable
 
 import workflows
+from provider_types import RewriteResult, TranscriptionResult, TranslationResult
 from workflows import (
     CancelDictation,
     CancelTranslation,
@@ -90,17 +91,21 @@ class FakeProvider:
 
     def transcribe(self, audio_source, mode, language):
         self.transcription_request = (audio_source, mode, language)
-        return self.transcription
+        return TranscriptionResult(
+            self.transcription, "gemini", "gemini-test"
+        )
 
     def rewrite(self, text):
         self.rewrite_request = text
         if self.on_rewrite:
             self.on_rewrite()
-        return self.rewritten
+        return RewriteResult(self.rewritten, "openai", "gpt-test")
 
     def translate(self, text, target_language):
         self.translation_request = (text, target_language)
-        return self.translated
+        return TranslationResult(
+            self.translated, "openai", "gpt-test", target_language
+        )
 
 
 class FakeAudio:
@@ -235,9 +240,6 @@ class FakeClipboard:
 class FakeConfig:
     def recording_usage_context(self, mode):
         return {"mode": mode, "provider": "gemini"}
-
-    def refinement_identity(self):
-        return "openai", "gpt-test"
 
 
 class FakeStatistics:
