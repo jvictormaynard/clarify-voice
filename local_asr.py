@@ -139,9 +139,23 @@ def _sha256(
 
 def _safe_relative_path(value: str) -> Path:
     pure = PurePosixPath(value)
-    if pure.is_absolute() or not pure.parts or any(part in ("", ".", "..") for part in pure.parts):
+    if ("\\" in value or pure.is_absolute() or not pure.parts
+            or any(part in ("", ".", "..") for part in pure.parts)):
         raise LocalASRIntegrityError(f"Unsafe manifest path: {value}")
+    for part in pure.parts:
+        _safe_path_component(part, "relative path")
     return Path(*pure.parts)
+
+
+def _safe_path_component(value: object, field: str) -> str:
+    """Return one conservative, portable manifest-derived path component."""
+    if not isinstance(value, str):
+        raise LocalASRIntegrityError(f"Manifest path component is invalid: {field}")
+    allowed = frozenset(string.ascii_letters + string.digits + "._-")
+    if (not value or len(value) > 128 or value in (".", "..")
+            or any(character not in allowed for character in value)):
+        raise LocalASRIntegrityError(f"Manifest path component is unsafe: {field}")
+    return value
 
 
 def _valid_digest(value: object) -> bool:
@@ -165,6 +179,11 @@ def load_manifest(path: Path | None = None) -> dict:
                 or not str(value.get("license", "")).strip()
                 or not str(value.get("source_url", "")).startswith("https://")):
             raise LocalASRIntegrityError(f"Manifest section is invalid: {section}")
+    engine = payload["engine"]
+    model = payload["recommended_model"]
+    _safe_path_component(engine.get("name"), "engine.name")
+    _safe_path_component(engine.get("version"), "engine.version")
+    _safe_path_component(model.get("id"), "recommended_model.id")
     requirements = payload.get("requirements")
     if (not isinstance(requirements, Mapping)
             or not str(requirements.get("platform", "")).strip()
@@ -192,6 +211,7 @@ def load_manifest(path: Path | None = None) -> dict:
                 or not str(value.get("source_url", "")).startswith("https://")
                 or not str(value.get("license", "")).strip()):
             raise LocalASRIntegrityError(f"Manifest asset is invalid: {name}")
+        _safe_path_component(value.get("filename"), f"assets.{name}.filename")
     seen_paths: set[str] = set()
     for value in extracted:
         if (not isinstance(value, Mapping)
@@ -225,11 +245,24 @@ class LocalASRInstaller:
     def installation_id(self) -> str:
         engine = self.manifest["engine"]
         model = self.manifest["recommended_model"]
-        return f"{engine['name']}-{engine['version']}-{model['id']}"
+        name = _safe_path_component(engine.get("name"), "engine.name")
+        version = _safe_path_component(engine.get("version"), "engine.version")
+        model_id = _safe_path_component(model.get("id"), "recommended_model.id")
+        return f"{name}-{version}-{model_id}"
 
     @property
     def install_dir(self) -> Path:
-        return self.root / self.installation_id
+        try:
+            root = self.root.resolve()
+            destination = (self.root / self.installation_id).resolve()
+            destination.relative_to(root)
+        except (OSError, ValueError) as error:
+            raise LocalASRIntegrityError(
+                "Local-ASR installation path escapes the asset root") from error
+        if destination == root:
+            raise LocalASRIntegrityError(
+                "Local-ASR installation path must be below the asset root")
+        return destination
 
     @property
     def executable_path(self) -> Path:
@@ -237,7 +270,10 @@ class LocalASRInstaller:
 
     @property
     def model_path(self) -> Path:
-        model_name = self.manifest["assets"]["model"]["filename"]
+        model_name = _safe_path_component(
+            self.manifest["assets"]["model"].get("filename"),
+            "assets.model.filename",
+        )
         return self.install_dir / "models" / model_name
 
     @property
@@ -248,7 +284,8 @@ class LocalASRInstaller:
         value = self.manifest["assets"][name]
         return ManifestAsset(
             name=name,
-            filename=str(value["filename"]),
+            filename=_safe_path_component(
+                value.get("filename"), f"assets.{name}.filename"),
             url=str(value["url"]),
             size=int(value["size"]),
             sha256=str(value["sha256"]).lower(),
@@ -552,6 +589,66 @@ def _process_image_path(pid: int) -> Path | None:
         return None
 
 
+def _pid_running_state(pid: int) -> bool | None:
+    """Return True/False only when liveness can be established conclusively."""
+    if pid <= 0:
+        return False
+    if platform.system() != "Windows":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return None
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        synchronize = 0x00100000
+        wait_object_0 = 0
+        wait_timeout = 0x00000102
+        process = kernel32.OpenProcess(synchronize, False, pid)
+        if not process:
+            return None
+        try:
+            result = kernel32.WaitForSingleObject(process, 0)
+            if result == wait_object_0:
+                return False
+            if result == wait_timeout:
+                return True
+            return None
+        finally:
+            kernel32.CloseHandle(process)
+    except Exception:
+        return None
+
+
+def _windows_elevation_state() -> bool | None:
+    """Return whether this process is elevated, or None if Windows cannot tell."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        is_user_an_admin = ctypes.windll.shell32.IsUserAnAdmin
+        is_user_an_admin.argtypes = []
+        is_user_an_admin.restype = wintypes.BOOL
+        return bool(is_user_an_admin())
+    except Exception:
+        return None
+
+
 def _terminate_pid(pid: int) -> bool:
     if platform.system() != "Windows" or pid <= 0:
         return False
@@ -594,17 +691,38 @@ def cleanup_recorded_sidecar(record_path: Path, expected_executable: Path) -> No
     except (OSError, ValueError, TypeError, AttributeError):
         pid = 0
     actual = _process_image_path(pid)
-    try:
-        matches = actual is not None and actual.resolve() == Path(expected_executable).resolve()
-    except OSError:
-        matches = False
-    if matches and not _terminate_pid(pid):
-        raise LocalASRSidecarError(
-            "Could not confirm that the recorded local-ASR sidecar terminated")
+    if actual is None:
+        running = _pid_running_state(pid)
+        if running is not False:
+            raise LocalASRSidecarError(
+                "Could not verify ownership of the recorded local-ASR sidecar; "
+                "its process record was preserved")
+    else:
+        try:
+            matches = actual.resolve() == Path(expected_executable).resolve()
+        except OSError as error:
+            raise LocalASRSidecarError(
+                "Could not verify the recorded local-ASR sidecar image; "
+                "its process record was preserved") from error
+        if matches and not _terminate_pid(pid):
+            raise LocalASRSidecarError(
+                "Could not confirm that the recorded local-ASR sidecar terminated")
     try:
         record_path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _require_unelevated_windows_process() -> None:
+    elevation = _windows_elevation_state()
+    if elevation is True:
+        raise LocalASRSidecarError(
+            "Local ASR refuses to start from an elevated Windows process. "
+            "Restart ClarifyVoice without administrator privileges.")
+    if elevation is None:
+        raise LocalASRSidecarError(
+            "Local ASR could not verify Windows process privileges and refused "
+            "to start the sidecar.")
 
 
 class LocalASRSidecarManager:
@@ -726,6 +844,7 @@ class LocalASRSidecarManager:
                     cancel_event, startup_cancel, self._shutdown_event))
                 self._raise_if_cancelled(startup_cancel)
                 self._raise_if_cancelled(cancel_event)
+                _require_unelevated_windows_process()
                 cleanup_recorded_sidecar(
                     self.installer.process_record_path, self.installer.executable_path)
                 self._raise_if_cancelled(startup_cancel)

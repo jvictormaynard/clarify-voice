@@ -50,14 +50,19 @@ acceptance run. Downloads stream into a staging directory. The runtime archive
 and model must match both the published size and SHA-256 before extraction or
 installation. Only allowlisted archive members are copied, and every extracted
 file is hashed again. A failed or interrupted install leaves no executable in
-the final installation directory.
+the final installation directory. Manifest-derived engine, version, model, and
+asset filename components use a portable allowlist, relative paths reject both
+Windows and POSIX traversal, and the resolved install directory must remain
+below the owned asset root.
 
 `status` is read-only and performs no network access. It hashes every installed
 runtime file and the model. `remove` terminates only a recorded sidecar PID whose
 Windows image path still matches this installation, then removes the complete
 installer-owned asset root, including receipts and process metadata. A custom
 non-empty directory without the ownership marker is refused during installation
-and is never recursively deleted.
+and is never recursively deleted. If Windows cannot determine the recorded
+process image or liveness conclusively, cleanup fails closed and preserves the
+record for a later attempt.
 
 `LocalASRProviderAdapter` implements the merged typed registry contract around
 the narrow `LocalTranscriptionBackend` protocol. It is deliberately not added
@@ -71,6 +76,8 @@ Before each sidecar start, the complete installed runtime and model are verified
 against the committed manifest. The manager then:
 
 - launches `whisper-server.exe` without a console, bound to `127.0.0.1`;
+- refuses to launch it from an elevated Windows process, and also fails closed
+  if the current privilege state cannot be determined;
 - adds a fresh random request-path prefix and disables environment proxies;
 - waits for the sidecar's `/health` response before accepting inference;
 - uses CPU-only, no-context transcription and never enables conversion/ffmpeg;
@@ -96,8 +103,8 @@ warning if it will send the locally produced transcript text to a cloud model.
 The downloaded model and runtime are readable by processes running as the same
 Windows user. The local HTTP server is not a general security sandbox; the
 loopback bind and unpredictable path reduce accidental exposure but do not
-protect against a malicious process already running as that user. The upstream
-server warning against privileged execution still applies.
+protect against a malicious process already running as that user. Run the
+harness from a normal, non-administrator PowerShell; elevated launch is rejected.
 
 ## Benchmark and acceptance plan
 
