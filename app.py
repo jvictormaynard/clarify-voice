@@ -62,6 +62,7 @@ from windows_hotkeys import (
     unregister_escape_hotkey,
     unregister_global_hotkeys,
 )
+from workflows import NoUsableAudioError, RecordingSnapshot
 
 try:
     import tkinter as tk
@@ -2218,7 +2219,7 @@ class RecordingProcessError(RecordingError):
     """Raised when the SoX process cannot be shut down safely."""
 
 
-class RecordingEncodingError(RecordingError):
+class RecordingEncodingError(RecordingError, NoUsableAudioError):
     """Raised when a recorder did not produce usable audio bytes."""
 
 
@@ -2640,6 +2641,44 @@ class RecordingSession:
         finally:
             self.start_finished.set()
 
+    def wait_until_started(self):
+        """Wait for startup's terminal signal and preserve its typed outcome."""
+        self.start_finished.wait()
+        with self._lock:
+            if self.state == "cancelled" or self.cancel_event.is_set():
+                raise self.error or RecordingCancelledError(
+                    "Recording cancelled during startup")
+            if self.state == "failed":
+                raise self.error or RecordingError("Recording startup failed")
+
+    def stop(self):
+        """Stop capture and return an in-memory provider snapshot."""
+        self.wait_until_started()
+        with self._lock:
+            if self.state == "recording":
+                self._set_state_locked("processing")
+            elif self.state != "processing":
+                raise RecordingError(
+                    f"Cannot stop session in state {self.state}")
+        self.stop_recorder()
+        time.sleep(0.3)
+        if not self.audio_path.exists() or self.audio_path.stat().st_size < 1000:
+            raise RecordingEncodingError("No usable audio was produced")
+        snapshot = RecordingSnapshot(
+            audio_path=self.audio_path,
+            audio_bytes=self.audio_path.read_bytes(),
+        )
+        self.mark_audio_snapshot_complete()
+        if self.cancel_event.is_set():
+            raise RecordingCancelledError("Recording cancelled")
+        return snapshot
+
+    def complete(self):
+        return self.finalize("completed")
+
+    def fail(self, error):
+        return self.finalize("failed", error)
+
     def attach_worker(self, worker):
         with self._workers_lock:
             self._workers.add(worker)
@@ -2889,6 +2928,20 @@ class RecordingSession:
             self._ensure_shutdown_watcher()
         self._complete_shutdown_if_ready()
         return True
+
+
+class RecordingAudioGateway:
+    """Workflow adapter that creates the lifecycle owner from issue #18."""
+
+    def __init__(self, session_factory=None, microphone_probe=None):
+        self._session_factory = session_factory or RecordingSession
+        self._microphone_probe = microphone_probe or _has_active_microphone
+
+    def microphone_available(self):
+        return self._microphone_probe()
+
+    def create_session(self):
+        return self._session_factory()
 
 # ---------------------------------------------------------------------------
 # Clipboard
@@ -5557,17 +5610,10 @@ class App(ctk.CTk):
             lambda candidate: getattr(self, "_recording_session", None) is candidate)
         def run():
             try:
-                session.stop_recorder()
-                time.sleep(0.3)
-                if not session.audio_path.exists() or session.audio_path.stat().st_size < 1000:
-                    raise RecordingEncodingError("No usable audio was produced")
-                audio_bytes = session.audio_path.read_bytes()
-                session.mark_audio_snapshot_complete()
-                if session.cancel_event.is_set():
-                    raise RecordingCancelledError("Recording cancelled")
+                audio_source = session.stop()
                 text = call_transcription_provider(
-                    session.audio_path, self.mode, self.lang,
-                    audio_bytes=audio_bytes,
+                    audio_source.audio_path, self.mode, self.lang,
+                    audio_bytes=audio_source.audio_bytes,
                     cancel_token=session.provider_cancel_token)
                 if session.cancel_event.is_set():
                     raise RecordingCancelledError("Recording cancelled")
@@ -5577,7 +5623,7 @@ class App(ctk.CTk):
                     session,
                     _build_recording_usage_event(
                         getattr(session, "usage_context", {}), elapsed, text))
-                if not session.finalize("completed"):
+                if not session.complete():
                     _take_pending_recording_usage(session)
                     return
                 if is_current(session):

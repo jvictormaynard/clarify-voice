@@ -114,12 +114,19 @@ The gateway protocols describe ownership boundaries; they do not reimplement
 provider routing, HTTP policy, recording lifecycle, clipboard transactions, or
 configuration persistence. `ProviderGateway` is the workflow-facing facade for
 the typed requests and results routed by `ProviderRegistry`; workflows never
-branch on provider IDs or call adapter HTTP directly. The remaining runtime
-adapters will be wired after their focused components land. Until then, `app.py`
-remains the active orchestration path and `workflows.py` is covered headlessly
-as integration scaffolding for issue #20. Keeping this stage disconnected
-avoids a temporary second implementation of the reliability work in issues #17
-through #19.
+branch on provider IDs or call adapter HTTP directly.
+
+The recording boundary is connected to the real `RecordingSession` lifecycle
+from issue #18 through `RecordingAudioGateway`. A stop waits for startup to
+become terminal and returns an immutable `RecordingSnapshot` containing both
+the owned path and in-memory bytes. The session can therefore complete cleanup
+as soon as the snapshot exists without tying its temporary WAV to a slow
+provider request. The active Tk path uses the same stop/snapshot/terminal
+methods, so the scaffolding does not duplicate start-stop or cleanup policy.
+
+The HTTP and clipboard runtime adapters will be wired after issues #17 and #19
+land. Until then, `app.py` remains the active end-to-end orchestration path and
+`workflows.py` is covered headlessly as integration scaffolding for issue #20.
 
 ### `desktop_state.py`
 

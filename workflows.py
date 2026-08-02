@@ -12,6 +12,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from provider_types import RewriteResult, TranscriptionResult, TranslationResult
@@ -43,6 +44,14 @@ class SelectionDisposition(str, Enum):
 
 class NoUsableAudioError(RuntimeError):
     """The recording session finished without a provider-ready audio source."""
+
+
+@dataclass(frozen=True)
+class RecordingSnapshot:
+    """Provider-ready audio detached from the temporary recording lifetime."""
+
+    audio_path: Path
+    audio_bytes: bytes
 
 
 @dataclass(frozen=True)
@@ -134,7 +143,7 @@ class ProviderGateway(Protocol):
     """
 
     def transcribe(
-        self, audio_source: Any, mode: str, language: str
+        self, audio_source: RecordingSnapshot, mode: str, language: str
     ) -> TranscriptionResult: ...
     def rewrite(self, text: str) -> RewriteResult: ...
     def translate(
@@ -149,7 +158,7 @@ class RecordingSessionGateway(Protocol):
     def wait_until_started(self) -> None:
         """Wait for startup to finish, raising its failure or cancellation."""
         ...
-    def stop(self) -> Any: ...
+    def stop(self) -> RecordingSnapshot: ...
     def cancel(self) -> None: ...
     def complete(self) -> None: ...
     def fail(self, error: Exception) -> None: ...

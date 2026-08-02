@@ -6,6 +6,7 @@ import inspect
 import threading
 import unittest
 from collections.abc import Callable
+from pathlib import Path
 
 import workflows
 from provider_types import RewriteResult, TranscriptionResult, TranslationResult
@@ -15,6 +16,7 @@ from workflows import (
     ChooseTranslationLanguage,
     DismissMicrophoneUnavailable,
     NoUsableAudioError,
+    RecordingSnapshot,
     SelectionCapture,
     SelectionDisposition,
     SelectionTarget,
@@ -135,7 +137,7 @@ class FakeAudio:
         self.stopped += 1
         if not self.present:
             raise NoUsableAudioError("no audio")
-        return "recording.wav"
+        return RecordingSnapshot(Path("recording.wav"), b"audio")
 
     def wait_until_started(self):
         self.startup_waits += 1
@@ -517,7 +519,11 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(self.audio.completed, 1)
         self.assertEqual(
             self.provider.transcription_request,
-            ("recording.wav", "prompt", "pt"),
+            (
+                RecordingSnapshot(Path("recording.wav"), b"audio"),
+                "prompt",
+                "pt",
+            ),
         )
         self.assertEqual(self.clipboard.auto_pastes, ["Transcribed"])
         self.assertEqual(
