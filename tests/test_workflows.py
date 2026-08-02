@@ -428,6 +428,37 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(self.clipboard.applied, [])
         self.assertEqual(self.statistics.rewrites, [])
 
+    def test_rewrite_cancel_during_capture_restores_once(self):
+        scheduler = ThreadScheduler()
+        capture_entered = threading.Event()
+        capture_release = threading.Event()
+        capture_selection = self.clipboard.capture_selection
+
+        def block_capture(target):
+            capture = capture_selection(target)
+            capture_entered.set()
+            if not capture_release.wait(timeout=1.0):
+                raise AssertionError("test did not release rewrite capture")
+            return capture
+
+        self.clipboard.capture_selection = block_capture
+        service = self.make_service(scheduler)
+
+        self.assertTrue(service.dispatch(StartRewrite()))
+        self.assertTrue(capture_entered.wait(timeout=1.0))
+        self.assertEqual(self.clipboard.current_text, "Original")
+
+        service.cancel_active()
+        capture_release.set()
+        scheduler.join()
+
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(self.clipboard.current_text, "previous")
+        self.assertEqual(self.clipboard.restores, ["previous"])
+        self.assertFalse(hasattr(self.provider, "rewrite_request"))
+        self.assertEqual(self.clipboard.applied, [])
+        self.assertEqual(self.statistics.rewrites, [])
+
     def test_translation_prepares_picker_then_translates_after_choice(self):
         picker_restores = []
         self.service.subscribe(
@@ -479,6 +510,43 @@ class WorkflowServiceTests(unittest.TestCase):
         )
         self.assertEqual(self.clipboard.applied, [])
         self.assertEqual(self.clipboard.restores, ["previous"])
+        self.assertEqual(self.statistics.translations, [])
+
+    def test_translation_cancel_during_capture_restores_once(self):
+        scheduler = ThreadScheduler()
+        capture_entered = threading.Event()
+        capture_release = threading.Event()
+        capture_selection = self.clipboard.capture_selection
+
+        def block_capture(target):
+            capture = capture_selection(target)
+            capture_entered.set()
+            if not capture_release.wait(timeout=1.0):
+                raise AssertionError("test did not release translation capture")
+            return capture
+
+        self.clipboard.capture_selection = block_capture
+        service = self.make_service(scheduler)
+        states = []
+        service.subscribe(states.append)
+
+        self.assertTrue(service.dispatch(StartTranslation()))
+        self.assertTrue(capture_entered.wait(timeout=1.0))
+        self.assertEqual(self.clipboard.current_text, "Original")
+
+        service.cancel_active()
+        capture_release.set()
+        scheduler.join()
+
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(self.clipboard.current_text, "previous")
+        self.assertEqual(self.clipboard.restores, ["previous"])
+        self.assertFalse(hasattr(self.provider, "translation_request"))
+        self.assertNotIn(
+            WorkflowPhase.TRANSLATION_PICKER,
+            [state.phase for state in states],
+        )
+        self.assertEqual(self.clipboard.applied, [])
         self.assertEqual(self.statistics.translations, [])
 
     def test_translation_blocks_rewrite_while_selection_is_preparing(self):

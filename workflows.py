@@ -173,7 +173,9 @@ class ClipboardGateway(Protocol):
     """High-level, focus-safe clipboard transactions owned by the adapter.
 
     ``capture_selection`` preserves the user's clipboard and returns opaque
-    ownership context. ``apply_result`` owns the conditional paste/restore
+    ownership context. ``restore`` conditionally restores only while that
+    capture still owns the clipboard, so an invalidated worker cannot overwrite
+    a newer transaction. ``apply_result`` owns the conditional paste/restore
     transaction and reports whether it pasted or only left the result copied.
     """
 
@@ -394,18 +396,14 @@ class WorkflowService:
     def _provider_failed(result: str | None) -> bool:
         return not result
 
-    def _restore_selection_if_current(
-        self, session: _Session, capture: SelectionCapture | None
-    ) -> None:
+    def _restore_selection(self, capture: SelectionCapture | None) -> None:
+        """Return capture ownership even after the workflow was invalidated."""
         if capture is None:
             return
-        with self._lock:
-            if not self._is_current_locked(session.operation_id):
-                return
-            try:
-                self._clipboard.restore(capture)
-            except Exception:
-                pass
+        try:
+            self._clipboard.restore(capture)
+        except Exception:
+            pass
 
     def _wait_for_alt_release(self, session: _Session) -> bool:
         deadline = self._clock.monotonic() + 0.8
@@ -630,9 +628,8 @@ class WorkflowService:
                         status_key="no_selection",
                     )
                     return
-                capture = self._clipboard.capture_selection(target)
+            capture = self._clipboard.capture_selection(target)
             if capture is None or not capture.text.strip():
-                self._restore_selection_if_current(session, capture)
                 self._transition(
                     session, WorkflowPhase.FAILED, status_key="no_selection"
                 )
@@ -641,7 +638,6 @@ class WorkflowService:
                 if not self._is_current_locked(session.operation_id):
                     return
                 if not self._target_is_current(session):
-                    self._restore_selection_if_current(session, capture)
                     self._transition(
                         session,
                         WorkflowPhase.FAILED,
@@ -672,11 +668,12 @@ class WorkflowService:
                 ),
             )
         except Exception:
-            if not capture_restored:
-                self._restore_selection_if_current(session, capture)
             self._transition(
                 session, WorkflowPhase.FAILED, status_key="rewrite_failed"
             )
+        finally:
+            if not capture_restored:
+                self._restore_selection(capture)
 
     # Translation
 
@@ -700,6 +697,7 @@ class WorkflowService:
 
     def _prepare_translation(self, session: _Session) -> None:
         capture = None
+        capture_restored = False
         try:
             if (
                 not self._wait_for_alt_release(session)
@@ -713,9 +711,9 @@ class WorkflowService:
             with self._lock:
                 if not self._is_current_locked(session.operation_id):
                     return
-                capture = self._clipboard.capture_selection(session.target)
+                target = session.target
+            capture = self._clipboard.capture_selection(target)
             if capture is None or not capture.text.strip():
-                self._restore_selection_if_current(session, capture)
                 self._transition(
                     session, WorkflowPhase.FAILED, status_key="no_selection"
                 )
@@ -724,7 +722,6 @@ class WorkflowService:
                 if not self._is_current_locked(session.operation_id):
                     return
                 if not self._target_is_current(session):
-                    self._restore_selection_if_current(session, capture)
                     self._transition(
                         session,
                         WorkflowPhase.FAILED,
@@ -732,13 +729,16 @@ class WorkflowService:
                     )
                     return
                 self._clipboard.restore(capture)
+                capture_restored = True
                 session.selection = capture
             self._transition(session, WorkflowPhase.TRANSLATION_PICKER)
         except Exception:
-            self._restore_selection_if_current(session, capture)
             self._transition(
                 session, WorkflowPhase.FAILED, status_key="translation_failed"
             )
+        finally:
+            if not capture_restored:
+                self._restore_selection(capture)
 
     def _choose_translation_language(self, language: str) -> bool:
         with self._lock:
