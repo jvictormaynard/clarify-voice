@@ -736,7 +736,12 @@ class LocalASRInstaller:
 
                 model = self.asset("model")
                 model_path = staging / "models" / model.filename
-                model_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    model_path.parent.mkdir(parents=True, exist_ok=True)
+                except OSError as error:
+                    raise LocalASRError(
+                        "Cannot create local-ASR model staging directory; "
+                        "retry the install.") from error
                 self._download(model, model_path, callback)
                 self._copy_license_notices(staging)
 
@@ -1086,6 +1091,7 @@ class LocalASRSidecarManager:
         self._shutdown_event = threading.Event()
         self._active_cancellations: set[threading.Event] = set()
         self._idle_timer: threading.Timer | None = None
+        self._sidecar_lock: _AssetRootInstallLock | None = None
 
     @property
     def process_id(self) -> int | None:
@@ -1125,6 +1131,32 @@ class LocalASRSidecarManager:
             except OSError:
                 pass
             raise
+
+    def _new_sidecar_lock(self) -> _AssetRootInstallLock:
+        acquire = getattr(self.installer, "_acquire_install_lock", None)
+        if callable(acquire):
+            return acquire()
+        try:
+            root = Path(self.installer.root).absolute()
+            root.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise LocalASRSidecarError(
+                "Cannot prepare the local-ASR sidecar lock; retry the operation."
+            ) from error
+        return _AssetRootInstallLock(
+            root.parent / f".{root.name}.clarifyvoice-local-asr.lock")
+
+    def _release_sidecar_lock_locked(self) -> None:
+        lock = self._sidecar_lock
+        if lock is None:
+            return
+        self._sidecar_lock = None
+        try:
+            lock.release()
+        except OSError as error:
+            raise LocalASRSidecarError(
+                "Could not release the local-ASR sidecar lock; retry the operation."
+            ) from error
 
     def _health(self, expected_process=None) -> bool:
         with self._lock:
@@ -1170,13 +1202,27 @@ class LocalASRSidecarManager:
                 self._raise_if_cancelled(cancel_event)
                 self._startup_cancel = startup_cancel
             try:
+                with self._lock:
+                    if self._sidecar_lock is None:
+                        sidecar_lock = self._new_sidecar_lock()
+                        try:
+                            sidecar_lock.acquire()
+                        except LocalASRError as error:
+                            raise LocalASRSidecarError(
+                                "Another local-ASR sidecar or asset operation is active; "
+                                "retry later.") from error
+                        self._sidecar_lock = sidecar_lock
                 if self._health():
                     with self._lock:
-                        self._raise_if_cancelled(cancel_event)
+                        try:
+                            self._raise_if_cancelled(cancel_event)
+                        except LocalASRCancelledError:
+                            self._stop_locked(expected_process=self._process)
+                            raise
                         self._schedule_idle_shutdown_locked()
                     return 0.0
                 with self._lock:
-                    self._stop_locked()
+                    self._stop_locked(keep_sidecar_lock=True)
                 self._raise_if_cancelled(cancel_event)
                 self.installer.verify(cancel_check=lambda: self._cancelled(
                     cancel_event, startup_cancel, self._shutdown_event))
@@ -1266,6 +1312,8 @@ class LocalASRSidecarManager:
                 with self._lock:
                     if self._startup_cancel is startup_cancel:
                         self._startup_cancel = None
+                    if self._process is None:
+                        self._release_sidecar_lock_locked()
         finally:
             self._startup_lock.release()
 
@@ -1295,13 +1343,12 @@ class LocalASRSidecarManager:
         self._idle_timer = timer
         timer.start()
 
-    def _stop_locked(self, expected_process=None) -> None:
+    def _stop_locked(self, expected_process=None, *, keep_sidecar_lock=False) -> None:
         if expected_process is not None and self._process is not expected_process:
             return
         self._cancel_idle_shutdown_locked()
         process = self._process
-        self._process = None
-        termination_confirmed = process is not None and process.poll() is not None
+        termination_confirmed = process is None or process.poll() is not None
         if process is not None and process.poll() is None:
             try:
                 process.terminate()
@@ -1314,12 +1361,15 @@ class LocalASRSidecarManager:
                     pass
             termination_confirmed = process.poll() is not None
         if termination_confirmed:
+            self._process = None
             try:
                 self.installer.process_record_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        self._port = 0
-        self._request_path = ""
+            self._port = 0
+            self._request_path = ""
+            if not keep_sidecar_lock:
+                self._release_sidecar_lock_locked()
 
     def stop(self) -> None:
         with self._lock:
@@ -1363,7 +1413,11 @@ class LocalASRSidecarManager:
             )
             response.raise_for_status()
             payload = response.json()
-            text = str(payload.get("text", "")).strip()
+            if (not isinstance(payload, Mapping)
+                    or not isinstance(payload.get("text"), str)):
+                raise LocalASRSidecarError(
+                    "whisper.cpp returned an invalid transcription response")
+            text = payload["text"].strip()
             if not text:
                 raise LocalASRSidecarError("whisper.cpp returned an empty transcription")
             result.put((text, None))

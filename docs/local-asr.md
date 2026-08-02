@@ -112,6 +112,8 @@ against the committed manifest. The manager then:
 - serializes inference calls through one sidecar; per-call cancellation affects
   only that call, while manager cancellation or shutdown also cancels queued
   calls;
+- holds the same crash-released, cross-process asset-root lock for the lifetime
+  of a healthy sidecar, so another harness cannot terminate an active peer;
 - records the owned PID and absolute executable path, validates that path under
   the app-owned asset root, and preserves the record if the live image differs
   or cannot be verified;

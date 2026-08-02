@@ -507,6 +507,27 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertIn("staging", str(raised.exception))
             self.assertNotIn("private disk detail", str(raised.exception))
 
+    def test_install_wraps_model_staging_directory_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            original_mkdir = Path.mkdir
+
+            def fail_model_directory(path, *args, **kwargs):
+                if Path(path).name == "models":
+                    raise OSError("private model-directory detail")
+                return original_mkdir(path, *args, **kwargs)
+
+            with patch.object(Path, "mkdir", new=fail_model_directory):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.install()
+
+            self.assertEqual(len(session.calls), 1)
+            self.assertIn("model staging", str(raised.exception))
+            self.assertNotIn("private model-directory detail", str(raised.exception))
+            self.assertFalse(installer.install_dir.exists())
+            self.assertFalse(list(fixture.root.glob(".install-*")))
+
     def test_install_removes_owned_orphaned_staging_before_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)
@@ -858,6 +879,36 @@ class LocalASRSidecarTests(unittest.TestCase):
             self.assertTrue(installer.process_record_path.is_file())
             manager.shutdown()
 
+    def test_sidecar_start_lock_preserves_peer_process_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first, first_installer, _first_session, _first_factory = self._manager(directory)
+            second_session = SidecarSession()
+            second_factory = PopenFactory()
+            second = local_asr.LocalASRSidecarManager(
+                first_installer,
+                session=second_session,
+                popen_factory=second_factory,
+                elevation_checker=lambda: False,
+                startup_timeout=0.5,
+                request_timeout=0.5,
+                idle_seconds=0,
+            )
+
+            first.start()
+
+            with self.assertRaises(local_asr.LocalASRSidecarError) as raised:
+                second.start()
+
+            self.assertIn("sidecar", str(raised.exception))
+            self.assertTrue(first_installer.process_record_path.exists())
+            self.assertEqual(second_factory.calls, [])
+            self.assertIsNotNone(first.process_id)
+
+            first.shutdown()
+            second.start()
+            self.assertTrue(first_installer.process_record_path.exists())
+            second.shutdown()
+
     def test_windows_start_refuses_elevated_or_unknown_privileges(self):
         for elevation in (True, None):
             with self.subTest(elevation=elevation), \
@@ -939,6 +990,21 @@ class LocalASRSidecarTests(unittest.TestCase):
             self.assertEqual(len(factory.processes), 2)
             self.assertEqual(installer.verify_calls, 2)
             self.assertEqual(factory.processes[0].terminate_calls, 1)
+            manager.shutdown()
+
+    def test_non_string_inference_text_is_not_reported_as_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = SidecarSession([
+                FakeResponse(payload={"text": None}),
+                FakeResponse(payload={"text": "recovered"}),
+            ])
+            manager, _installer, _session, factory = self._manager(
+                directory, session=session)
+            audio = Path(directory) / "input.wav"
+            audio.write_bytes(b"RIFF-audio")
+
+            self.assertEqual(manager.transcribe(audio), "recovered")
+            self.assertEqual(len(factory.processes), 2)
             manager.shutdown()
 
     def test_concurrent_requests_are_serialized_across_failure_and_retry(self):
@@ -1281,6 +1347,8 @@ class LocalASRSidecarTests(unittest.TestCase):
 
             self.assertEqual(factory.processes[0].terminate_calls, 1)
             self.assertIsNone(manager.process_id)
+            self.assertEqual(manager._port, 0)
+            self.assertEqual(manager._request_path, "")
 
     def test_idle_shutdown_waits_until_active_request_finishes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1356,6 +1424,10 @@ class LocalASRSidecarTests(unittest.TestCase):
             manager.stop()
 
             self.assertTrue(installer.process_record_path.exists())
+            self.assertIsNotNone(manager.process_id)
+            self.assertNotEqual(manager._port, 0)
+            self.assertTrue(manager._request_path)
+            self.assertIsNotNone(manager._sidecar_lock)
 
 
 class LocalASRRecordedProcessTests(unittest.TestCase):
