@@ -93,8 +93,13 @@ idle polling and no forced update.
 9. Recheck size, checksum, signature, and publisher immediately before calling
    visible `msiexec` UI.
 
-The manifest CAB and MSI are cached only after verification. A failed launch
-can be retried by checking again; user configuration is not part of the cache.
+The manifest CAB exists only in a unique staging directory and is deleted after
+signature verification, extraction, and strict parsing. The MSI is atomically
+published to its versioned cache path only after size, checksum, publisher,
+primary signature, and timestamp signer/certificate/status verification. Any
+failure removes that attempt's staging directory without touching a previously
+verified MSI. A failed launch can be retried by checking again; user
+configuration is not part of the cache.
 The existing GitHub release page, EXE, ZIP, and checksum path remain available
 when the updater cannot reach or validate the manifest.
 

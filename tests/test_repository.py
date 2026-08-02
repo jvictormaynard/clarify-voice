@@ -79,6 +79,10 @@ class RepositorySafetyTests(unittest.TestCase):
             "ClarifyVoice-release-manifest.cab.sha256",
         ):
             self.assertIn(required, content)
+        policy = (ROOT / "distribution" / "update-policy.json").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"require_rfc3161_timestamp": true', policy)
         self.assertNotIn("AZURE_CLIENT_SECRET", content)
 
     def test_ci_exercises_installer_lifecycle_without_signing_secrets(self):

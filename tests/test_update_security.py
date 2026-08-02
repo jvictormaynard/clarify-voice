@@ -34,6 +34,7 @@ POLICY = UpdatePolicy(
     manifest_asset="ClarifyVoice-release-manifest.cab",
     installer_asset="ClarifyVoice-windows-x64.msi",
     publisher_common_name="Joao Victor Maynard Mota",
+    require_rfc3161_timestamp=True,
     maximum_download_bytes=1024 * 1024,
 )
 
@@ -140,37 +141,103 @@ class AtomicDownloadTests(unittest.TestCase):
 
 
 class SignatureValidationTests(unittest.TestCase):
-    def test_requires_valid_signature_and_exact_publisher(self):
+    def _verify(self, artifact, payload):
+        runner = Mock(return_value=SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        ))
+        identity = verify_authenticode(
+            artifact,
+            POLICY.publisher_common_name,
+            require_timestamp=POLICY.require_rfc3161_timestamp,
+            runner=runner,
+            powershell="powershell.exe",
+        )
+        powershell_script = runner.call_args.args[0][-1]
+        for field in (
+            "TimeStamperCertificate",
+            "TimestampStatus",
+            "TimestampCommonName",
+            "TimestampThumbprint",
+        ):
+            self.assertIn(field, powershell_script)
+        return identity
+
+    def _valid_payload(self, **overrides):
+        payload = {
+            "Status": "Valid",
+            "StatusMessage": "Signature verified.",
+            "CommonName": POLICY.publisher_common_name,
+            "Thumbprint": "AB" * 20,
+            "TimestampStatus": "Valid",
+            "TimestampCommonName": "Trusted RFC3161 TSA",
+            "TimestampThumbprint": "CD" * 20,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_accepts_valid_signature_publisher_and_timestamp(self):
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / "artifact.msi"
             artifact.write_bytes(b"signed")
-            runner = Mock(return_value=SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps({
-                    "Status": "Valid",
-                    "StatusMessage": "Signature verified.",
-                    "CommonName": POLICY.publisher_common_name,
-                    "Thumbprint": "AB" * 20,
-                }),
-                stderr="",
-            ))
-            identity = verify_authenticode(
-                artifact, POLICY.publisher_common_name,
-                runner=runner, powershell="powershell.exe")
+            identity = self._verify(artifact, self._valid_payload())
             self.assertEqual(identity.thumbprint, "AB" * 20)
+            self.assertEqual(identity.timestamp_common_name, "Trusted RFC3161 TSA")
+            self.assertEqual(identity.timestamp_thumbprint, "CD" * 20)
 
-            runner.return_value = SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps({
-                    "Status": "NotSigned", "StatusMessage": "Unsigned",
-                    "CommonName": "", "Thumbprint": "",
-                }),
-                stderr="",
-            )
+    def test_rejects_missing_timestamp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"signed-without-timestamp")
             with self.assertRaises(SignatureError):
-                verify_authenticode(
-                    artifact, POLICY.publisher_common_name,
-                    runner=runner, powershell="powershell.exe")
+                self._verify(artifact, self._valid_payload(
+                    TimestampStatus="Missing",
+                    TimestampCommonName="",
+                    TimestampThumbprint="",
+                ))
+
+    def test_rejects_invalid_timestamp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"signed-with-invalid-timestamp")
+            with self.assertRaises(SignatureError):
+                self._verify(artifact, self._valid_payload(
+                    TimestampStatus="Invalid",
+                ))
+
+    def test_rejects_invalid_timestamp_certificate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"signed-with-invalid-timestamp-certificate")
+            with self.assertRaises(SignatureError):
+                self._verify(artifact, self._valid_payload(
+                    TimestampThumbprint="not-a-thumbprint",
+                ))
+
+    def test_rejects_mismatched_authenticode_publisher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"signed-by-wrong-publisher")
+            with self.assertRaises(SignatureError):
+                self._verify(artifact, self._valid_payload(
+                    CommonName="Someone Else",
+                ))
+
+    def test_rejects_invalid_primary_signature(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"unsigned")
+            with self.assertRaises(SignatureError):
+                self._verify(artifact, self._valid_payload(
+                    Status="NotSigned",
+                    StatusMessage="Unsigned",
+                    CommonName="",
+                    Thumbprint="",
+                    TimestampStatus="Missing",
+                    TimestampCommonName="",
+                    TimestampThumbprint="",
+                ))
 
 
 class PrepareUpdateTests(unittest.TestCase):
@@ -185,12 +252,15 @@ class PrepareUpdateTests(unittest.TestCase):
                 destination.write_bytes(b"cab" if destination.suffix == ".cab" else b"msi")
                 return destination
 
-            def verifier(path, publisher):
+            def verifier(path, publisher, *, require_timestamp):
                 calls.append(("verify", path.name, publisher))
-                return SignatureIdentity(publisher, "AB" * 20)
+                self.assertTrue(require_timestamp)
+                return SignatureIdentity(
+                    publisher, "AB" * 20, "Trusted TSA", "CD" * 20)
 
             def extractor(cab, output):
                 calls.append(("extract", cab.name))
+                output.mkdir(parents=True)
                 manifest = output / "release-manifest.json"
                 manifest.write_bytes(manifest_bytes())
                 return manifest
@@ -205,6 +275,11 @@ class PrepareUpdateTests(unittest.TestCase):
             )
             self.assertEqual(prepared.manifest.version, "0.2.0")
             self.assertEqual(prepared.installer_path.read_bytes(), b"msi")
+            self.assertEqual(
+                prepared.installer_path,
+                cache / "0.2.0" / POLICY.installer_asset,
+            )
+            self.assertEqual(list(cache.glob(".update-staging-*")), [])
             self.assertEqual([call[0] for call in calls], [
                 "download", "verify", "extract", "download", "verify"])
 
@@ -221,19 +296,121 @@ class PrepareUpdateTests(unittest.TestCase):
 
             def extractor(cab, output):
                 del cab
+                output.mkdir(parents=True)
                 manifest = output / "release-manifest.json"
                 manifest.write_bytes(manifest_bytes("0.1.2"))
                 return manifest
 
             prepared = prepare_update(
                 "0.1.2", cache, policy=POLICY,
-                signature_verifier=lambda path, publisher: SignatureIdentity(
-                    publisher, "AB" * 20),
+                signature_verifier=lambda path, publisher, require_timestamp: (
+                    SignatureIdentity(
+                        publisher, "AB" * 20, "Trusted TSA", "CD" * 20)),
                 manifest_extractor=extractor,
                 downloader=downloader,
             )
             self.assertIsNone(prepared)
             self.assertEqual(downloads, [POLICY.manifest_asset])
+            self.assertEqual(list(cache.rglob(POLICY.manifest_asset)), [])
+            self.assertEqual(list(cache.glob(".update-staging-*")), [])
+
+    def test_cab_verification_failure_cleans_staging_and_preserves_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            verified_installer = cache / "0.2.0" / POLICY.installer_asset
+            verified_installer.parent.mkdir(parents=True)
+            verified_installer.write_bytes(b"previously-verified")
+
+            def downloader(url, destination, **kwargs):
+                del url, kwargs
+                destination.write_bytes(b"untrusted-cab")
+                return destination
+
+            def reject_signature(path, publisher, *, require_timestamp):
+                del path, publisher, require_timestamp
+                raise SignatureError("publisher mismatch")
+
+            with self.assertRaises(SignatureError):
+                prepare_update(
+                    "0.1.2", cache, policy=POLICY,
+                    signature_verifier=reject_signature,
+                    downloader=downloader,
+                )
+            self.assertEqual(verified_installer.read_bytes(), b"previously-verified")
+            self.assertEqual(list(cache.rglob(POLICY.manifest_asset)), [])
+            self.assertEqual(list(cache.glob(".update-staging-*")), [])
+
+    def test_manifest_extraction_or_parse_failure_cleans_staged_cab(self):
+        for failure in ("extract", "parse"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                cache = Path(directory)
+
+                def downloader(url, destination, **kwargs):
+                    del url, kwargs
+                    destination.write_bytes(b"signed-cab")
+                    return destination
+
+                def verifier(path, publisher, *, require_timestamp):
+                    del path, require_timestamp
+                    return SignatureIdentity(
+                        publisher, "AB" * 20, "Trusted TSA", "CD" * 20)
+
+                def extractor(cab, output):
+                    del cab
+                    if failure == "extract":
+                        raise ManifestError("cannot extract")
+                    output.mkdir(parents=True)
+                    manifest = output / "release-manifest.json"
+                    manifest.write_bytes(b"not-json")
+                    return manifest
+
+                with self.assertRaises(ManifestError):
+                    prepare_update(
+                        "0.1.2", cache, policy=POLICY,
+                        signature_verifier=verifier,
+                        manifest_extractor=extractor,
+                        downloader=downloader,
+                    )
+                self.assertEqual(list(cache.rglob(POLICY.manifest_asset)), [])
+                self.assertEqual(list(cache.glob(".update-staging-*")), [])
+
+    def test_msi_signature_failure_preserves_previous_verified_installer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            verified_installer = cache / "0.2.0" / POLICY.installer_asset
+            verified_installer.parent.mkdir(parents=True)
+            verified_installer.write_bytes(b"previously-verified")
+
+            def downloader(url, destination, **kwargs):
+                del url, kwargs
+                destination.write_bytes(
+                    b"cab" if destination.suffix == ".cab" else b"untrusted-msi")
+                return destination
+
+            def verifier(path, publisher, *, require_timestamp):
+                del require_timestamp
+                if path.suffix == ".msi":
+                    raise SignatureError("publisher mismatch")
+                return SignatureIdentity(
+                    publisher, "AB" * 20, "Trusted TSA", "CD" * 20)
+
+            def extractor(cab, output):
+                del cab
+                output.mkdir(parents=True)
+                manifest = output / "release-manifest.json"
+                manifest.write_bytes(manifest_bytes())
+                return manifest
+
+            with self.assertRaises(SignatureError):
+                prepare_update(
+                    "0.1.2", cache, policy=POLICY,
+                    signature_verifier=verifier,
+                    manifest_extractor=extractor,
+                    downloader=downloader,
+                )
+            self.assertEqual(verified_installer.read_bytes(), b"previously-verified")
+            self.assertEqual(list(cache.rglob("*.msi")), [verified_installer])
+            self.assertEqual(list(cache.glob(".update-staging-*")), [])
 
 
 class ReleaseManifestScriptTests(unittest.TestCase):
@@ -266,14 +443,23 @@ class LaunchPreparedUpdateTests(unittest.TestCase):
             prepared = PreparedUpdate(
                 manifest=manifest,
                 installer_path=installer,
-                signer=SignatureIdentity(POLICY.publisher_common_name, "AB" * 20),
+                signer=SignatureIdentity(
+                    POLICY.publisher_common_name,
+                    "AB" * 20,
+                    "Trusted TSA",
+                    "CD" * 20,
+                ),
             )
             verifier = Mock(return_value=prepared.signer)
             runner = Mock()
             with patch("update_security.platform.system", return_value="Windows"):
                 launch_prepared_update(
                     prepared, signature_verifier=verifier, runner=runner)
-            verifier.assert_called_once_with(installer, POLICY.publisher_common_name)
+            verifier.assert_called_once_with(
+                installer,
+                POLICY.publisher_common_name,
+                require_timestamp=True,
+            )
             runner.assert_called_once()
 
             installer.write_bytes(b"bad")

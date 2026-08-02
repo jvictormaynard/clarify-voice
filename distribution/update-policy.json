@@ -5,5 +5,6 @@
   "manifest_asset": "ClarifyVoice-release-manifest.cab",
   "installer_asset": "ClarifyVoice-windows-x64.msi",
   "publisher_common_name": "Joao Victor Maynard Mota",
+  "require_rfc3161_timestamp": true,
   "maximum_download_bytes": 268435456
 }

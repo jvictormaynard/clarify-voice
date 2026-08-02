@@ -17,6 +17,9 @@ $expectedPublisher = [string]$policy.publisher_common_name
 if (-not $expectedPublisher) {
     throw "Update policy has no pinned publisher common name."
 }
+if ($policy.require_rfc3161_timestamp -cne $true) {
+    throw "Release policy must require RFC3161 timestamps."
+}
 
 foreach ($candidate in $Path) {
     $resolved = (Resolve-Path $candidate).Path

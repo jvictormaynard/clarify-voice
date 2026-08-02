@@ -63,6 +63,7 @@ class UpdatePolicy:
     manifest_asset: str
     installer_asset: str
     publisher_common_name: str
+    require_rfc3161_timestamp: bool
     maximum_download_bytes: int
 
     @property
@@ -94,6 +95,8 @@ class ReleaseManifest:
 class SignatureIdentity:
     common_name: str
     thumbprint: str
+    timestamp_common_name: str
+    timestamp_thumbprint: str
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,7 @@ class PreparedUpdate:
     manifest: ReleaseManifest
     installer_path: Path
     signer: SignatureIdentity
+    require_rfc3161_timestamp: bool = True
 
 
 def _resource_root() -> Path:
@@ -156,7 +160,8 @@ def load_update_policy(path: Path | None = None) -> UpdatePolicy:
         raise UpdatePolicyError(f"cannot read update policy: {error}") from error
     _require_exact_keys(payload, {
         "schema_version", "repository", "channel", "manifest_asset",
-        "installer_asset", "publisher_common_name", "maximum_download_bytes",
+        "installer_asset", "publisher_common_name", "require_rfc3161_timestamp",
+        "maximum_download_bytes",
     }, label="update policy")
     if payload["schema_version"] != POLICY_SCHEMA_VERSION:
         raise UpdatePolicyError("unsupported update policy schema")
@@ -175,6 +180,9 @@ def load_update_policy(path: Path | None = None) -> UpdatePolicy:
     publisher = str(payload["publisher_common_name"]).strip()
     if not publisher or len(publisher) > 256:
         raise UpdatePolicyError("publisher identity is not configured")
+    require_timestamp = payload["require_rfc3161_timestamp"]
+    if require_timestamp is not True:
+        raise UpdatePolicyError("update policy must require RFC3161 timestamps")
     maximum = payload["maximum_download_bytes"]
     if not isinstance(maximum, int) or not 1_048_576 <= maximum <= 1_073_741_824:
         raise UpdatePolicyError("invalid maximum download size")
@@ -184,6 +192,7 @@ def load_update_policy(path: Path | None = None) -> UpdatePolicy:
         manifest_asset=manifest_asset,
         installer_asset=installer_asset,
         publisher_common_name=publisher,
+        require_rfc3161_timestamp=require_timestamp,
         maximum_download_bytes=maximum,
     )
 
@@ -328,9 +337,10 @@ def verify_authenticode(
         path: Path,
         expected_common_name: str,
         *,
+        require_timestamp: bool = True,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         powershell: str | None = None) -> SignatureIdentity:
-    """Require a Windows-trusted Authenticode signature and pinned publisher."""
+    """Require a trusted signature, pinned publisher, and valid timestamp."""
 
     if not path.is_file():
         raise SignatureError(f"signed file is missing: {path}")
@@ -340,12 +350,24 @@ def verify_authenticode(
         "$signature=Get-AuthenticodeSignature -LiteralPath "
         "$env:CLARIFYVOICE_SIGNATURE_PATH;"
         "$certificate=$signature.SignerCertificate;"
+        "$timestampCertificate=$signature.TimeStamperCertificate;"
+        "$timestampStatus=if(-not $timestampCertificate){'Missing'}"
+        "elseif(([string]$signature.Status -ne 'Valid') -or "
+        "[string]::IsNullOrWhiteSpace([string]$timestampCertificate.Thumbprint))"
+        "{'Invalid'}else{'Valid'};"
         "$result=[ordered]@{Status=[string]$signature.Status;"
         "StatusMessage=[string]$signature.StatusMessage;"
         "CommonName=if($certificate){$certificate.GetNameInfo("
         "[System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,"
         "$false)}else{''};"
-        "Thumbprint=if($certificate){[string]$certificate.Thumbprint}else{''}};"
+        "Thumbprint=if($certificate){[string]$certificate.Thumbprint}else{''};"
+        "TimestampStatus=$timestampStatus;"
+        "TimestampCommonName=if($timestampCertificate){"
+        "$timestampCertificate.GetNameInfo("
+        "[System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,"
+        "$false)}else{''};"
+        "TimestampThumbprint=if($timestampCertificate){"
+        "[string]$timestampCertificate.Thumbprint}else{''}};"
         "$result|ConvertTo-Json -Compress"
     )
     environment = os.environ.copy()
@@ -364,6 +386,8 @@ def verify_authenticode(
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as error:
         raise SignatureError("Authenticode verifier returned invalid output") from error
+    if not isinstance(payload, dict):
+        raise SignatureError("Authenticode verifier returned invalid output")
     if payload.get("Status") != "Valid":
         message = payload.get("StatusMessage") or payload.get("Status") or "unknown"
         raise SignatureError(f"Authenticode signature is not valid: {message}")
@@ -373,7 +397,24 @@ def verify_authenticode(
     thumbprint = str(payload.get("Thumbprint", "")).replace(" ", "").upper()
     if not re.fullmatch(r"[0-9A-F]{40,128}", thumbprint):
         raise SignatureError("Authenticode certificate thumbprint is missing")
-    return SignatureIdentity(common_name=common_name, thumbprint=thumbprint)
+    timestamp_status = str(payload.get("TimestampStatus", "Missing"))
+    timestamp_common_name = str(payload.get("TimestampCommonName", "")).strip()
+    timestamp_thumbprint = str(
+        payload.get("TimestampThumbprint", "")).replace(" ", "").upper()
+    if require_timestamp:
+        if timestamp_status != "Valid":
+            raise SignatureError(
+                "RFC3161 timestamp is missing or invalid: " + timestamp_status)
+        if not timestamp_common_name:
+            raise SignatureError("RFC3161 timestamp signer is missing")
+        if not re.fullmatch(r"[0-9A-F]{40,128}", timestamp_thumbprint):
+            raise SignatureError("RFC3161 timestamp certificate is missing")
+    return SignatureIdentity(
+        common_name=common_name,
+        thumbprint=thumbprint,
+        timestamp_common_name=timestamp_common_name,
+        timestamp_thumbprint=timestamp_thumbprint,
+    )
 
 
 def extract_manifest_from_cab(
@@ -406,50 +447,63 @@ def prepare_update(
         *,
         policy: UpdatePolicy | None = None,
         session: Any = requests,
-        signature_verifier: Callable[[Path, str], SignatureIdentity] = verify_authenticode,
+        signature_verifier: Callable[..., SignatureIdentity] = verify_authenticode,
         manifest_extractor: Callable[[Path, Path], Path] = extract_manifest_from_cab,
         downloader: Callable[..., Path] = download_atomic) -> PreparedUpdate | None:
     """Return a verified MSI for a newer release, or None when already current."""
 
     active_policy = policy or load_update_policy()
     cache_directory.mkdir(parents=True, exist_ok=True)
-    cab_path = cache_directory / active_policy.manifest_asset
-    downloader(
-        active_policy.manifest_url,
-        cab_path,
-        maximum_bytes=4 * 1024 * 1024,
-        session=session,
-    )
-    signature_verifier(cab_path, active_policy.publisher_common_name)
     with tempfile.TemporaryDirectory(
-            prefix="manifest-", dir=cache_directory) as temporary:
-        manifest_path = manifest_extractor(cab_path, Path(temporary))
+            prefix=".update-staging-", dir=cache_directory) as temporary:
+        staging_directory = Path(temporary)
+        cab_path = staging_directory / active_policy.manifest_asset
+        downloader(
+            active_policy.manifest_url,
+            cab_path,
+            maximum_bytes=4 * 1024 * 1024,
+            session=session,
+        )
+        signature_verifier(
+            cab_path,
+            active_policy.publisher_common_name,
+            require_timestamp=active_policy.require_rfc3161_timestamp,
+        )
+        manifest_path = manifest_extractor(
+            cab_path, staging_directory / "manifest")
         manifest = parse_release_manifest(manifest_path.read_bytes(), active_policy)
-    if not require_newer_version(current_version, manifest):
-        return None
-    version_directory = cache_directory / manifest.version
-    installer_path = version_directory / manifest.asset.name
-    downloader(
-        manifest.asset.url,
-        installer_path,
-        maximum_bytes=active_policy.maximum_download_bytes,
-        expected_size=manifest.asset.size,
-        expected_sha256=manifest.asset.sha256,
-        session=session,
-    )
-    signer = signature_verifier(
-        installer_path, manifest.asset.publisher_common_name)
-    return PreparedUpdate(
-        manifest=manifest,
-        installer_path=installer_path,
-        signer=signer,
-    )
+        if not require_newer_version(current_version, manifest):
+            return None
+        staged_installer = staging_directory / manifest.asset.name
+        downloader(
+            manifest.asset.url,
+            staged_installer,
+            maximum_bytes=active_policy.maximum_download_bytes,
+            expected_size=manifest.asset.size,
+            expected_sha256=manifest.asset.sha256,
+            session=session,
+        )
+        signer = signature_verifier(
+            staged_installer,
+            manifest.asset.publisher_common_name,
+            require_timestamp=active_policy.require_rfc3161_timestamp,
+        )
+        version_directory = cache_directory / manifest.version
+        version_directory.mkdir(parents=True, exist_ok=True)
+        installer_path = version_directory / manifest.asset.name
+        os.replace(staged_installer, installer_path)
+        return PreparedUpdate(
+            manifest=manifest,
+            installer_path=installer_path,
+            signer=signer,
+            require_rfc3161_timestamp=active_policy.require_rfc3161_timestamp,
+        )
 
 
 def launch_prepared_update(
         prepared: PreparedUpdate,
         *,
-        signature_verifier: Callable[[Path, str], SignatureIdentity] = verify_authenticode,
+        signature_verifier: Callable[..., SignatureIdentity] = verify_authenticode,
         runner: Callable[..., subprocess.Popen[Any]] = subprocess.Popen) -> None:
     """Revalidate and launch a prepared MSI with visible Windows Installer UI."""
 
@@ -463,5 +517,9 @@ def launch_prepared_update(
         raise IntegrityError("prepared installer size changed before launch")
     if sha256_file(installer_path) != asset.sha256:
         raise IntegrityError("prepared installer checksum changed before launch")
-    signature_verifier(installer_path, asset.publisher_common_name)
+    signature_verifier(
+        installer_path,
+        asset.publisher_common_name,
+        require_timestamp=prepared.require_rfc3161_timestamp,
+    )
     runner(["msiexec.exe", "/i", str(installer_path.resolve()), "/passive"])
