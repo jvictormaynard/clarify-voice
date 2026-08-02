@@ -27,6 +27,26 @@ class DependencyLockCheckerTests(unittest.TestCase):
         self.assertTrue(observed["pins"])
         self.assertFalse(observed["upgrade"])
 
+    def test_runtime_lock_uses_runtime_intent(self):
+        observed = {}
+
+        def fake_compile(command, **_kwargs):
+            observed["requirements"] = command[-1]
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(check_dependency_lock.subprocess, "run", fake_compile):
+            result = check_dependency_lock.main(
+                [
+                    "--lock-file",
+                    "requirements-lock-runtime-windows.txt",
+                    "--requirements-file",
+                    "requirements.txt",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(observed["requirements"], "requirements.txt")
+
 
 if __name__ == "__main__":
     unittest.main()

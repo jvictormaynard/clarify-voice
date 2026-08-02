@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -90,6 +91,7 @@ class RepositorySafetyTests(unittest.TestCase):
         for lock_name in (
             "requirements-lock-linux.txt",
             "requirements-lock-windows.txt",
+            "requirements-lock-runtime-windows.txt",
         ):
             lock = ROOT / lock_name
             self.assertTrue(lock.is_file(), lock_name)
@@ -111,6 +113,19 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertIn("shutil.copyfile(lockfile, generated)", checker_content)
         self.assertNotIn('"--upgrade"', checker_content)
 
+        runtime_lock = (ROOT / "requirements-lock-runtime-windows.txt").read_text(
+            encoding="utf-8"
+        )
+        for development_tool in (
+            "cyclonedx-bom",
+            "mypy",
+            "pip-audit",
+            "pip-tools",
+            "pyinstaller",
+            "ruff",
+        ):
+            self.assertNotRegex(runtime_lock, rf"(?im)^{development_tool}==")
+
     def test_setup_and_workflows_use_the_shared_lock(self):
         setup = (ROOT / "scripts" / "setup.ps1").read_text(encoding="utf-8")
         deploy = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
@@ -127,6 +142,7 @@ class RepositorySafetyTests(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertIn("requirements-lock-windows.txt", workflow)
+            self.assertIn("requirements-lock-runtime-windows.txt", workflow)
             if workflow_name == "ci.yml":
                 self.assertIn("requirements-lock-linux.txt", workflow)
             self.assertIn("scripts/check_dependency_lock.py", workflow)
@@ -140,6 +156,52 @@ class RepositorySafetyTests(unittest.TestCase):
                     "if: matrix.os == 'ubuntu-latest'\n        run: python scripts/dependency_audit.py",
                     workflow,
                 )
+
+    def test_release_quality_gates_are_fail_fast_steps(self):
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("- name: Run tests", workflow)
+        for step_name, command in (
+            (
+                "Install locked development dependencies",
+                "python -m pip install",
+            ),
+            (
+                "Check development dependency lock",
+                "python scripts/check_dependency_lock.py",
+            ),
+            (
+                "Check runtime dependency lock",
+                "python scripts/check_dependency_lock.py",
+            ),
+            ("Run Ruff lint", "ruff check"),
+            ("Run Ruff format check", "ruff format --check"),
+            ("Run targeted type checks", "mypy"),
+            ("Audit dependencies", "python scripts/dependency_audit.py"),
+            ("Run unit tests", "python -m unittest"),
+            ("Compile Python sources", "python -m compileall"),
+        ):
+            block = re.search(
+                rf"(?ms)^      - name: {re.escape(step_name)}\n(.*?)(?=^      - name: |\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(block, step_name)
+            assert block is not None
+            self.assertIn(f"run: {command}", block.group(1), step_name)
+            self.assertNotIn("run: |", block.group(1), step_name)
+
+    def test_release_sbom_uses_runtime_only_lock(self):
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "cyclonedx-py requirements requirements-lock-runtime-windows.txt",
+            workflow,
+        )
+        self.assertNotIn(
+            "cyclonedx-py requirements requirements-lock-windows.txt", workflow
+        )
 
     def test_release_has_sbom_and_provenance_contract(self):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(

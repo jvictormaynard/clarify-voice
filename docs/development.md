@@ -30,11 +30,20 @@ on the matching runner only when intentionally changing dependency intent:
 ```text
 python -m piptools compile --strip-extras --output-file=requirements-lock-linux.txt requirements-dev.txt
 python -m piptools compile --strip-extras --output-file=requirements-lock-windows.txt requirements-dev.txt
+python -m piptools compile --strip-extras --output-file=requirements-lock-runtime-windows.txt requirements.txt
 ```
 
-Do not edit either lock file by hand. Each CI runner checks its corresponding
+Do not edit any lock file by hand. Each CI runner checks its corresponding
 file in a temporary path, so Linux and Windows platform markers are not
 silently treated as interchangeable.
+
+The `requirements-lock-windows.txt` file includes the development and packaging
+toolchain used to build and validate the executable. The separate
+`requirements-lock-runtime-windows.txt` file is compiled only from
+`requirements.txt`; it contains the runtime dependency graph and is the sole
+input to the release SBOM. Keeping these locks separate prevents Ruff, mypy,
+pip-audit, pip-tools, CycloneDX, and PyInstaller from being reported as shipped
+application components while retaining pinned, reproducible build inputs.
 
 Environment variables are optional because provider settings can be entered in
 the UI. For local automation, copy `.env.example` to `.env` and fill only the
@@ -118,8 +127,9 @@ reviewed-exception policy lives in `dependency-audit.json`; it is intentionally
 empty today. Any future exception must include a maintainer-approved rationale
 in that file and should be removed as soon as the dependency can be upgraded.
 
-Tagged releases also publish `ClarifyVoice.sbom.json` (CycloneDX), include it in
-the portable ZIP, and create GitHub artifact attestations for the release files.
+Tagged releases also publish `ClarifyVoice.sbom.json` (CycloneDX) from the
+runtime-only `requirements-lock-runtime-windows.txt` lock, include it in the
+portable ZIP, and create GitHub artifact attestations for the release files.
 The attestation is verifiable with GitHub's artifact-attestation tooling and is
 separate from the existing SHA-256 checksum.
 

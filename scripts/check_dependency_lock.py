@@ -19,11 +19,12 @@ ROOT = Path(__file__).resolve().parents[1]
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock-file", default="requirements-lock-linux.txt")
+    parser.add_argument("--requirements-file", default="requirements-dev.txt")
     args = parser.parse_args(argv)
     lockfile = ROOT / args.lock_file
     header = (
         "#    pip-compile --output-file="
-        f"{Path(args.lock_file).name} --strip-extras requirements-dev.txt"
+        f"{Path(args.lock_file).name} --strip-extras {args.requirements_file}"
     )
     with tempfile.TemporaryDirectory(prefix="clarify-voice-lock-") as directory:
         generated = Path(directory) / Path(args.lock_file).name
@@ -39,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
             "--strip-extras",
             "--output-file",
             str(generated),
-            "requirements-dev.txt",
+            args.requirements_file,
         ]
         try:
             result = subprocess.run(

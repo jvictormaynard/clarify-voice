@@ -25,6 +25,7 @@ The tag, release, and executable must all originate from the same green
 - `requirements-dev.txt`
 - `requirements-lock-linux.txt`
 - `requirements-lock-windows.txt`
+- `requirements-lock-runtime-windows.txt`
 - `scripts/build.ps1`
 - `.github/workflows/ci.yml`
 - `.github/workflows/release.yml`

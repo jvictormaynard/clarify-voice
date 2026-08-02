@@ -23,6 +23,7 @@ REQUIRED_FILES = (
     "requirements-dev.txt",
     "requirements-lock-linux.txt",
     "requirements-lock-windows.txt",
+    "requirements-lock-runtime-windows.txt",
     "scripts/build.ps1",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
@@ -132,6 +133,15 @@ def main() -> int:
             failures.append(f"release workflow does not reference {asset}")
     if "requirements-lock-windows.txt" not in release_workflow:
         failures.append("release workflow does not use requirements-lock-windows.txt")
+    if "requirements-lock-runtime-windows.txt" not in release_workflow:
+        failures.append(
+            "release workflow does not use requirements-lock-runtime-windows.txt"
+        )
+    if (
+        "cyclonedx-py requirements requirements-lock-runtime-windows.txt"
+        not in release_workflow
+    ):
+        failures.append("release SBOM is not generated from the runtime lock")
     if "attest-build-provenance" not in release_workflow:
         failures.append("release workflow does not publish artifact provenance")
 
