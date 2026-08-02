@@ -2236,7 +2236,12 @@ class Recorder:
 
     @staticmethod
     def _cleanup_orphaned_recordings():
-        """Remove only app-owned WAVs left by an interrupted session."""
+        """Remove app-owned WAVs only when Windows instance ownership is held."""
+        # SingleInstanceGuard provides the exclusivity contract on Windows.
+        # Source runs on Unix do not have equivalent inter-process locking, so
+        # a second instance may still own an open session file.
+        if not IS_WIN:
+            return
         try:
             data_dir = Path(DATA_DIR).resolve()
             candidates = []
@@ -4954,7 +4959,8 @@ class App(ctk.CTk):
                 except MicrophoneUnavailableError as error:
                     session.finalize("failed", error)
                     if is_current(session):
-                        self.after(0, lambda: self._show_microphone_unavailable(session))
+                        self.after(0, lambda session=session:
+                                   self._show_microphone_unavailable(session))
                 except RecordingCancelledError as error:
                     session.finalize("cancelled", error)
                 except Exception as error:
@@ -4962,11 +4968,13 @@ class App(ctk.CTk):
                     if is_current(session):
                         finisher = getattr(self, "_finish_recording_session", None)
                         if finisher is not None:
-                            self.after(0, lambda: finisher(session, error=error))
+                            self.after(0, lambda session=session, error=error:
+                                       finisher(session, error=error))
                         else:
                             self._recording_session = None
+                            message = f"Err: {error}"
                             self.after(0, lambda: self._set_state(
-                                "ready", f"Err: {error}"))
+                                "ready", message))
             finally:
                 session.detach_worker(threading.current_thread())
         worker = threading.Thread(target=start, daemon=True)
@@ -5065,8 +5073,9 @@ class App(ctk.CTk):
                 if is_current(session):
                     finisher = getattr(self, "_finish_recording_session", None)
                     if finisher is not None:
-                        self.after(0, lambda: finisher(
-                            session, error=error, status_key="no_audio"))
+                        self.after(0, lambda session=session, error=error:
+                                   finisher(session, error=error,
+                                            status_key="no_audio"))
                     else:
                         self._recording_session = None
                         self.after(0, lambda: self._set_state(
@@ -5076,7 +5085,8 @@ class App(ctk.CTk):
                 if is_current(session):
                     finisher = getattr(self, "_finish_recording_session", None)
                     if finisher is not None:
-                        self.after(0, lambda: finisher(session, error=error))
+                        self.after(0, lambda session=session, error=error:
+                                   finisher(session, error=error))
                     else:
                         self._recording_session = None
                         self.after(0, lambda: self._set_state(

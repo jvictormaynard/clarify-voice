@@ -4,6 +4,7 @@ import os
 import queue
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1451,12 +1452,13 @@ class RewriteWorkflowTests(unittest.TestCase):
                     recorder=recorder, audio_path=audio_path)
                 session.state = "recording"
                 session.start_finished.set()
-                finished = threading.Event()
+                callbacks_ready = threading.Event()
+                callbacks = []
                 states = []
 
                 def after(_delay, callback):
-                    callback()
-                    finished.set()
+                    callbacks.append(callback)
+                    callbacks_ready.set()
 
                 harness = SimpleNamespace(
                     _rec_start=100.0,
@@ -1481,7 +1483,12 @@ class RewriteWorkflowTests(unittest.TestCase):
                 with patch.object(app.time, "sleep"), \
                         patch.object(app, "call_transcription_provider") as provider:
                     app.App._stop_recording(harness)
-                    self.assertTrue(finished.wait(1))
+                    self.assertTrue(callbacks_ready.wait(1))
+                    deadline = time.time() + 1
+                    while session._active_workers() and time.time() < deadline:
+                        time.sleep(0.01)
+                    for callback in callbacks:
+                        callback()
 
                 provider.assert_not_called()
                 recorder.stop.assert_called_once_with()
@@ -1489,6 +1496,116 @@ class RewriteWorkflowTests(unittest.TestCase):
                 self.assertIsInstance(session.error, app.RecordingEncodingError)
                 self.assertEqual(session.state, "failed")
                 self.assertFalse(audio_path.exists())
+
+    def test_provider_failure_callback_binds_error_after_except(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "recording.wav"
+            audio_path.write_bytes(b"0" * 1001)
+            recorder = SimpleNamespace(stop=Mock(), cancel=Mock())
+            session = app.RecordingSession(recorder=recorder, audio_path=audio_path)
+            session.state = "recording"
+            session.start_finished.set()
+            callbacks = []
+            callbacks_ready = threading.Event()
+            states = []
+
+            def after(_delay, callback):
+                callbacks.append(callback)
+                callbacks_ready.set()
+
+            harness = SimpleNamespace(
+                _rec_start=100.0,
+                _recording_session=session,
+                _recording_usage={},
+                mode="transcribe",
+                lang="en",
+                _closing=False,
+                _session_is_current=lambda candidate: (
+                    harness._recording_session is candidate and not harness._closing),
+                _set_state=Mock(side_effect=lambda state, text="": states.append(
+                    (state, text))),
+                _t=lambda key: key,
+                after=after,
+            )
+            harness._finish_recording_session = (
+                lambda current, text=None, error=None, status_key=None:
+                app.App._finish_recording_session(
+                    harness, current, text, error, status_key))
+
+            with patch.object(app.time, "sleep"), patch.object(
+                    app, "call_transcription_provider",
+                    return_value="[Error: provider unavailable]") as provider:
+                app.App._stop_recording(harness)
+                self.assertTrue(callbacks_ready.wait(1))
+                deadline = time.time() + 1
+                while session._active_workers() and time.time() < deadline:
+                    time.sleep(0.01)
+                for callback in callbacks:
+                    callback()
+
+            provider.assert_called_once_with(audio_path, "transcribe", "en")
+            self.assertEqual(states, [("processing", ""), ("ready", "error")])
+            self.assertIsInstance(session.error, app.RecordingError)
+            self.assertEqual(session.state, "failed")
+            self.assertFalse(audio_path.exists())
+
+    def test_generic_start_failure_callback_binds_error_after_except(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "recording.wav"
+            recorder = SimpleNamespace(
+                start=Mock(side_effect=RuntimeError("startup failed")),
+                cancel=Mock(),
+            )
+            session = app.RecordingSession(recorder=recorder, audio_path=audio_path)
+            callbacks = []
+            callbacks_ready = threading.Event()
+            states = []
+
+            def after(_delay, callback):
+                callbacks.append(callback)
+                callbacks_ready.set()
+
+            harness = SimpleNamespace(
+                _rewrite_active=False,
+                _translation_active=False,
+                app_state="ready",
+                result_frame=SimpleNamespace(winfo_manager=lambda: False),
+                _hide_result=Mock(),
+                _update_focused_icon=Mock(),
+                winfo_viewable=lambda: True,
+                recorder=recorder,
+                _recording_session=None,
+                _new_recording_session=lambda: session,
+                _recording_usage={},
+                mode="transcribe",
+                lang="en",
+                _closing=False,
+                _session_is_current=lambda candidate: (
+                    harness._recording_session is candidate and not harness._closing),
+                _set_state=Mock(side_effect=lambda state, text="": states.append(
+                    (state, text))),
+                _t=lambda key: key,
+                after=after,
+            )
+            harness._finish_recording_session = (
+                lambda current, text=None, error=None, status_key=None:
+                app.App._finish_recording_session(
+                    harness, current, text, error, status_key))
+
+            with patch.object(app, "_has_active_microphone", return_value=True), \
+                    patch.object(app, "_recording_usage_context", return_value={}):
+                app.App._start_recording(harness)
+                self.assertTrue(callbacks_ready.wait(1))
+                deadline = time.time() + 1
+                while session._active_workers() and time.time() < deadline:
+                    time.sleep(0.01)
+                for callback in callbacks:
+                    callback()
+
+            self.assertEqual(states, [("recording", ""), ("ready", "error")])
+            self.assertIsInstance(session.error, RuntimeError)
+            self.assertEqual(session.state, "failed")
+            self.assertFalse(audio_path.exists())
 
 
 class WindowFadeTests(unittest.TestCase):

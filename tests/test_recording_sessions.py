@@ -113,7 +113,8 @@ class RecordingSessionTests(unittest.TestCase):
             for path in (legacy, session_wav, unrelated, wrong_suffix, outside_wav):
                 path.write_bytes(b"audio")
 
-            with patch.object(app, "DATA_DIR", data_dir), patch.object(
+            with patch.object(app, "IS_WIN", True), patch.object(
+                    app, "DATA_DIR", data_dir), patch.object(
                     app, "AUDIO_PATH", legacy):
                 app.Recorder._cleanup_orphaned_recordings()
 
@@ -128,7 +129,8 @@ class RecordingSessionTests(unittest.TestCase):
             data_dir = Path(directory)
             legacy = data_dir / "temp_recording.wav"
             legacy.write_bytes(b"audio")
-            with patch.object(app, "DATA_DIR", data_dir), patch.object(
+            with patch.object(app, "IS_WIN", True), patch.object(
+                    app, "DATA_DIR", data_dir), patch.object(
                     app, "AUDIO_PATH", legacy), patch.object(
                     app.Recorder, "_stop_stale_windows_recorders"), patch.object(
                     app.Recorder, "_safe_delete",
@@ -137,6 +139,18 @@ class RecordingSessionTests(unittest.TestCase):
 
             self.assertIsInstance(recorder, app.Recorder)
             self.assertTrue(legacy.exists())
+
+    def test_unix_startup_does_not_remove_another_instance_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            session_wav = data_dir / "clarifyvoice-recording-active123.wav"
+            session_wav.write_bytes(b"active audio")
+            with patch.object(app, "IS_WIN", False), patch.object(
+                    app, "DATA_DIR", data_dir), patch.object(
+                    app, "AUDIO_PATH", data_dir / "temp_recording.wav"):
+                app.Recorder._cleanup_orphaned_recordings()
+
+            self.assertTrue(session_wav.exists())
 
     def test_unique_session_start_does_not_scan_stale_processes(self):
         stream = Mock()
