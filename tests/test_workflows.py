@@ -87,10 +87,13 @@ class FakeProvider:
         self.transcription = "Transcribed"
         self.rewritten = "Rewritten"
         self.translated = "Translated"
+        self.on_transcribe = None
         self.on_rewrite = None
 
     def transcribe(self, audio_source, mode, language):
         self.transcription_request = (audio_source, mode, language)
+        if self.on_transcribe:
+            self.on_transcribe()
         return TranscriptionResult(
             self.transcription, "gemini", "gemini-test"
         )
@@ -202,6 +205,8 @@ class FakeClipboard:
         self.activations = []
         self.restores = []
         self.captures = []
+        self.current_text = self.text
+        self.dictation_outputs = []
 
     def capture_target(self):
         if self.window is None:
@@ -215,10 +220,12 @@ class FakeClipboard:
         self.captures.append(target)
         if not self.selected:
             return None
+        self.current_text = self.selected
         return SelectionCapture(target, self.selected, self.text)
 
     def restore(self, capture):
         self.restores.append(capture.context)
+        self.current_text = capture.context
 
     def apply_result(self, capture, result):
         self.writes.append(result)
@@ -227,8 +234,15 @@ class FakeClipboard:
             return SelectionDisposition.PASTED
         return SelectionDisposition.COPIED
 
-    def write_dictation_result(self, text):
-        self.auto_pastes.append(text)
+    def write_dictation_result(self, target, text):
+        self.writes.append(text)
+        self.current_text = text
+        disposition = SelectionDisposition.COPIED
+        if target is not None and self.is_target_current(target):
+            self.auto_pastes.append(text)
+            disposition = SelectionDisposition.PASTED
+        self.dictation_outputs.append((target, text, disposition))
+        return disposition
 
     def activate(self, target):
         self.activations.append(target.window)
@@ -326,7 +340,7 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(self.service.state.result_text, "Rewritten")
         self.assertEqual(self.clipboard.writes, ["Rewritten"])
         self.assertEqual(len(self.clipboard.applied), 1)
-        self.assertEqual(self.clipboard.restores, [])
+        self.assertEqual(self.clipboard.restores, ["previous"])
         self.assertEqual(
             self.statistics.rewrites,
             [("openai", "gpt-test", "Original", "Rewritten")],
@@ -383,6 +397,33 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(self.service.state.phase, WorkflowPhase.FAILED)
         self.assertEqual(self.service.state.status_key, "rewrite_failed")
         self.assertEqual(self.clipboard.restores, ["previous"])
+        self.assertEqual(self.statistics.rewrites, [])
+
+    def test_rewrite_restores_before_blocked_provider_and_cancel_stays_safe(self):
+        scheduler = ThreadScheduler()
+        provider_entered = threading.Event()
+        provider_release = threading.Event()
+
+        def block_provider():
+            provider_entered.set()
+            if not provider_release.wait(timeout=1.0):
+                raise AssertionError("test did not release rewrite provider")
+
+        self.provider.on_rewrite = block_provider
+        service = self.make_service(scheduler)
+
+        self.assertTrue(service.dispatch(StartRewrite()))
+        self.assertTrue(provider_entered.wait(timeout=1.0))
+        self.assertEqual(self.clipboard.current_text, "previous")
+        self.assertEqual(self.clipboard.restores, ["previous"])
+
+        service.cancel_active()
+        provider_release.set()
+        scheduler.join()
+
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(self.clipboard.current_text, "previous")
+        self.assertEqual(self.clipboard.applied, [])
         self.assertEqual(self.statistics.rewrites, [])
 
     def test_translation_prepares_picker_then_translates_after_choice(self):
@@ -463,7 +504,9 @@ class WorkflowServiceTests(unittest.TestCase):
 
     def test_dictation_owns_start_stop_provider_and_statistics_sequence(self):
         self.assertTrue(
-            self.service.dispatch(StartDictation("editor.exe", "prompt", "pt"))
+            self.service.dispatch(
+                StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "pt")
+            )
         )
         self.clock.now = 12.5
         self.assertTrue(self.service.dispatch(StopDictation()))
@@ -478,8 +521,42 @@ class WorkflowServiceTests(unittest.TestCase):
         )
         self.assertEqual(self.clipboard.auto_pastes, ["Transcribed"])
         self.assertEqual(
+            self.clipboard.dictation_outputs,
+            [
+                (
+                    SelectionTarget(77, "editor.exe"),
+                    "Transcribed",
+                    SelectionDisposition.PASTED,
+                )
+            ],
+        )
+        self.assertEqual(
             self.statistics.dictations,
             [({"mode": "prompt", "provider": "gemini"}, 2.5, "Transcribed")],
+        )
+        self.assertEqual(self.service.state.phase, WorkflowPhase.COMPLETED)
+
+    def test_dictation_focus_change_during_transcription_uses_copied_fallback(self):
+        self.provider.on_transcribe = lambda: setattr(
+            self.clipboard, "window", 88
+        )
+
+        self.service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
+        self.service.dispatch(StopDictation())
+
+        self.assertEqual(self.clipboard.auto_pastes, [])
+        self.assertEqual(self.clipboard.writes, ["Transcribed"])
+        self.assertEqual(
+            self.clipboard.dictation_outputs,
+            [
+                (
+                    SelectionTarget(77, "editor.exe"),
+                    "Transcribed",
+                    SelectionDisposition.COPIED,
+                )
+            ],
         )
         self.assertEqual(self.service.state.phase, WorkflowPhase.COMPLETED)
 
@@ -489,7 +566,9 @@ class WorkflowServiceTests(unittest.TestCase):
         service = self.make_service(scheduler)
 
         self.assertTrue(
-            service.dispatch(StartDictation("editor.exe", "prompt", "en"))
+            service.dispatch(
+                StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+            )
         )
         self.assertTrue(self.audio.start_entered.wait(timeout=1.0))
         self.assertTrue(service.dispatch(StopDictation()))
@@ -513,7 +592,9 @@ class WorkflowServiceTests(unittest.TestCase):
         self.audio = BlockingAudio(RuntimeError("startup failed"))
         service = self.make_service(scheduler)
 
-        service.dispatch(StartDictation("editor.exe", "prompt", "en"))
+        service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
         self.assertTrue(self.audio.start_entered.wait(timeout=1.0))
         service.dispatch(StopDictation())
         self.assertTrue(self.audio.wait_entered.wait(timeout=1.0))
@@ -533,7 +614,9 @@ class WorkflowServiceTests(unittest.TestCase):
         self.audio = BlockingAudio()
         service = self.make_service(scheduler)
 
-        service.dispatch(StartDictation("editor.exe", "prompt", "en"))
+        service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
         self.assertTrue(self.audio.start_entered.wait(timeout=1.0))
         self.assertTrue(service.dispatch(CancelDictation()))
         scheduler.join()
@@ -552,7 +635,9 @@ class WorkflowServiceTests(unittest.TestCase):
 
     def test_no_usable_audio_is_a_distinct_failure(self):
         self.audio.present = False
-        self.service.dispatch(StartDictation("editor.exe", "prompt", "en"))
+        self.service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
 
         self.service.dispatch(StopDictation())
 
@@ -564,7 +649,9 @@ class WorkflowServiceTests(unittest.TestCase):
     def test_microphone_unavailable_can_be_dismissed_without_a_session(self):
         self.audio.available = False
 
-        self.service.dispatch(StartDictation("editor.exe", "prompt", "en"))
+        self.service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
 
         self.assertEqual(
             self.service.state.phase, WorkflowPhase.MICROPHONE_UNAVAILABLE
@@ -582,7 +669,9 @@ class WorkflowServiceTests(unittest.TestCase):
         service.subscribe(states.append)
 
         self.assertTrue(
-            service.dispatch(StartDictation("editor.exe", "prompt", "en"))
+            service.dispatch(
+                StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+            )
         )
         self.assertTrue(service.dispatch(CancelDictation()))
         self.assertEqual(service.state.phase, WorkflowPhase.READY)
@@ -609,7 +698,9 @@ class WorkflowServiceTests(unittest.TestCase):
     def test_finished_dictation_rejects_a_delayed_clipboard_worker(self):
         scheduler = ManualScheduler()
         service = self.make_service(scheduler)
-        service.dispatch(StartDictation("editor.exe", "prompt", "en"))
+        service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
         scheduler.background.pop(0)()  # recording start
         self.clock.now = 11.0
         service.dispatch(StopDictation())

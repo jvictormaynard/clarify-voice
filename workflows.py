@@ -74,7 +74,7 @@ class WorkflowState:
 
 @dataclass(frozen=True)
 class StartDictation:
-    target_executable: str | None
+    target: SelectionTarget | None
     mode: str
     language: str
 
@@ -177,7 +177,9 @@ class ClipboardGateway(Protocol):
     def apply_result(
         self, capture: SelectionCapture, result: str
     ) -> SelectionDisposition: ...
-    def write_dictation_result(self, text: str) -> None: ...
+    def write_dictation_result(
+        self, target: SelectionTarget | None, text: str
+    ) -> SelectionDisposition: ...
     def activate(self, target: SelectionTarget) -> None: ...
     def alt_pressed(self) -> bool: ...
 
@@ -416,7 +418,7 @@ class WorkflowService:
         if self._audio.microphone_available() is False:
             session = self._new_session(
                 WorkflowKind.DICTATION,
-                target_executable=command.target_executable,
+                target=command.target,
             )
             if session is None:
                 return False
@@ -424,7 +426,7 @@ class WorkflowService:
 
         session = self._new_session(
             WorkflowKind.DICTATION,
-            target_executable=command.target_executable,
+            target=command.target,
         )
         if session is None:
             return False
@@ -547,7 +549,7 @@ class WorkflowService:
         with self._lock:
             if not self._is_current_locked(session.operation_id):
                 return
-            self._clipboard.write_dictation_result(result)
+            self._clipboard.write_dictation_result(session.target, result)
 
     def _cancel_dictation(self) -> bool:
         with self._lock:
@@ -598,6 +600,7 @@ class WorkflowService:
 
     def _rewrite_worker(self, session: _Session) -> None:
         capture = None
+        capture_restored = False
         try:
             if not self._wait_for_alt_release(session):
                 self._transition(
@@ -636,12 +639,13 @@ class WorkflowService:
                         status_key="no_selection",
                     )
                     return
+                self._clipboard.restore(capture)
+                capture_restored = True
             provider_result = self._provider.rewrite(capture.text)
             rewritten = provider_result.text
             if not self._is_current(session.operation_id):
                 return
             if self._provider_failed(rewritten):
-                self._restore_selection_if_current(session, capture)
                 self._transition(
                     session, WorkflowPhase.FAILED, status_key="rewrite_failed"
                 )
@@ -659,7 +663,8 @@ class WorkflowService:
                 ),
             )
         except Exception:
-            self._restore_selection_if_current(session, capture)
+            if not capture_restored:
+                self._restore_selection_if_current(session, capture)
             self._transition(
                 session, WorkflowPhase.FAILED, status_key="rewrite_failed"
             )
