@@ -1075,6 +1075,7 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
 
         self.assertIsNotNone(capture)
         self.assertIs(capture.context["previous"], previous)
+        self.assertEqual(capture.context["copy_observed_sequence"], 11)
 
     def test_capture_rechecks_focus_after_snapshot_before_copy(self):
         previous = ClipboardSnapshot((ClipboardFormat(
@@ -1217,6 +1218,24 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
 
         self.assertEqual(disposition, app.SelectionDisposition.COPIED)
         send_key.assert_not_called()
+
+    def test_apply_result_rechecks_focus_inside_verification_copy(self):
+        capture = app.SelectionCapture(self.target, "selected")
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          side_effect=[True, True, False, False]), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=None), \
+                patch.object(app, "_clipboard_sequence_number",
+                             return_value=10), \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_paste_generated_text",
+                             return_value=False) as copy_result:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        send_key.assert_not_called()
+        copy_result.assert_called_once_with("generated", should_paste=False)
 
 
 class WorkflowAppBridgeTests(unittest.TestCase):

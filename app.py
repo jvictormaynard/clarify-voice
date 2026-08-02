@@ -3158,10 +3158,11 @@ def _copy_selected_text_with_sequence(
     return None, previous_sequence, observed_sequence
 
 
-def _copy_selected_text(timeout=0.7):
+def _copy_selected_text(timeout=0.7, *, before_copy=None):
     """Copy a selection and return text only when the clipboard changed."""
     selected, _previous_sequence, _observed_sequence = (
-        _copy_selected_text_with_sequence(timeout))
+        _copy_selected_text_with_sequence(
+            timeout, before_copy=before_copy))
     return selected
 
 
@@ -3364,13 +3365,14 @@ class AppWorkflowClipboard:
         # chord act on an unrelated foreground application.
         if not AppWorkflowClipboard.is_target_current(target):
             return None
-        selected, _, _ = (
+        selected, _, copy_observed_sequence = (
             _copy_selected_text_with_sequence(
                 expected_sequence=previous.sequence,
                 suppress_read_errors=True,
                 before_copy=lambda: AppWorkflowClipboard.is_target_current(
                     target)))
-        if not isinstance(selected, str):
+        if (not isinstance(selected, str)
+                or copy_observed_sequence is None):
             # A sequence change without verifiable text may belong to a
             # concurrent non-text clipboard write.  Restore would be unsafe;
             # preserve the current clipboard and fail closed.
@@ -3378,6 +3380,7 @@ class AppWorkflowClipboard:
         context = {
             "previous": previous,
             "selected": selected,
+            "copy_observed_sequence": copy_observed_sequence,
         }
         return SelectionCapture(target, selected, context)
 
@@ -3386,10 +3389,13 @@ class AppWorkflowClipboard:
         context = capture.context if isinstance(capture.context, dict) else {}
         previous = context.get("previous")
         selected = context.get("selected", capture.text)
+        copy_observed_sequence = context.get("copy_observed_sequence")
         if not isinstance(previous, ClipboardSnapshot):
             return
+        if copy_observed_sequence is None:
+            return
         _restore_clipboard_snapshot_if_owned(
-            previous, _clipboard_sequence_number(), selected)
+            previous, copy_observed_sequence, selected)
 
     @staticmethod
     def apply_result(capture, result):
@@ -3408,7 +3414,9 @@ class AppWorkflowClipboard:
         if not AppWorkflowClipboard.is_target_current(capture.target):
             _paste_generated_text(result, should_paste=False)
             return SelectionDisposition.COPIED
-        current = _copy_selected_text()
+        current = _copy_selected_text(
+            before_copy=lambda: AppWorkflowClipboard.is_target_current(
+                capture.target))
         sequence = _clipboard_sequence_number()
         safe = (
             AppWorkflowClipboard.is_target_current(capture.target)

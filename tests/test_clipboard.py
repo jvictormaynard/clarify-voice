@@ -199,6 +199,26 @@ class ClipboardPasteTests(unittest.TestCase):
         self.assertEqual(result, [True])
         self.assertEqual(clipboard.text(), "new user text")
 
+    def test_selection_restore_rejects_same_text_with_new_sequence(self):
+        original = self.clipboard.snapshot()
+        self.clipboard.write_text("selected")
+        self.clipboard.external_write("selected")
+        capture = app.SelectionCapture(
+            app.SelectionTarget(77, "editor.exe"),
+            "selected",
+            {
+                "previous": original,
+                "selected": "selected",
+                "copy_observed_sequence": 11,
+            },
+        )
+
+        with patch.object(app, "_WINDOWS_CLIPBOARD", self.clipboard):
+            app.AppWorkflowClipboard.restore(capture)
+
+        self.assertEqual(self.clipboard.sequence(), 12)
+        self.assertEqual(self.clipboard.text(), "selected")
+
     def test_overlapping_operations_are_serialized(self):
         entered = threading.Event()
         release = threading.Event()
