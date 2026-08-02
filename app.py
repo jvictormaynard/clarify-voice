@@ -36,8 +36,11 @@ from provider_types import (
     ProviderConnection,
     ProviderError,
     RewriteRequest,
+    RewriteResult,
     TranscriptionRequest,
+    TranscriptionResult,
     TranslationRequest,
+    TranslationResult,
 )
 from repositories import (
     ApplicationRepositories,
@@ -62,7 +65,24 @@ from windows_hotkeys import (
     unregister_escape_hotkey,
     unregister_global_hotkeys,
 )
-from workflows import NoUsableAudioError, RecordingSnapshot
+from workflows import (
+    CancelDictation,
+    CancelTranslation,
+    ChooseTranslationLanguage,
+    DismissMicrophoneUnavailable,
+    NoUsableAudioError,
+    RecordingSnapshot,
+    SelectionCapture,
+    SelectionDisposition,
+    SelectionTarget,
+    StartDictation,
+    StartRewrite,
+    StartTranslation,
+    StopDictation,
+    WorkflowKind,
+    WorkflowPhase,
+    WorkflowService,
+)
 
 try:
     import tkinter as tk
@@ -2667,6 +2687,7 @@ class RecordingSession:
         snapshot = RecordingSnapshot(
             audio_path=self.audio_path,
             audio_bytes=self.audio_path.read_bytes(),
+            cancel_token=self.provider_cancel_token,
         )
         self.mark_audio_snapshot_complete()
         if self.cancel_event.is_set():
@@ -3122,6 +3143,226 @@ def copy_and_paste(text):
     else:
         subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode(), check=False)
         subprocess.run(["xdotool", "key", "ctrl+v"], check=False)
+
+
+class AppWorkflowScheduler:
+    """Bridge WorkflowService scheduling to Tk and owned worker threads."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def call_soon(self, callback):
+        try:
+            self.app.after(0, callback)
+        except tk.TclError:
+            if not getattr(self.app, "_closing", False):
+                raise
+
+    def run_in_background(self, callback):
+        threading.Thread(
+            target=callback, name="ClarifyVoiceWorkflow", daemon=True
+        ).start()
+
+
+class AppWorkflowProvider:
+    """Typed provider facade backed by the merged registry and HTTP policy."""
+
+    @staticmethod
+    def transcribe(audio_source, mode, language):
+        provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
+        text = call_transcription_provider(
+            audio_source.audio_path,
+            mode,
+            language,
+            audio_bytes=audio_source.audio_bytes,
+            cancel_token=audio_source.cancel_token,
+        )
+        if not text or text.startswith("[Error"):
+            raise RuntimeError(text or "Transcription returned no text")
+        model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
+        return TranscriptionResult(text, provider, model)
+
+    @staticmethod
+    def rewrite(text):
+        source = str(text).strip()
+        provider = str(APP_CONFIG.get("refinement_provider", "")).strip().lower()
+        model = str(APP_CONFIG.get("refinement_model", "")).strip()
+        if not source:
+            raise RuntimeError("No text selected")
+        if not model or not PROVIDER_REGISTRY.supports(
+                provider, ProviderCapability.TEXT_GENERATION):
+            raise RuntimeError("No text refinement model configured")
+        request = RewriteRequest(
+            text=source,
+            model=model,
+            language="en",
+            instruction=SELECTION_REWRITE_INSTRUCTION,
+            source_message=_source_text_message(source),
+            temperature=0.1,
+        )
+        result = PROVIDER_REGISTRY.rewrite(
+            provider, request, _provider_connection(provider))
+        if not result.text or not result.text.strip():
+            raise RuntimeError("Provider returned an empty rewrite")
+        return RewriteResult(result.text.strip(), result.provider_id, result.model)
+
+    @staticmethod
+    def translate(text, target_language):
+        source = str(text)
+        provider = str(APP_CONFIG.get("refinement_provider", "")).strip().lower()
+        model = str(APP_CONFIG.get("refinement_model", "")).strip()
+        if not source.strip():
+            raise RuntimeError("No text selected")
+        if target_language not in SUPPORTED_LANGUAGES:
+            raise RuntimeError("Unsupported target language")
+        if not model or not PROVIDER_REGISTRY.supports(
+                provider, ProviderCapability.TEXT_GENERATION):
+            raise RuntimeError("No text refinement model configured")
+        request = TranslationRequest(
+            text=source,
+            model=model,
+            target_language=target_language,
+            instruction=TRANSLATION_INSTRUCTION.format(
+                target_language=LANG_NAMES[target_language]),
+            source_message=_translation_source_message(source),
+            temperature=0.0,
+        )
+        result = PROVIDER_REGISTRY.translate(
+            provider, request, _provider_connection(provider))
+        if not result.text or not result.text.strip():
+            raise RuntimeError("Provider returned an empty translation")
+        return TranslationResult(
+            result.text.strip(), result.provider_id, result.model,
+            target_language,
+        )
+
+
+class AppWorkflowClipboard:
+    """Focus-safe clipboard transactions for the real Tk runtime."""
+
+    @staticmethod
+    def capture_target():
+        window = _foreground_window_handle()
+        if not window:
+            return None
+        return SelectionTarget(window, _foreground_executable())
+
+    @staticmethod
+    def is_target_current(target):
+        return bool(target.window) and _foreground_window_handle() == target.window
+
+    @staticmethod
+    def capture_selection(target):
+        if not AppWorkflowClipboard.is_target_current(target):
+            return None
+        try:
+            previous = _snapshot_windows_clipboard()
+        except OSError:
+            previous = None
+        if previous is None:
+            try:
+                previous = _get_windows_clipboard_text()
+            except OSError:
+                previous = None
+        selected = _copy_selected_text()
+        if selected is None:
+            return None
+        context = {
+            "previous": previous,
+            "selected": selected,
+        }
+        return SelectionCapture(target, selected, context)
+
+    @staticmethod
+    def restore(capture):
+        context = capture.context if isinstance(capture.context, dict) else {}
+        previous = context.get("previous")
+        selected = context.get("selected", capture.text)
+        if isinstance(previous, ClipboardSnapshot):
+            _restore_clipboard_snapshot_if_owned(
+                previous, _clipboard_sequence_number(), selected)
+            return
+        if previous is None:
+            return
+        try:
+            current = _get_windows_clipboard_text()
+        except OSError:
+            return
+        if _same_selected_text(current, selected):
+            _set_windows_clipboard_text(previous)
+
+    @staticmethod
+    def apply_result(capture, result):
+        try:
+            before = _snapshot_windows_clipboard()
+        except OSError:
+            before = None
+        current = _copy_selected_text()
+        sequence = _clipboard_sequence_number()
+        safe = (
+            AppWorkflowClipboard.is_target_current(capture.target)
+            and current is not None
+            and _same_selected_text(current, capture.text)
+        )
+        _restore_clipboard_snapshot_if_owned(before, sequence, current)
+        if safe and AppWorkflowClipboard.is_target_current(capture.target):
+            pasted = _paste_generated_text(result)
+            return (
+                SelectionDisposition.PASTED
+                if pasted else SelectionDisposition.COPIED
+            )
+        _paste_generated_text(result, should_paste=False)
+        return SelectionDisposition.COPIED
+
+    @staticmethod
+    def write_dictation_result(target, text):
+        safe = target is None or AppWorkflowClipboard.is_target_current(target)
+        pasted = _paste_generated_text(text, should_paste=safe)
+        return (
+            SelectionDisposition.PASTED
+            if safe and pasted else SelectionDisposition.COPIED
+        )
+
+    @staticmethod
+    def activate(target):
+        _activate_window(target.window)
+
+    @staticmethod
+    def alt_pressed():
+        return bool(is_alt_pressed())
+
+
+class AppWorkflowConfig:
+    @staticmethod
+    def recording_usage_context(mode):
+        context = _recording_usage_context()
+        context["mode"] = mode
+        return context
+
+
+class AppWorkflowStatistics:
+    def __init__(self, repositories):
+        self.repositories = repositories
+
+    def record_dictation(self, context, duration_seconds, result):
+        _record_usage_event(
+            _build_recording_usage_event(context, duration_seconds, result),
+            self.repositories,
+        )
+
+    def record_rewrite(self, provider, model, source, result):
+        _record_usage_event(
+            _build_rewrite_usage_event(provider, model, source, result),
+            self.repositories,
+        )
+
+    def record_translation(
+            self, provider, model, source, result, target_language):
+        _record_usage_event(
+            _build_translation_usage_event(
+                provider, model, source, result, target_language),
+            self.repositories,
+        )
 
 # ---------------------------------------------------------------------------
 # Flag icons (drawn with Pillow)
@@ -4063,10 +4304,16 @@ class SmoothTkBackdrop:
 class App(ctk.CTk):
     @property
     def _rewrite_active(self):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None:
+            state = service.state
+            return state.kind is WorkflowKind.REWRITE and state.phase is not WorkflowPhase.READY
         return self._workflow.is_active("rewrite")
 
     @_rewrite_active.setter
     def _rewrite_active(self, value):
+        if getattr(self, "_workflow_service", None) is not None:
+            return
         if value:
             self._workflow.start("rewrite")
         else:
@@ -4074,10 +4321,16 @@ class App(ctk.CTk):
 
     @property
     def _translation_active(self):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None:
+            state = service.state
+            return state.kind is WorkflowKind.TRANSLATION and state.phase is not WorkflowPhase.READY
         return self._workflow.is_active("translation")
 
     @_translation_active.setter
     def _translation_active(self, value):
+        if getattr(self, "_workflow_service", None) is not None:
+            return
         if value:
             self._workflow.start("translation")
         else:
@@ -4130,6 +4383,11 @@ class App(ctk.CTk):
         self._closing = False
         self._tray_actions = queue.SimpleQueue()
         self._tray_icon = None
+        self._workflow_picker_mode = False
+        self._workflow_pending_result = None
+        self._workflow_pending_status = None
+        self._workflow_pending_operation = None
+        self._workflow_release_requested = False
 
         sw = self.winfo_screenwidth()
         self.geometry(f"380x48+{sw - 400}+16")
@@ -4137,6 +4395,19 @@ class App(ctk.CTk):
         self._build_ui()
         self._configure_overlay_window()
         self._main_backdrop = SmoothTkBackdrop(self, 24) if IS_WIN else None
+        self._workflow_clipboard = AppWorkflowClipboard()
+        self._workflow_service = WorkflowService(
+            AppWorkflowProvider(),
+            RecordingAudioGateway(
+                session_factory=self._new_workflow_recording_session,
+                microphone_probe=_has_active_microphone,
+            ),
+            self._workflow_clipboard,
+            AppWorkflowConfig(),
+            AppWorkflowStatistics(self.repositories),
+            AppWorkflowScheduler(self),
+        )
+        self._workflow_service.subscribe(self._on_workflow_state)
         self.bind("<Escape>", self._on_escape)
         if not IS_WIN and keyboard is not None:
             keyboard.add_hotkey("alt+l", self._recording_hotkey)
@@ -4292,6 +4563,13 @@ class App(ctk.CTk):
 
     def _shutdown_recording(self, timeout=None):
         """Stop the active session and leave a watcher for late upload cleanup."""
+        service = getattr(self, "_workflow_service", None)
+        if service is not None and service.state.phase is not WorkflowPhase.READY:
+            service.cancel_active()
+            session = getattr(self, "_recording_session", None)
+            if session is not None:
+                session.wait_for_shutdown(timeout)
+            return
         session = getattr(self, "_recording_session", None)
         if session is not None:
             session.cancel()
@@ -4638,7 +4916,12 @@ class App(ctk.CTk):
     def _dismiss_microphone_alert(self):
         self._microphone_alert_job = None
         if self.app_state == "microphone_unavailable":
-            self._set_state("ready")
+            service = getattr(self, "_workflow_service", None)
+            if (service is not None
+                    and service.state.phase is WorkflowPhase.MICROPHONE_UNAVAILABLE):
+                service.dispatch(DismissMicrophoneUnavailable())
+            else:
+                self._set_state("ready")
 
     def _show_success_then(self, callback, delay=850):
         """Show a completed check long enough to register before restoring UI."""
@@ -4860,6 +5143,22 @@ class App(ctk.CTk):
             self.sub.configure(text=self._t("hint_stop"))
 
     def _cancel(self, e=None):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None and service.state.phase is not WorkflowPhase.READY:
+            if service.state.phase is WorkflowPhase.RECORDING:
+                service.dispatch(CancelDictation())
+            elif service.state.phase in (
+                WorkflowPhase.PUBLISHING,
+                WorkflowPhase.COMPLETED,
+                WorkflowPhase.FAILED,
+            ):
+                # Publication and terminal animations are non-cancellable.
+                # Shutdown still uses cancel_active directly, which invalidates
+                # queued work and defers READY for an accepted publication.
+                return
+            else:
+                service.cancel_active()
+            return
         if self.app_state in ("recording", "processing"):
             self._set_state("ready")
             session = getattr(self, "_recording_session", None)
@@ -4880,6 +5179,22 @@ class App(ctk.CTk):
     def _on_escape(self, e=None):
         if self._translation_picker is not None:
             self._cancel_translation_picker()
+        elif getattr(self, "_workflow_service", None) is not None:
+            phase = self._workflow_service.state.phase
+            if phase is WorkflowPhase.RECORDING:
+                self._workflow_service.dispatch(CancelDictation())
+            elif phase is WorkflowPhase.MICROPHONE_UNAVAILABLE:
+                self._workflow_service.dispatch(DismissMicrophoneUnavailable())
+            elif phase in (
+                WorkflowPhase.PUBLISHING,
+                WorkflowPhase.COMPLETED,
+                WorkflowPhase.FAILED,
+            ):
+                return
+            elif phase is not WorkflowPhase.READY:
+                self._workflow_service.cancel_active()
+            elif self.result_frame.winfo_manager():
+                self._hide_result()
         elif self.app_state in ("recording", "processing"): self._cancel()
         elif self.result_frame.winfo_manager(): self._hide_result()
 
@@ -4926,6 +5241,19 @@ class App(ctk.CTk):
 
     # -- Selected-text translation --
     def _translation_hotkey(self):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None:
+            if not IS_WIN or service.state.phase is not WorkflowPhase.READY:
+                return
+            target = self._workflow_target()
+            if target is None:
+                return
+            self._translation_target_executable = target.executable
+            self.after(
+                0,
+                lambda target=target: service.dispatch(StartTranslation(target)),
+            )
+            return
         if (not IS_WIN or self.app_state != "ready"
                 or self._rewrite_active or self._translation_active):
             return
@@ -5094,7 +5422,8 @@ class App(ctk.CTk):
             self._translation_picker_window = None
 
     def _show_translation_picker(
-            self, target_window, selected_text, previous_clipboard):
+            self, target_window=None, selected_text=None,
+            previous_clipboard=None):
         if not self._translation_active:
             return
         if self.result_frame.winfo_manager():
@@ -5107,7 +5436,8 @@ class App(ctk.CTk):
             win = self._create_translation_picker_window()
 
         self._translation_picker = win
-        self._translation_payload = (
+        workflow_picker_mode = getattr(self, "_workflow_picker_mode", False)
+        self._translation_payload = None if workflow_picker_mode else (
             target_window, selected_text, previous_clipboard)
         win._clarify_fading_out = False
         win._translation_selected_index["value"] = 0
@@ -5132,6 +5462,7 @@ class App(ctk.CTk):
     def _cancel_translation_picker(self):
         win = self._translation_picker
         payload = self._translation_payload
+        workflow_mode = getattr(self, "_workflow_picker_mode", False)
         self._translation_picker = None
         self._translation_payload = None
 
@@ -5141,9 +5472,15 @@ class App(ctk.CTk):
                     win.withdraw()
                 except tk.TclError:
                     pass
-            if payload:
+            if workflow_mode:
+                self._workflow_picker_mode = False
+                service = getattr(self, "_workflow_service", None)
+                if service is not None:
+                    service.dispatch(CancelTranslation())
+            elif payload:
                 _activate_window(payload[0])
-            self._translation_active = False
+            else:
+                self._translation_active = False
 
         if win is not None:
             self._collapse_translation_picker(win, finish)
@@ -5166,8 +5503,25 @@ class App(ctk.CTk):
             return
         payload = self._translation_payload
         win = self._translation_picker
+        workflow_mode = getattr(self, "_workflow_picker_mode", False)
         self._translation_picker = None
         self._translation_payload = None
+        if workflow_mode:
+            def begin_workflow():
+                if win is not None:
+                    try:
+                        win.withdraw()
+                    except tk.TclError:
+                        pass
+                self._workflow_picker_mode = False
+                self._workflow_service.dispatch(
+                    ChooseTranslationLanguage(target_language))
+
+            if win is not None:
+                self._collapse_translation_picker(win, begin_workflow)
+            else:
+                begin_workflow()
+            return
         if not payload:
             self._translation_active = False
             return
@@ -5265,6 +5619,19 @@ class App(ctk.CTk):
 
     # -- Selected-text rewrite --
     def _rewrite_hotkey(self):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None:
+            if not IS_WIN or service.state.phase is not WorkflowPhase.READY:
+                return
+            target = self._workflow_target()
+            if target is None:
+                return
+            self._rewrite_target_executable = target.executable
+            self.after(
+                0,
+                lambda target=target: service.dispatch(StartRewrite(target)),
+            )
+            return
         if (not IS_WIN or self.app_state != "ready"
                 or self._rewrite_active
                 or getattr(self, "_translation_active", False)):
@@ -5387,8 +5754,160 @@ class App(ctk.CTk):
                 self._restore_clipboard_text(previous_clipboard)
             self.after(0, lambda: self._finish_rewrite(status_key="rewrite_failed"))
 
+    def _workflow_target(self):
+        clipboard = getattr(self, "_workflow_clipboard", None)
+        if clipboard is None:
+            return None
+        return clipboard.capture_target()
+
+    def _new_workflow_recording_session(self):
+        session = self._new_recording_session()
+        self._recording_session = session
+        return session
+
+    def _on_workflow_state(self, state):
+        """Render WorkflowService state on Tk and release terminal operations."""
+        if state.phase is WorkflowPhase.READY:
+            release_requested = self._workflow_release_requested
+            self._workflow_release_requested = False
+            pending_result = self._workflow_pending_result
+            pending_status = self._workflow_pending_status
+            self._workflow_pending_result = None
+            self._workflow_pending_status = None
+            self._workflow_pending_operation = None
+            if self._translation_picker is not None and self._workflow_picker_mode:
+                self._close_workflow_picker_window()
+            if not release_requested:
+                # READY can be published by shutdown/cancellation before a
+                # queued publication claim. Do not surface that stale result.
+                pending_result = None
+                pending_status = None
+            if pending_result and self.app_state == "ready":
+                self._show_result(pending_result)
+            elif self.app_state != "ready":
+                self._set_state(
+                    "ready",
+                    self._t(pending_status) if pending_status else "",
+                    after_ready=(
+                        (lambda: self._show_result(pending_result))
+                        if pending_result else None
+                    ),
+                )
+            elif pending_status:
+                self.lbl.configure(text=self._t(pending_status))
+            recording_session = getattr(self, "_recording_session", None)
+            if (
+                recording_session is not None
+                and getattr(recording_session, "shutdown_complete", None) is not None
+                and recording_session.shutdown_complete.is_set()
+            ):
+                self._recording_session = None
+            return
+
+        if state.phase is WorkflowPhase.RECORDING:
+            self._recording_target_window = getattr(
+                self, "_workflow_dictation_target_window", None)
+            self._was_hidden_before_recording = not self.winfo_viewable()
+            if self.result_frame.winfo_manager():
+                self._hide_result()
+            self._update_focused_icon(state.target_executable)
+            self._set_state("recording")
+        elif state.phase is WorkflowPhase.PROCESSING:
+            self._set_state("processing")
+        elif state.phase is WorkflowPhase.REWRITING:
+            self._rewrite_target_executable = state.target_executable
+            self._begin_rewrite_feedback()
+        elif state.phase is WorkflowPhase.PREPARING_TRANSLATION:
+            if self.result_frame.winfo_manager():
+                self._hide_result()
+        elif state.phase is WorkflowPhase.TRANSLATION_PICKER:
+            self._show_workflow_translation_picker()
+        elif state.phase is WorkflowPhase.TRANSLATING:
+            self._translation_target_executable = state.target_executable
+            self._begin_translation_feedback()
+        elif state.phase is WorkflowPhase.PUBLISHING:
+            # The workflow has delivered its non-cancellable publication
+            # barrier. Render a bounded processing pill while keeping Escape
+            # disabled until the focus-safe adapter reports the final
+            # disposition.
+            self._set_state("processing")
+        elif state.phase is WorkflowPhase.MICROPHONE_UNAVAILABLE:
+            self._set_state("microphone_unavailable")
+        elif state.phase is WorkflowPhase.COMPLETED:
+            self._workflow_pending_result = state.result_text
+            self._workflow_pending_status = state.status_key
+            self._workflow_pending_operation = state.operation_id
+            self._show_success_then(
+                lambda operation_id=state.operation_id:
+                self._finish_workflow_operation(operation_id)
+            )
+        elif state.phase is WorkflowPhase.FAILED:
+            self._workflow_pending_status = state.status_key or "error"
+            self._workflow_pending_operation = state.operation_id
+            self._set_state(
+                "ready",
+                self._t(self._workflow_pending_status),
+                after_ready=(
+                    lambda operation_id=state.operation_id:
+                    self._finish_workflow_operation(operation_id)
+                ),
+            )
+
+    def _finish_workflow_operation(self, operation_id):
+        self._workflow_release_requested = True
+        return self._workflow_service.finish(operation_id)
+
+    def _show_workflow_translation_picker(self):
+        self._workflow_picker_mode = True
+        self._show_translation_picker()
+
+    def _close_workflow_picker_window(self):
+        win = self._translation_picker
+        self._translation_picker = None
+        self._translation_payload = None
+        self._workflow_picker_mode = False
+        if win is None:
+            return
+        try:
+            win.withdraw()
+        except tk.TclError:
+            pass
+
     # -- Recording --
     def _recording_hotkey(self):
+        service = getattr(self, "_workflow_service", None)
+        if service is not None:
+            phase = service.state.phase
+            if phase in (
+                WorkflowPhase.REWRITING,
+                WorkflowPhase.PREPARING_TRANSLATION,
+                WorkflowPhase.TRANSLATION_PICKER,
+                WorkflowPhase.TRANSLATING,
+                WorkflowPhase.PUBLISHING,
+            ):
+                return
+            if phase is WorkflowPhase.RECORDING:
+                self.after(0, lambda: service.dispatch(StopDictation()))
+                return
+            if phase is WorkflowPhase.MICROPHONE_UNAVAILABLE:
+                self.after(
+                    0,
+                    lambda: service.dispatch(DismissMicrophoneUnavailable()),
+                )
+                return
+            if phase is not WorkflowPhase.READY:
+                return
+            target = self._workflow_target()
+            self._workflow_dictation_target_window = (
+                target.window if target is not None else None
+            )
+            self.after(
+                0,
+                lambda target=target: service.dispatch(
+                    StartDictation(target, self.mode, self.lang)
+                ),
+            )
+            return
         if (self._rewrite_active
                 or getattr(self, "_translation_active", False)):
             return

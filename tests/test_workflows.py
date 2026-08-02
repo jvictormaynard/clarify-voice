@@ -7,7 +7,10 @@ import threading
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
+import app
 import workflows
 from provider_types import RewriteResult, TranscriptionResult, TranslationResult
 from workflows import (
@@ -26,6 +29,7 @@ from workflows import (
     StopDictation,
     WorkflowPhase,
     WorkflowService,
+    WorkflowState,
 )
 
 
@@ -322,7 +326,11 @@ class WorkflowServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             [state.phase for state in self.states],
-            [WorkflowPhase.REWRITING, WorkflowPhase.COMPLETED],
+            [
+                WorkflowPhase.REWRITING,
+                WorkflowPhase.PUBLISHING,
+                WorkflowPhase.COMPLETED,
+            ],
         )
 
     def test_rewrite_focus_change_after_safe_capture_keeps_copied_result(self):
@@ -459,6 +467,27 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(self.clipboard.applied, [])
         self.assertEqual(self.statistics.rewrites, [])
 
+    def test_rewrite_cancel_before_queued_publication_has_no_late_output(self):
+        scheduler = ManualScheduler()
+        service = self.make_service(scheduler)
+
+        self.assertTrue(service.dispatch(StartRewrite()))
+        scheduler.background.pop(0)()  # capture/provider worker
+        self.assertEqual(service.state.phase, WorkflowPhase.PUBLISHING)
+        # Deliver the barrier first.  It queues the external publication only
+        # after the view has observed the non-cancellable phase.
+        while scheduler.soon:
+            scheduler.soon.pop(0)()
+        self.assertEqual(len(scheduler.background), 1)
+
+        service.cancel_active()
+        scheduler.background.pop(0)()  # queued publication
+
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(self.clipboard.applied, [])
+        self.assertEqual(self.clipboard.writes, [])
+        self.assertEqual(self.statistics.rewrites, [])
+
     def test_translation_prepares_picker_then_translates_after_choice(self):
         picker_restores = []
         self.service.subscribe(
@@ -548,6 +577,102 @@ class WorkflowServiceTests(unittest.TestCase):
         )
         self.assertEqual(self.clipboard.applied, [])
         self.assertEqual(self.statistics.translations, [])
+
+    def test_translation_cancel_before_queued_publication_has_no_late_output(self):
+        scheduler = ManualScheduler()
+        service = self.make_service(scheduler)
+
+        self.assertTrue(service.dispatch(StartTranslation()))
+        scheduler.background.pop(0)()  # capture/restore worker
+        self.assertEqual(service.state.phase, WorkflowPhase.TRANSLATION_PICKER)
+        self.assertTrue(service.dispatch(ChooseTranslationLanguage("de")))
+        scheduler.background.pop(0)()  # provider worker
+        self.assertEqual(service.state.phase, WorkflowPhase.PUBLISHING)
+        while scheduler.soon:
+            scheduler.soon.pop(0)()
+        self.assertEqual(len(scheduler.background), 1)
+
+        service.cancel_active()
+        scheduler.background.pop(0)()  # queued publication
+
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(self.clipboard.applied, [])
+        self.assertEqual(self.clipboard.writes, [])
+        self.assertEqual(self.statistics.translations, [])
+
+    def test_rewrite_shutdown_does_not_wait_for_blocked_apply(self):
+        scheduler = ThreadScheduler()
+        service = self.make_service(scheduler)
+        apply_entered = threading.Event()
+        apply_release = threading.Event()
+        apply_result = self.clipboard.apply_result
+
+        def blocked_apply(capture, result):
+            apply_entered.set()
+            if not apply_release.wait(timeout=1.0):
+                raise AssertionError("test did not release rewrite apply")
+            return apply_result(capture, result)
+
+        self.clipboard.apply_result = blocked_apply
+
+        self.assertTrue(service.dispatch(StartRewrite()))
+        self.assertTrue(apply_entered.wait(timeout=1.0))
+
+        cancel_finished = threading.Event()
+
+        def cancel_for_shutdown():
+            service.cancel_active()
+            cancel_finished.set()
+
+        threading.Thread(target=cancel_for_shutdown, daemon=True).start()
+        self.assertTrue(
+            cancel_finished.wait(timeout=0.5),
+            "shutdown cancellation waited behind the clipboard gateway",
+        )
+        apply_release.set()
+        scheduler.join()
+
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(len(self.clipboard.applied), 1)
+        self.assertEqual(len(self.statistics.rewrites), 1)
+
+    def test_translation_shutdown_does_not_wait_for_blocked_apply(self):
+        scheduler = ThreadScheduler()
+        service = self.make_service(scheduler)
+        apply_entered = threading.Event()
+        apply_release = threading.Event()
+        apply_result = self.clipboard.apply_result
+
+        def blocked_apply(capture, result):
+            apply_entered.set()
+            if not apply_release.wait(timeout=1.0):
+                raise AssertionError("test did not release translation apply")
+            return apply_result(capture, result)
+
+        self.clipboard.apply_result = blocked_apply
+
+        self.assertTrue(service.dispatch(StartTranslation()))
+        # The picker is delivered synchronously by the test scheduler.
+        self.assertTrue(service.dispatch(ChooseTranslationLanguage("de")))
+        self.assertTrue(apply_entered.wait(timeout=1.0))
+
+        cancel_finished = threading.Event()
+
+        def cancel_for_shutdown():
+            service.cancel_active()
+            cancel_finished.set()
+
+        threading.Thread(target=cancel_for_shutdown, daemon=True).start()
+        self.assertTrue(
+            cancel_finished.wait(timeout=0.5),
+            "shutdown cancellation waited behind the clipboard gateway",
+        )
+        apply_release.set()
+        scheduler.join()
+
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(len(self.clipboard.applied), 1)
+        self.assertEqual(len(self.statistics.translations), 1)
 
     def test_translation_blocks_rewrite_while_selection_is_preparing(self):
         scheduler = ManualScheduler()
@@ -769,7 +894,7 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(self.clipboard.applied, [])
         self.assertEqual(self.statistics.rewrites, [])
 
-    def test_finished_dictation_rejects_a_delayed_clipboard_worker(self):
+    def test_finished_dictation_waits_for_a_delayed_clipboard_worker(self):
         scheduler = ManualScheduler()
         service = self.make_service(scheduler)
         service.dispatch(
@@ -779,13 +904,198 @@ class WorkflowServiceTests(unittest.TestCase):
         self.clock.now = 11.0
         service.dispatch(StopDictation())
         scheduler.background.pop(0)()  # stop/provider worker
+        while scheduler.soon:
+            scheduler.soon.pop(0)()  # terminal delivery, then publication queue
         operation_id = service.state.operation_id
         self.assertEqual(service.state.phase, WorkflowPhase.COMPLETED)
 
         self.assertTrue(service.finish(operation_id))
         scheduler.background.pop(0)()  # delayed clipboard delivery
+        while scheduler.soon:
+            scheduler.soon.pop(0)()  # deferred READY delivery
 
+        self.assertEqual(self.clipboard.auto_pastes, ["Transcribed"])
+        self.assertEqual(len(self.statistics.dictations), 1)
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+
+    def test_terminal_listener_can_finish_before_dictation_publication_claim(self):
+        scheduler = ManualScheduler()
+        service = self.make_service(scheduler)
+        finished = []
+
+        def finish_on_terminal(state):
+            if state.phase is WorkflowPhase.COMPLETED:
+                finished.append(service.finish(state.operation_id))
+
+        service.subscribe(finish_on_terminal)
+        service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
+        scheduler.background.pop(0)()  # recording start
+        service.dispatch(StopDictation())
+        scheduler.background.pop(0)()  # stop/provider worker
+        while scheduler.soon:
+            scheduler.soon.pop(0)()  # terminal listener queues publication
+        scheduler.background.pop(0)()  # publication claimed after listener
+        while scheduler.soon:
+            scheduler.soon.pop(0)()  # deferred READY delivery
+
+        self.assertEqual(finished, [True])
+        self.assertEqual(self.clipboard.auto_pastes, ["Transcribed"])
+        self.assertEqual(len(self.statistics.dictations), 1)
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+
+    def test_dictation_cancel_wins_before_queued_publication(self):
+        scheduler = ManualScheduler()
+        service = self.make_service(scheduler)
+        target = SelectionTarget(77, "editor.exe")
+
+        service.dispatch(StartDictation(target, "prompt", "en"))
+        scheduler.background.pop(0)()  # recording start
+        service.dispatch(StopDictation())
+        scheduler.background.pop(0)()  # stop/provider worker
+        while scheduler.soon:
+            scheduler.soon.pop(0)()  # terminal delivery, then publication queue
+        self.assertEqual(service.state.phase, WorkflowPhase.COMPLETED)
+        self.assertEqual(len(scheduler.background), 1)
+
+        # Invalidate the operation before the queued external publication.
+        service.cancel_active()
+        scheduler.background.pop(0)()  # dictation publication
+
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
         self.assertEqual(self.clipboard.auto_pastes, [])
+        self.assertEqual(self.clipboard.writes, [])
+        self.assertEqual(self.statistics.dictations, [])
+
+    def test_dictation_shutdown_does_not_wait_for_blocked_clipboard_write(self):
+        scheduler = ThreadScheduler()
+        service = self.make_service(scheduler)
+        write_entered = threading.Event()
+        write_release = threading.Event()
+        write_result = self.clipboard.write_dictation_result
+
+        def blocked_write(target, text):
+            write_entered.set()
+            if not write_release.wait(timeout=1.0):
+                raise AssertionError("test did not release dictation write")
+            return write_result(target, text)
+
+        self.clipboard.write_dictation_result = blocked_write
+        target = SelectionTarget(77, "editor.exe")
+        service.dispatch(StartDictation(target, "prompt", "en"))
+        service.dispatch(StopDictation())
+        self.assertTrue(write_entered.wait(timeout=1.0))
+
+        cancel_finished = threading.Event()
+
+        def cancel_for_shutdown():
+            service.cancel_active()
+            cancel_finished.set()
+
+        threading.Thread(target=cancel_for_shutdown, daemon=True).start()
+        self.assertTrue(
+            cancel_finished.wait(timeout=0.5),
+            "shutdown cancellation waited behind the clipboard gateway",
+        )
+        write_release.set()
+        scheduler.join()
+
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(self.clipboard.auto_pastes, ["Transcribed"])
+        self.assertEqual(len(self.statistics.dictations), 1)
+
+    def test_app_escape_during_blocked_dictation_publication_stays_terminal(self):
+        scheduler = ThreadScheduler()
+        service = self.make_service(scheduler)
+        write_entered = threading.Event()
+        write_release = threading.Event()
+        write_result = self.clipboard.write_dictation_result
+
+        def blocked_write(target, text):
+            write_entered.set()
+            if not write_release.wait(timeout=1.0):
+                raise AssertionError("test did not release dictation write")
+            return write_result(target, text)
+
+        self.clipboard.write_dictation_result = blocked_write
+        target = SelectionTarget(77, "editor.exe")
+        service.dispatch(StartDictation(target, "prompt", "en"))
+        service.dispatch(StopDictation())
+        self.assertTrue(write_entered.wait(timeout=1.0))
+        operation_id = service.state.operation_id
+        harness = SimpleNamespace(
+            _workflow_service=service,
+            _translation_picker=None,
+            app_state="success",
+        )
+
+        app.App._on_escape(harness)
+        app.App._cancel(harness)
+
+        self.assertEqual(service.state.phase, WorkflowPhase.COMPLETED)
+        self.assertEqual(self.clipboard.dictation_outputs, [])
+        self.assertIsNotNone(service._session)
+
+        write_release.set()
+        scheduler.join()
+        self.assertEqual(service.state.phase, WorkflowPhase.COMPLETED)
+        self.assertTrue(service.finish(operation_id))
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(self.clipboard.auto_pastes, ["Transcribed"])
+
+    def test_app_escape_during_blocked_selection_publication_stays_publishing(self):
+        scheduler = ThreadScheduler()
+        service = self.make_service(scheduler)
+        apply_entered = threading.Event()
+        apply_release = threading.Event()
+        apply_result = self.clipboard.apply_result
+
+        def blocked_apply(capture, result):
+            apply_entered.set()
+            if not apply_release.wait(timeout=1.0):
+                raise AssertionError("test did not release selection apply")
+            return apply_result(capture, result)
+
+        self.clipboard.apply_result = blocked_apply
+        service.dispatch(StartRewrite())
+        self.assertTrue(apply_entered.wait(timeout=1.0))
+        operation_id = service.state.operation_id
+        harness = SimpleNamespace(
+            _workflow_service=service,
+            _translation_picker=None,
+            app_state="rewriting",
+        )
+
+        app.App._on_escape(harness)
+        app.App._cancel(harness)
+
+        self.assertEqual(service.state.phase, WorkflowPhase.PUBLISHING)
+        self.assertIsNotNone(service._session)
+        self.assertEqual(self.clipboard.applied, [])
+
+        apply_release.set()
+        scheduler.join()
+        self.assertEqual(service.state.phase, WorkflowPhase.COMPLETED)
+        self.assertTrue(service.finish(operation_id))
+        self.assertEqual(service.state.phase, WorkflowPhase.READY)
+        self.assertEqual(len(self.clipboard.applied), 1)
+        self.assertEqual(len(self.statistics.rewrites), 1)
+
+    def test_app_renders_the_non_cancellable_publishing_barrier(self):
+        set_state = Mock()
+        harness = SimpleNamespace(_set_state=set_state)
+
+        app.App._on_workflow_state(
+            harness,
+            WorkflowState(
+                phase=WorkflowPhase.PUBLISHING,
+                operation_id=1,
+                kind=workflows.WorkflowKind.REWRITE,
+            ),
+        )
+
+        set_state.assert_called_once_with("processing")
 
     def test_terminal_operation_releases_only_matching_operation_id(self):
         self.service.dispatch(StartRewrite())

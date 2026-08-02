@@ -96,6 +96,14 @@ publishes immutable workflow states. It owns overlap prevention and assigns a
 monotonic operation ID to every session; workers check that ID before provider
 results can change the clipboard, statistics, or current state.
 
+Gateway calls never run while the service lock is held. Dictation delivers its
+terminal `COMPLETED` state before claiming clipboard/statistics publication;
+rewrite and translation deliver a non-cancellable `PUBLISHING` barrier first.
+Cancellation or shutdown that wins before a claim performs neither output nor
+usage accounting. An accepted publication records usage once, and terminal
+release waits for a blocked external gateway so the UI cannot announce `READY`
+before its effect has returned.
+
 ```text
 Tk command dispatcher                 Tk state renderer
           |                                  ^
@@ -124,9 +132,11 @@ as soon as the snapshot exists without tying its temporary WAV to a slow
 provider request. The active Tk path uses the same stop/snapshot/terminal
 methods, so the scaffolding does not duplicate start-stop or cleanup policy.
 
-The HTTP and clipboard runtime adapters will be wired after issues #17 and #19
-land. Until then, `app.py` remains the active end-to-end orchestration path and
-`workflows.py` is covered headlessly as integration scaffolding for issue #20.
+The runtime adapters in `app.py` connect the service to the typed provider
+registry, the real `RecordingSession`, and the focus-safe Windows clipboard.
+The hotkeys capture the original `SelectionTarget` before Tk can take focus and
+dispatch explicit workflow commands; legacy helpers remain only for narrow
+compatibility tests until their callers are retired.
 
 ### `desktop_state.py`
 

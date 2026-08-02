@@ -89,8 +89,10 @@ rollback when a secret backend cannot be verified. The backend contract and
 corrupted-entry handling are covered in `tests/test_secret_store.py`.
 
 Headless orchestration tests live in `tests/test_workflows.py`. They exercise
-dictation, rewrite, translation, overlap prevention, and stale-worker rejection
-without constructing Tk widgets.
+dictation, rewrite, translation, overlap prevention, focus-safe target capture,
+publication ordering, shutdown cancellation, and stale-worker rejection without
+constructing Tk widgets. A small app-level harness also verifies Escape cannot
+reset the UI while a terminal publication is blocked.
 
 ## Build
 

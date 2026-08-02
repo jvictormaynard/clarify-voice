@@ -32,6 +32,9 @@ class WorkflowPhase(str, Enum):
     PREPARING_TRANSLATION = "preparing_translation"
     TRANSLATION_PICKER = "translation_picker"
     TRANSLATING = "translating"
+    # The view has received a non-cancellable publication phase.  External
+    # clipboard/statistics calls may start only after this phase is delivered.
+    PUBLISHING = "publishing"
     MICROPHONE_UNAVAILABLE = "microphone_unavailable"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -52,6 +55,7 @@ class RecordingSnapshot:
 
     audio_path: Path
     audio_bytes: bytes
+    cancel_token: Any = None
 
 
 @dataclass(frozen=True)
@@ -105,12 +109,12 @@ class DismissMicrophoneUnavailable:
 
 @dataclass(frozen=True)
 class StartRewrite:
-    pass
+    target: SelectionTarget | None = None
 
 
 @dataclass(frozen=True)
 class StartTranslation:
-    pass
+    target: SelectionTarget | None = None
 
 
 @dataclass(frozen=True)
@@ -160,7 +164,7 @@ class RecordingSessionGateway(Protocol):
         ...
     def stop(self) -> RecordingSnapshot: ...
     def cancel(self) -> None: ...
-    def complete(self) -> None: ...
+    def complete(self) -> bool | None: ...
     def fail(self, error: Exception) -> None: ...
 
 
@@ -247,10 +251,18 @@ class _Session:
     mode: str = ""
     language: str = ""
     started_at: float = 0.0
+    elapsed_seconds: float = 0.0
     selection: SelectionCapture | None = None
     target_language: str = ""
     usage_context: dict[str, Any] = field(default_factory=dict)
     recording: RecordingSessionGateway | None = None
+    # A publication is claimed under the service lock, then all gateway calls
+    # happen after the lock is released.  This makes cancellation a clear
+    # winner while a publication is still queued, while still preventing
+    # duplicate statistics when an accepted publication finishes later.
+    publication_claimed: bool = False
+    publication_finished: bool = True
+    finish_requested: bool = False
 
 
 class WorkflowService:
@@ -297,9 +309,9 @@ class WorkflowService:
         if isinstance(command, DismissMicrophoneUnavailable):
             return self._dismiss_microphone_unavailable()
         if isinstance(command, StartRewrite):
-            return self._start_rewrite()
+            return self._start_rewrite(command)
         if isinstance(command, StartTranslation):
-            return self._start_translation()
+            return self._start_translation(command)
         if isinstance(command, ChooseTranslationLanguage):
             return self._choose_translation_language(command.language)
         if isinstance(command, CancelTranslation):
@@ -311,11 +323,17 @@ class WorkflowService:
         with self._lock:
             if not self._is_current_locked(operation_id):
                 return False
+            session = self._session
+            if session is None:
+                return False
             if self._state.phase not in (
                 WorkflowPhase.COMPLETED,
                 WorkflowPhase.FAILED,
             ):
                 return False
+            if not session.publication_finished:
+                session.finish_requested = True
+                return True
             self._session = None
             self._state = WorkflowState()
         self._scheduler.call_soon(lambda: self._deliver_ready())
@@ -323,12 +341,41 @@ class WorkflowService:
 
     def cancel_active(self) -> None:
         """Invalidate any worker, used during application shutdown."""
+        deferred_release = False
         with self._lock:
             session = self._session
-            self._session = None
-            self._state = WorkflowState()
+            if (
+                session is not None
+                and session.publication_claimed
+                and not session.publication_finished
+            ):
+                # An accepted external publication owns the operation until
+                # the gateway returns.  Keep the non-cancellable UI state so
+                # shutdown cannot announce READY before a blocked paste has
+                # completed; no service lock is held while it runs.
+                session.finish_requested = True
+                deferred_release = True
+            else:
+                self._session = None
+                self._state = WorkflowState()
         if session and session.recording is not None:
             self._scheduler.run_in_background(session.recording.cancel)
+        if not deferred_release:
+            self._scheduler.call_soon(lambda: self._deliver_ready())
+
+    def _release_terminal_if_requested(self, session: _Session) -> None:
+        with self._lock:
+            if (
+                not self._is_current_locked(session.operation_id)
+                or not session.finish_requested
+                or not session.publication_finished
+                or self._state.phase
+                not in (WorkflowPhase.COMPLETED, WorkflowPhase.FAILED)
+            ):
+                return
+            self._session = None
+            self._state = WorkflowState()
+        self._scheduler.call_soon(lambda: self._deliver_ready())
 
     def _new_session(
         self,
@@ -369,6 +416,7 @@ class WorkflowService:
         *,
         result_text: str | None = None,
         status_key: str | None = None,
+        after_delivery: Callable[[], None] | None = None,
     ) -> bool:
         with self._lock:
             if not self._is_current_locked(session.operation_id):
@@ -382,15 +430,20 @@ class WorkflowService:
                 status_key=status_key,
             )
             self._state = state
-        self._scheduler.call_soon(lambda: self._deliver(state))
+        def deliver_then_publish() -> None:
+            if self._deliver(state) and after_delivery is not None:
+                after_delivery()
+
+        self._scheduler.call_soon(deliver_then_publish)
         return True
 
-    def _deliver(self, state: WorkflowState) -> None:
+    def _deliver(self, state: WorkflowState) -> bool:
         with self._lock:
             if self._state != state:
-                return
+                return False
         for listener in tuple(self._listeners):
             listener(state)
+        return True
 
     @staticmethod
     def _provider_failed(result: str | None) -> bool:
@@ -456,17 +509,19 @@ class WorkflowService:
                 raise RuntimeError("Recording session was not created")
             session.recording.start()
         except Exception as error:
+            should_fail = False
             with self._lock:
-                if (
+                should_fail = (
                     self._is_current_locked(session.operation_id)
                     and self._state.phase is WorkflowPhase.RECORDING
-                ):
-                    if session.recording is not None:
-                        try:
-                            session.recording.fail(error)
-                        except Exception:
-                            pass
-                    self._transition(session, WorkflowPhase.MICROPHONE_UNAVAILABLE)
+                )
+            if should_fail:
+                if session.recording is not None:
+                    try:
+                        session.recording.fail(error)
+                    except Exception:
+                        pass
+                self._transition(session, WorkflowPhase.MICROPHONE_UNAVAILABLE)
         finally:
             if (
                 not self._is_current(session.operation_id)
@@ -515,22 +570,24 @@ class WorkflowService:
                 )
                 self._transition(session, WorkflowPhase.FAILED, status_key="error")
                 return
-            with self._lock:
-                if not self._is_current_locked(session.operation_id):
-                    return
-                session.recording.complete()
-                try:
-                    self._statistics.record_dictation(
-                        session.usage_context, elapsed, result
+            if not self._is_current(session.operation_id):
+                return
+            completion = session.recording.complete()
+            if completion is False:
+                return
+            session.elapsed_seconds = elapsed
+            session.publication_finished = False
+            if not self._transition(
+                session,
+                WorkflowPhase.COMPLETED,
+                result_text=result,
+                after_delivery=lambda: self._scheduler.run_in_background(
+                    lambda: self._write_dictation_if_current(
+                        session, result, elapsed
                     )
-                except OSError:
-                    pass
-                self._scheduler.run_in_background(
-                    lambda: self._write_dictation_if_current(session, result)
-                )
-            self._transition(
-                session, WorkflowPhase.COMPLETED, result_text=result
-            )
+                ),
+            ):
+                return
         except NoUsableAudioError as error:
             if not self._is_current(session.operation_id):
                 return
@@ -551,12 +608,41 @@ class WorkflowService:
             self._transition(session, WorkflowPhase.FAILED, status_key="error")
 
     def _write_dictation_if_current(
-        self, session: _Session, result: str
+        self, session: _Session, result: str, elapsed: float | None = None
     ) -> None:
         with self._lock:
-            if not self._is_current_locked(session.operation_id):
+            if (
+                not self._is_current_locked(session.operation_id)
+                or session.publication_claimed
+            ):
                 return
-            self._clipboard.write_dictation_result(session.target, result)
+            session.publication_claimed = True
+            session.publication_finished = False
+            target = session.target
+            usage_context = dict(session.usage_context)
+
+        # Never hold the service lock across statistics or clipboard adapters.
+        # The claim above is the linearization point: cancellation before it
+        # suppresses both effects; cancellation after it cannot create a
+        # duplicate or deadlock behind an external clipboard operation.
+        try:
+            try:
+                self._statistics.record_dictation(
+                    usage_context,
+                    session.elapsed_seconds if elapsed is None else elapsed,
+                    result,
+                )
+            except OSError:
+                pass
+            self._clipboard.write_dictation_result(target, result)
+        except Exception:
+            # A terminal result remains visible even when the best-effort
+            # clipboard adapter is unavailable during shutdown.
+            return
+        finally:
+            with self._lock:
+                session.publication_finished = True
+            self._release_terminal_if_requested(session)
 
     def _cancel_dictation(self) -> bool:
         with self._lock:
@@ -591,8 +677,9 @@ class WorkflowService:
 
     # Rewrite
 
-    def _start_rewrite(self) -> bool:
-        target = self._clipboard.capture_target()
+    def _start_rewrite(self, command: StartRewrite | None = None) -> bool:
+        target = command.target if command is not None else None
+        target = target or self._clipboard.capture_target()
         if target is None:
             return False
         session = self._new_session(
@@ -618,34 +705,35 @@ class WorkflowService:
                 if not self._is_current_locked(session.operation_id):
                     return
                 target = session.target
-                if (
-                    target is None
-                    or not self._clipboard.is_target_current(target)
-                ):
-                    self._transition(
-                        session,
-                        WorkflowPhase.FAILED,
-                        status_key="no_selection",
-                    )
-                    return
+            if target is None or not self._clipboard.is_target_current(target):
+                self._transition(
+                    session,
+                    WorkflowPhase.FAILED,
+                    status_key="no_selection",
+                )
+                return
             capture = self._clipboard.capture_selection(target)
             if capture is None or not capture.text.strip():
                 self._transition(
                     session, WorkflowPhase.FAILED, status_key="no_selection"
                 )
                 return
-            with self._lock:
-                if not self._is_current_locked(session.operation_id):
-                    return
-                if not self._target_is_current(session):
-                    self._transition(
-                        session,
-                        WorkflowPhase.FAILED,
-                        status_key="no_selection",
-                    )
-                    return
-                self._clipboard.restore(capture)
-                capture_restored = True
+            if not self._is_current(session.operation_id):
+                return
+            if not self._target_is_current(session):
+                self._transition(
+                    session,
+                    WorkflowPhase.FAILED,
+                    status_key="no_selection",
+                )
+                return
+            # Restore outside the service lock.  The capture remains owned by
+            # this worker until the call succeeds, so the finally block still
+            # returns it when cancellation wins during capture/validation.
+            self._clipboard.restore(capture)
+            capture_restored = True
+            if not self._is_current(session.operation_id):
+                return
             provider_result = self._provider.rewrite(capture.text)
             rewritten = provider_result.text
             if not self._is_current(session.operation_id):
@@ -677,8 +765,9 @@ class WorkflowService:
 
     # Translation
 
-    def _start_translation(self) -> bool:
-        target = self._clipboard.capture_target()
+    def _start_translation(self, command: StartTranslation | None = None) -> bool:
+        target = command.target if command is not None else None
+        target = target or self._clipboard.capture_target()
         if target is None:
             return False
         session = self._new_session(
@@ -712,24 +801,31 @@ class WorkflowService:
                 if not self._is_current_locked(session.operation_id):
                     return
                 target = session.target
+            if target is None or not self._clipboard.is_target_current(target):
+                self._transition(
+                    session, WorkflowPhase.FAILED, status_key="no_selection"
+                )
+                return
             capture = self._clipboard.capture_selection(target)
             if capture is None or not capture.text.strip():
                 self._transition(
                     session, WorkflowPhase.FAILED, status_key="no_selection"
                 )
                 return
+            if not self._is_current(session.operation_id):
+                return
+            if not self._target_is_current(session):
+                self._transition(
+                    session,
+                    WorkflowPhase.FAILED,
+                    status_key="no_selection",
+                )
+                return
+            self._clipboard.restore(capture)
+            capture_restored = True
             with self._lock:
                 if not self._is_current_locked(session.operation_id):
                     return
-                if not self._target_is_current(session):
-                    self._transition(
-                        session,
-                        WorkflowPhase.FAILED,
-                        status_key="no_selection",
-                    )
-                    return
-                self._clipboard.restore(capture)
-                capture_restored = True
                 session.selection = capture
             self._transition(session, WorkflowPhase.TRANSLATION_PICKER)
         except Exception:
@@ -751,9 +847,21 @@ class WorkflowService:
             ):
                 return False
             session.target_language = language
-            if session.target is not None:
-                self._clipboard.activate(session.target)
-        self._transition(session, WorkflowPhase.TRANSLATING)
+            target = session.target
+        if not self._is_current(session.operation_id):
+            return False
+        if target is not None:
+            try:
+                self._clipboard.activate(target)
+            except Exception:
+                self._transition(
+                    session,
+                    WorkflowPhase.FAILED,
+                    status_key="translation_failed",
+                )
+                return False
+        if not self._transition(session, WorkflowPhase.TRANSLATING):
+            return False
         self._scheduler.run_in_background(
             lambda: self._translation_worker(session)
         )
@@ -804,10 +912,14 @@ class WorkflowService:
                 or self._state.phase is not WorkflowPhase.TRANSLATION_PICKER
             ):
                 return False
-            if session.target is not None:
-                self._clipboard.activate(session.target)
+            target = session.target
             self._session = None
             self._state = WorkflowState()
+        if target is not None:
+            try:
+                self._clipboard.activate(target)
+            except Exception:
+                pass
         self._scheduler.call_soon(lambda: self._deliver_ready())
         return True
 
@@ -822,25 +934,85 @@ class WorkflowService:
         copied_status: str,
         statistic: Callable[[], None],
     ) -> None:
+        # First publish a non-cancellable phase to the view.  Only after its
+        # delivery may the worker claim publication and enter external
+        # clipboard/statistics code.  Shutdown can still invalidate the
+        # operation in this window, in which case the queued worker is a no-op.
+        self._transition(
+            session,
+            WorkflowPhase.PUBLISHING,
+            result_text=result,
+            after_delivery=lambda: self._scheduler.run_in_background(
+                lambda: self._publish_selection_result(
+                    session,
+                    capture,
+                    result,
+                    copied_status=copied_status,
+                    statistic=statistic,
+                )
+            ),
+        )
+
+    def _publish_selection_result(
+        self,
+        session: _Session,
+        capture: SelectionCapture,
+        result: str,
+        *,
+        copied_status: str,
+        statistic: Callable[[], None],
+    ) -> None:
         with self._lock:
-            if not self._is_current_locked(session.operation_id):
+            if (
+                not self._is_current_locked(session.operation_id)
+                or session.publication_claimed
+            ):
                 return
+            session.publication_claimed = True
+            session.publication_finished = False
+
+        try:
             # Once capture identity has been validated, the clipboard adapter
             # owns the later focus-safe fallback: it pastes only into the
             # original selection, otherwise it leaves the result copied.
             disposition = self._clipboard.apply_result(capture, result)
+            try:
+                statistic()
+            except OSError:
+                pass
+        except Exception:
+            with self._lock:
+                session.publication_finished = True
+            self._transition(
+                session,
+                WorkflowPhase.FAILED,
+                status_key=(
+                    "rewrite_failed"
+                    if session.kind is WorkflowKind.REWRITE
+                    else "translation_failed"
+                ),
+                after_delivery=lambda: self._release_terminal_if_requested(
+                    session
+                ),
+            )
+            return
+        else:
             status_key = (
                 None
                 if disposition is SelectionDisposition.PASTED
                 else copied_status
             )
-            try:
-                statistic()
-            except OSError:
-                pass
-        self._transition(
-            session,
-            WorkflowPhase.COMPLETED,
-            result_text=result,
-            status_key=status_key,
-        )
+            with self._lock:
+                session.publication_finished = True
+            self._transition(
+                session,
+                WorkflowPhase.COMPLETED,
+                result_text=result,
+                status_key=status_key,
+                after_delivery=lambda: self._release_terminal_if_requested(
+                    session
+                ),
+            )
+        finally:
+            with self._lock:
+                session.publication_finished = True
