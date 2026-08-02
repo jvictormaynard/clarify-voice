@@ -72,14 +72,14 @@ Run the same core checks used in CI:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q app.py repositories.py secret_store.py desktop_state.py windows_hotkeys.py windows_clipboard.py tests
+.\.venv\Scripts\python.exe -m compileall -q app.py repositories.py secret_store.py desktop_state.py version.py windows_hotkeys.py windows_clipboard.py tests
 ```
 
 From Linux or WSL with the dependencies installed:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q app.py repositories.py secret_store.py desktop_state.py windows_hotkeys.py windows_clipboard.py tests
+python3 -m compileall -q app.py repositories.py secret_store.py desktop_state.py version.py windows_hotkeys.py windows_clipboard.py tests
 ```
 
 Repository-specific tests live in `tests/test_repositories.py` and are split
@@ -198,24 +198,27 @@ not install it. The build requires a .NET SDK because
 `build\tools`.
 
 1. Choose the next semantic version from the changes since the latest tag.
-2. Update `CHANGELOG.md` and any documentation whose behavior changed.
-3. Run the release preflight, replacing the example version:
+2. Set `__version__` in `version.py` and the top-level `version` in
+   `package.json` to the same exact `X.Y.Z` value. Diagnostics and packaged
+   executables import the module, and preflight rejects metadata drift.
+3. Update `CHANGELOG.md` and any documentation whose behavior changed.
+4. Run the release preflight, replacing the example version:
 
    ```bash
    python3 .agents/skills/clarifyvoice-release/scripts/release_preflight.py \
      --repo . --version 0.1.1
    ```
 
-4. Open and merge a focused release-preparation PR after local, Ubuntu,
+5. Open and merge a focused release-preparation PR after local, Ubuntu,
    Windows, and packaging checks pass.
-5. Create an annotated `vX.Y.Z` tag on the exact green `master` commit and push
+6. Create an annotated `vX.Y.Z` tag on the exact green `master` commit and push
    only that tag.
-6. The release workflow builds on Windows, requires Azure Artifact Signing,
+7. The release workflow builds on Windows, requires Azure Artifact Signing,
    verifies the EXE/MSI/manifest-CAB publisher and timestamps, generates the
    runtime-lock CycloneDX SBOM, creates checksums and provenance attestations,
    verifies the official SoX source archive, and publishes all required assets
    to the same GitHub release.
-7. Download the published assets, verify signatures, checksums, manifest and
+8. Download the published assets, verify signatures, checksums, manifest and
    SBOM/ZIP contents, inspect attestations, and confirm that `/releases/latest`
    resolves to the new version.
 

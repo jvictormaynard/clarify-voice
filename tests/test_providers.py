@@ -22,6 +22,7 @@ for _provider_variable in (
 import app
 from desktop_state import WorkflowController
 from provider_http import AuthenticationError
+from version import __version__
 import windows_hotkeys
 from windows_clipboard import CF_UNICODETEXT, ClipboardFormat, ClipboardSnapshot
 from PIL import Image as PILImage
@@ -64,6 +65,14 @@ class ProviderTests(unittest.TestCase):
             app._provider_url("https://proxy.example", "v1", "audio/transcriptions"),
             "https://proxy.example/v1/audio/transcriptions",
         )
+
+    def test_diagnostic_export_uses_the_packaged_version_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "diagnostics.json"
+            app.export_safe_diagnostics(destination)
+            payload = json.loads(destination.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["application"]["version"], __version__)
 
     def test_typed_http_errors_are_localized_without_response_content(self):
         app.APP_CONFIG["ui_language"] = "pt"

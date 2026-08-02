@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -19,6 +20,7 @@ REQUIRED_FILES = (
     "docs/development.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
+    "package.json",
     "requirements.txt",
     "requirements-dev.txt",
     "requirements-lock-linux.txt",
@@ -73,6 +75,29 @@ def parse_version(raw: str) -> tuple[str, tuple[int, int, int]]:
     return number, tuple(int(part) for part in match.groups())
 
 
+def version_consistency_failures(repo: Path, expected: str) -> list[str]:
+    """Require release metadata and the packaged module to agree exactly."""
+    failures: list[str] = []
+    version_source = (repo / "version.py").read_text(encoding="utf-8")
+    version_match = re.search(
+        r"^__version__\s*=\s*\"([0-9]+\.[0-9]+\.[0-9]+)\"$",
+        version_source,
+        re.MULTILINE,
+    )
+    if not version_match or version_match.group(1) != expected:
+        failures.append("version.py does not match the proposed release version")
+
+    try:
+        package = json.loads((repo / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        failures.append("package.json is not valid JSON")
+    else:
+        package_version = package.get("version") if isinstance(package, dict) else None
+        if package_version != expected:
+            failures.append("package.json does not match the proposed release version")
+    return failures
+
+
 def version_tags(repo: Path) -> list[tuple[tuple[int, int, int], str]]:
     tags = git(repo, "tag", "--list", "v*").splitlines()
     parsed = []
@@ -109,14 +134,7 @@ def main() -> int:
             print(f"FAIL: {failure}")
         return 1
 
-    version_source = (repo / "version.py").read_text(encoding="utf-8")
-    version_match = re.search(
-        r'^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"$',
-        version_source,
-        re.MULTILINE,
-    )
-    if not version_match or version_match.group(1) != version:
-        failures.append("version.py does not match the proposed release version")
+    failures.extend(version_consistency_failures(repo, version))
 
     tags = version_tags(repo)
     existing_tags = {existing_tag for _, existing_tag in tags}

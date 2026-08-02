@@ -28,6 +28,7 @@ from provider_http import (
     redact_sensitive,
     _retry_after_seconds,
 )
+from version import __version__
 
 
 class FakeResponse:
@@ -559,12 +560,12 @@ class DiagnosticsTests(unittest.TestCase):
 
             destination = export_diagnostics(
                 root / "diagnostics.json", log_directory=root / "logs",
-                application_version="0.1.2")
+                application_version=__version__)
             payload = json.loads(destination.read_text(encoding="utf-8"))
             serialized = json.dumps(payload, sort_keys=True)
 
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["application"]["version"], "0.1.2")
+        self.assertEqual(payload["application"]["version"], __version__)
         self.assertIn("python_version", payload["environment"])
         self.assertEqual(payload["recent_errors"][0]["error_type"], "rate_limit")
         self.assertNotIn("secret", serialized)

@@ -44,6 +44,7 @@ from repositories import (
     LocalConfigRepository,
     LocalUsageStatsRepository,
 )
+from version import __version__
 from windows_clipboard import ClipboardSnapshot, WindowsClipboardAdapter
 from update_security import (
     UpdateSecurityError,
@@ -121,7 +122,6 @@ AUDIO_PATH = DATA_DIR / "temp_recording.wav"
 CONFIG_PATH = DATA_DIR / "config.json"
 STATS_PATH = DATA_DIR / "usage_stats.json"
 HTTP_LOG_DIR = DATA_DIR / "logs"
-APP_VERSION = "0.1.2"
 _STATS_LOCK = threading.Lock()
 PILL_FADE_IN_SECONDS = 0.12
 PILL_FADE_OUT_SECONDS = 0.14
@@ -1904,7 +1904,7 @@ def export_safe_diagnostics(destination: Path | None = None) -> Path:
         destination = DATA_DIR / f"clarifyvoice-diagnostics-{stamp}.json"
     return export_diagnostics(
         destination, log_directory=HTTP_LOG_DIR,
-        application_version=APP_VERSION)
+        application_version=__version__)
 
 
 def _parse_audio_models(provider: str, payload) -> list[str]:

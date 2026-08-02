@@ -45,8 +45,11 @@ Update `CHANGELOG.md`:
 - change the `Unreleased` comparison to start at the new tag;
 - add the comparison link from the previous tag to the new tag.
 
-Update `version.py` to exactly the release version. The tag, manifest, MSI,
-and in-app comparison all derive from this value.
+Set `__version__` in `version.py` and the top-level `version` in `package.json`
+to the same exact `X.Y.Z` value before running preflight. The tag, manifest,
+MSI, in-app comparison, runtime diagnostics, and packaged executable derive
+from this value; the preflight rejects drift between the module, package
+metadata, and proposed tag.
 
 Audit documentation touched by the release contract:
 
