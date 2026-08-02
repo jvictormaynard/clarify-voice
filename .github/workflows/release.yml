@@ -39,6 +39,9 @@ jobs:
       - name: Check runtime dependency lock
         run: python scripts/check_dependency_lock.py --lock-file requirements-lock-runtime-windows.txt --requirements-file requirements.txt
 
+      - name: Check runtime pins match build lock
+        run: python scripts/check_runtime_lock.py
+
       - name: Run Ruff lint
         run: ruff check desktop_state.py windows_hotkeys.py scripts/dependency_audit.py tests/test_repository.py
 

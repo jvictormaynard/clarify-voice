@@ -44,6 +44,8 @@ toolchain used to build and validate the executable. The separate
 input to the release SBOM. Keeping these locks separate prevents Ruff, mypy,
 pip-audit, pip-tools, CycloneDX, and PyInstaller from being reported as shipped
 application components while retaining pinned, reproducible build inputs.
+The release checks that every shared runtime package has the same version in
+both Windows locks before building or generating the SBOM.
 
 Environment variables are optional because provider settings can be entered in
 the UI. For local automation, copy `.env.example` to `.env` and fill only the

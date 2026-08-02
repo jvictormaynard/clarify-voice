@@ -108,6 +108,7 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertIn("[tool.mypy]", pyproject)
         checker = ROOT / "scripts" / "check_dependency_lock.py"
         self.assertTrue(checker.is_file())
+        self.assertTrue((ROOT / "scripts" / "check_runtime_lock.py").is_file())
         checker_content = checker.read_text(encoding="utf-8")
         self.assertNotIn("--check", checker_content)
         self.assertIn("shutil.copyfile(lockfile, generated)", checker_content)
@@ -143,6 +144,7 @@ class RepositorySafetyTests(unittest.TestCase):
             )
             self.assertIn("requirements-lock-windows.txt", workflow)
             self.assertIn("requirements-lock-runtime-windows.txt", workflow)
+            self.assertIn("scripts/check_runtime_lock.py", workflow)
             if workflow_name == "ci.yml":
                 self.assertIn("requirements-lock-linux.txt", workflow)
             self.assertIn("scripts/check_dependency_lock.py", workflow)
@@ -174,6 +176,10 @@ class RepositorySafetyTests(unittest.TestCase):
             (
                 "Check runtime dependency lock",
                 "python scripts/check_dependency_lock.py",
+            ),
+            (
+                "Check runtime pins match build lock",
+                "python scripts/check_runtime_lock.py",
             ),
             ("Run Ruff lint", "ruff check"),
             ("Run Ruff format check", "ruff format --check"),

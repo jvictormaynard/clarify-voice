@@ -24,6 +24,7 @@ REQUIRED_FILES = (
     "requirements-lock-linux.txt",
     "requirements-lock-windows.txt",
     "requirements-lock-runtime-windows.txt",
+    "scripts/check_runtime_lock.py",
     "scripts/build.ps1",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
