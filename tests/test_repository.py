@@ -30,7 +30,7 @@ class RepositorySafetyTests(unittest.TestCase):
     def test_deploy_stages_all_python_modules(self):
         content = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
         self.assertIn('Join-Path $repoRoot "*.py"', content)
-        self.assertIn('${distribution};distribution', content)
+        self.assertIn("${distribution};distribution", content)
         self.assertNotIn('Join-Path $soxDir "*.txt"', content)
         self.assertNotIn('Join-Path $soxDir "LICENSE.GPL.txt"', content)
 
@@ -65,9 +65,9 @@ class RepositorySafetyTests(unittest.TestCase):
         )
 
     def test_release_requires_managed_signing_and_provenance(self):
-        content = (
-            ROOT / ".github" / "workflows" / "release.yml"
-        ).read_text(encoding="utf-8")
+        content = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
         for required in (
             "environment: release-signing",
             "id-token: write",
@@ -86,9 +86,9 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertNotIn("AZURE_CLIENT_SECRET", content)
 
     def test_ci_exercises_installer_lifecycle_without_signing_secrets(self):
-        content = (
-            ROOT / ".github" / "workflows" / "ci.yml"
-        ).read_text(encoding="utf-8")
+        content = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("scripts\\test-installer.ps1", content)
         self.assertIn("ClarifyVoice-windows-x64-baseline.msi", content)
         self.assertIn("Install manifest dependencies", content)
@@ -96,9 +96,7 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertNotIn("AZURE_CLIENT_ID", content)
 
     def test_destructive_installer_smoke_is_hosted_runner_only(self):
-        content = (ROOT / "scripts" / "test-installer.ps1").read_text(
-            encoding="utf-8"
-        )
+        content = (ROOT / "scripts" / "test-installer.ps1").read_text(encoding="utf-8")
         guard_call = content.index("Assert-DisposableHostedRunner\n\n$baseline")
         first_write = content.index("New-Item $configDirectory")
         clean_target_call = content.index("Assert-CleanSmokeTarget\nNew-Item")
@@ -134,7 +132,7 @@ class RepositorySafetyTests(unittest.TestCase):
             self.assertTrue((ROOT / relative_path).is_file(), relative_path)
 
         build = (ROOT / "scripts" / "build.ps1").read_text(encoding="utf-8")
-        self.assertIn('${distribution};distribution', build)
+        self.assertIn("${distribution};distribution", build)
 
         installer = (ROOT / "installer" / "ClarifyVoice.wxs").read_text(
             encoding="utf-8"
