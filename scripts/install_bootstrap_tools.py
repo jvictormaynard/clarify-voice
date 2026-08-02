@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the pip/setuptools pins recorded in a development lock."""
+"""Install and probe the bootstrap pins recorded in a development lock."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN = re.compile(r"^(pip|setuptools)==([^\s;]+)(?:\s*;\s*.*)?$")
+PIN = re.compile(r"^(pip|pip-tools|setuptools)==([^\s;]+)(?:\s*;\s*.*)?$")
 
 
 def _pins(lock_file: Path) -> list[str]:
@@ -20,12 +20,12 @@ def _pins(lock_file: Path) -> list[str]:
         match = PIN.fullmatch(line.strip())
         if match:
             found[match.group(1)] = match.group(2)
-    missing = sorted({"pip", "setuptools"} - found.keys())
+    missing = sorted({"pip", "pip-tools", "setuptools"} - found.keys())
     if missing:
         raise ValueError(
             f"{lock_file.name} must pin bootstrap tools: {', '.join(missing)}"
         )
-    return [f"{name}=={found[name]}" for name in ("pip", "setuptools")]
+    return [f"{name}=={found[name]}" for name in ("pip", "setuptools", "pip-tools")]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,7 +39,16 @@ def main(argv: list[str] | None = None) -> int:
         print(str(error), file=sys.stderr)
         return 1
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *pins],
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "-c",
+            str(lock_file),
+            *pins,
+        ],
         check=False,
     )
     if result.returncode:
