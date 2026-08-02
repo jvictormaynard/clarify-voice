@@ -551,23 +551,25 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(
             post.call_args_list[1].kwargs["json"]["model"], "gpt-5.4-mini")
 
-    @patch("app.call_openai", return_value="openai result")
-    def test_selected_provider_is_used_automatically(self, openai):
+    @patch("app._call_provider_audio", return_value="openai result")
+    def test_selected_provider_is_used_automatically(self, route):
         app.APP_CONFIG["transcription_provider"] = "openai"
         self.assertEqual(
             app.call_transcription_provider(self.audio_path, "transcription"),
             "openai result",
         )
-        openai.assert_called_once()
+        route.assert_called_once_with(
+            "openai", self.audio_path, "transcription", "en")
 
-    @patch("app.call_groq", return_value="groq result")
-    def test_selected_groq_provider_is_used_automatically(self, groq):
+    @patch("app._call_provider_audio", return_value="groq result")
+    def test_selected_groq_provider_is_used_automatically(self, route):
         app.APP_CONFIG["transcription_provider"] = "groq"
         self.assertEqual(
             app.call_transcription_provider(self.audio_path, "transcription"),
             "groq result",
         )
-        groq.assert_called_once()
+        route.assert_called_once_with(
+            "groq", self.audio_path, "transcription", "en")
 
     @patch("app.requests.post")
     def test_selected_text_rewrite_preserves_language_with_openai(self, post):
@@ -640,7 +642,7 @@ class ProviderTests(unittest.TestCase):
             "refinement_model": "gpt-4o-mini",
             "openai_api_key": "openai-key",
         })
-        with patch("app._rewrite_openai_compatible", return_value=""):
+        with patch("app._rewrite_with_provider", return_value=""):
             self.assertTrue(app.rewrite_selected_text("source").startswith("[Error"))
 
     @patch("app.requests.post")

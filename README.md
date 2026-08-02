@@ -152,7 +152,11 @@ the full setup, checks, release process, and WSL maintainer workflow.
 ## Project structure
 
 ```text
-app.py                         Main UI, provider clients, and workflows
+app.py                         Main UI and desktop workflows
+provider_types.py              Typed provider requests, results, and capabilities
+provider_adapters.py           Gemini and OpenAI-compatible adapters
+provider_registry.py           Provider metadata and request routing registry
+repositories.py                Versioned configuration and statistics storage
 desktop_state.py               Small workflow state controller
 windows_hotkeys.py             Native Windows hotkey helpers
 assets/                        Product branding and provider marks

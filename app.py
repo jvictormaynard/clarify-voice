@@ -1,10 +1,8 @@
 """ClarifyVoice – voice transcription with Gemini, OpenAI, or Groq."""
 
 import argparse
-import base64
 import json
 import math
-import mimetypes
 import os
 import platform
 import queue
@@ -20,6 +18,16 @@ from pathlib import Path
 import requests
 
 from desktop_state import WorkflowController
+from provider_adapters import normalize_provider_url
+from provider_registry import PROVIDER_REGISTRY
+from provider_types import (
+    ProviderCapability,
+    ProviderConnection,
+    ProviderError,
+    RewriteRequest,
+    TranscriptionRequest,
+    TranslationRequest,
+)
 from repositories import (
     ApplicationRepositories,
     LocalConfigRepository,
@@ -150,12 +158,6 @@ def _next_language(language):
     current = SUPPORTED_LANGUAGES.index(language)
     return SUPPORTED_LANGUAGES[(current + 1) % len(SUPPORTED_LANGUAGES)]
 
-AUDIO_MODEL_ALIASES = {
-    ("groq", "whisper large v3 turbo"): "whisper-large-v3-turbo",
-    ("groq", "whisper large v3"): "whisper-large-v3",
-    ("openai", "whisper 1"): "whisper-1",
-}
-
 # Public list prices used only for the local estimate shown in Statistics.
 # Unknown/custom models are deliberately left unpriced instead of guessing.
 AUDIO_COST_USD_PER_MINUTE = {
@@ -195,12 +197,11 @@ def _estimated_text_cost(provider: str, model: str, input_chars: int,
 
 def _recording_usage_context() -> dict:
     provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
-    model_keys = {
-        "gemini": "gemini_model", "openai": "openai_audio_model",
-        "groq": "groq_audio_model",
-    }
-    model = _canonical_audio_model(provider, APP_CONFIG.get(
-        model_keys.get(provider, "gemini_model"), ""))
+    try:
+        model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
+    except ProviderError:
+        provider = "gemini"
+        model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
     context = {
         "provider": provider,
         "model": model,
@@ -208,7 +209,8 @@ def _recording_usage_context() -> dict:
         "refinement_provider": "",
         "refinement_model": "",
     }
-    if context["mode"] == "prompt" and provider != "gemini":
+    if (context["mode"] == "prompt" and not PROVIDER_REGISTRY.supports(
+            provider, ProviderCapability.MULTIMODAL_AUDIO)):
         context["refinement_provider"] = str(APP_CONFIG.get(
             "refinement_provider", ""))
         context["refinement_model"] = str(APP_CONFIG.get(
@@ -236,7 +238,8 @@ def _build_recording_usage_event(context: dict, duration_seconds: float,
             refinement_provider, refinement_model, output_chars, output_chars)
         cost += text_cost
         complete = complete and text_known
-    elif provider == "gemini":
+    elif PROVIDER_REGISTRY.supports(
+            provider, ProviderCapability.MULTIMODAL_AUDIO):
         # Gemini returns the transcript from the same multimodal request.
         text_cost, text_known = _estimated_text_cost(
             provider, model, 0, output_chars)
@@ -359,30 +362,33 @@ def _format_duration(seconds: float) -> str:
 
 
 def _canonical_audio_model(provider, model):
-    value = str(model or "").strip()
-    return AUDIO_MODEL_ALIASES.get((provider, value.casefold()), value)
+    try:
+        return PROVIDER_REGISTRY.canonical_audio_model(provider, model)
+    except ProviderError:
+        return str(model or "").strip()
 
 
 def _load_app_config(repositories=None):
     config = _storage_repositories(repositories).config.load().to_legacy_mapping()
-    if config["transcription_provider"] not in ("openai", "gemini", "groq"):
+    if config["transcription_provider"] not in PROVIDER_REGISTRY.provider_ids:
         config["transcription_provider"] = "gemini"
-    if config["refinement_provider"] not in ("openai", "gemini", "groq"):
+    if config["refinement_provider"] not in PROVIDER_REGISTRY.provider_ids:
         provider = config["transcription_provider"]
-        config["refinement_provider"] = provider if provider in ("openai", "groq") else "openai"
+        config["refinement_provider"] = (
+            provider if PROVIDER_REGISTRY.supports(
+                provider, ProviderCapability.TEXT_GENERATION) else "openai")
     if not str(config["refinement_model"]).strip():
         provider = config["refinement_provider"]
-        config["refinement_model"] = str(config.get(
-            f"{provider}_text_model",
-            "llama-3.3-70b-versatile" if provider == "groq" else "gpt-4o-mini"))
+        config["refinement_model"] = PROVIDER_REGISTRY.text_model_from_legacy(
+            provider, config)
     if config["ui_mode"] not in ("prompt", "transcription"):
         config["ui_mode"] = "prompt"
     if config["ui_language"] not in SUPPORTED_LANGUAGES:
         config["ui_language"] = "en"
-    config["openai_audio_model"] = _canonical_audio_model(
-        "openai", config["openai_audio_model"])
-    config["groq_audio_model"] = _canonical_audio_model(
-        "groq", config["groq_audio_model"])
+    for provider in PROVIDER_REGISTRY.provider_ids:
+        metadata = PROVIDER_REGISTRY.describe(provider)
+        config[metadata.audio_model_key] = _canonical_audio_model(
+            provider, config[metadata.audio_model_key])
     return config
 
 
@@ -1706,139 +1712,45 @@ STRINGS = {
     },
 }
 
-def _audio_mime_type(audio_path: Path) -> str:
-    guessed, _ = mimetypes.guess_type(str(audio_path))
-    if guessed and guessed.startswith("audio/"):
-        return guessed
-    return "audio/wav"
-
-
 def _provider_url(base_url: str, version: str, endpoint: str) -> str:
-    base = (base_url or "").strip().rstrip("/")
-    if not base:
-        return ""
-    if base.lower().endswith(f"/{version.lower()}"):
-        return f"{base}/{endpoint.lstrip('/')}"
-    return f"{base}/{version}/{endpoint.lstrip('/')}"
+    """Compatibility facade for the centralized adapter URL normalizer."""
+    return normalize_provider_url(base_url, version, endpoint)
 
 
 def _http_error(provider: str, error) -> str:
     if isinstance(error, requests.HTTPError) and error.response is not None:
         detail = error.response.text.strip().replace("\n", " ")[:300]
         return f"[Error: {provider} HTTP {error.response.status_code}: {detail}]"
+    if isinstance(error, ProviderError):
+        return f"[Error: {error}]"
     return f"[Error: {provider}: {error}]"
 
 
-OPENAI_OFFICIAL_AUDIO_MODELS = (
-    "whisper-1",
-    "gpt-4o-mini-transcribe",
-    "gpt-4o-transcribe",
-    "gpt-4o-transcribe-diarize",
-)
-GROQ_OFFICIAL_AUDIO_MODELS = (
-    "whisper-large-v3-turbo",
-    "whisper-large-v3",
-)
-
-
-def _provider_model_entries(payload) -> list[dict]:
-    entries = payload.get("models", payload.get("data", []))
-    return entries if isinstance(entries, list) else []
-
-
 def _parse_audio_models(provider: str, payload) -> list[str]:
-    models = []
-    for entry in _provider_model_entries(payload):
-        if not isinstance(entry, dict):
-            continue
-        identifier_fields = (("name", "id") if provider == "gemini" else ("id", "name"))
-        model_id = str(next(
-            (entry.get(field) for field in identifier_fields if entry.get(field)), "")).strip()
-        if model_id.startswith("models/"):
-            model_id = model_id.removeprefix("models/")
-        if not model_id:
-            continue
-        if provider == "gemini":
-            methods = entry.get("supportedGenerationMethods")
-            if methods is not None and "generateContent" not in methods:
-                continue
-            if "gemini" not in model_id.lower():
-                continue
-        elif not any(token in model_id.lower() for token in ("whisper", "transcribe")):
-            continue
-        models.append(model_id)
-    return sorted(set(models), key=str.lower)
+    return list(PROVIDER_REGISTRY.parse_audio_models(provider, payload))
 
 
 def _parse_text_models(provider: str, payload) -> list[str]:
-    """Return generative language models, excluding ASR and other modalities."""
-    excluded = (
-        "whisper", "transcribe", "transcription", "speech", "tts", "audio",
-        "embedding", "embed", "moderation", "dall-e", "image", "realtime",
-    )
-    models = []
-    for entry in _provider_model_entries(payload):
-        if not isinstance(entry, dict):
-            continue
-        identifier_fields = (("name", "id") if provider == "gemini" else ("id", "name"))
-        model_id = str(next(
-            (entry.get(field) for field in identifier_fields if entry.get(field)), "")).strip()
-        if model_id.startswith("models/"):
-            model_id = model_id.removeprefix("models/")
-        if not model_id or any(token in model_id.lower() for token in excluded):
-            continue
-        if provider == "gemini":
-            methods = entry.get("supportedGenerationMethods")
-            if methods is not None and "generateContent" not in methods:
-                continue
-            if "gemini" not in model_id.lower():
-                continue
-        models.append(model_id)
-    return sorted(set(models), key=str.lower)
-
-
-def _provider_model_headers(provider: str, api_key: str, base_url: str) -> dict:
-    headers = {}
-    if provider == "gemini":
-        headers["x-goog-api-key"] = api_key
-        if "generativelanguage.googleapis.com" not in base_url.lower():
-            headers["Authorization"] = f"Bearer {api_key}"
-    else:
-        headers["Authorization"] = f"Bearer {api_key}"
-    return headers
+    return list(PROVIDER_REGISTRY.parse_text_models(provider, payload))
 
 
 def _fetch_provider_models(provider: str, api_key: str, base_url: str) -> list[str]:
     """Return only transcription-capable models announced by the provider."""
-    base_url = base_url.strip().rstrip("/")
-    if provider == "openai" and "api.openai.com" in base_url.lower():
-        return list(OPENAI_OFFICIAL_AUDIO_MODELS)
-    if provider == "groq" and "api.groq.com" in base_url.lower():
-        return list(GROQ_OFFICIAL_AUDIO_MODELS)
-    if not base_url:
-        raise ValueError("base URL is empty")
-    version = "v1beta" if provider == "gemini" else "v1"
-    response = requests.get(
-        _provider_url(base_url, version, "models"),
-        headers=_provider_model_headers(provider, api_key, base_url), timeout=12)
-    response.raise_for_status()
-    return _parse_audio_models(provider, response.json())
+    return list(PROVIDER_REGISTRY.fetch_audio_models(
+        provider, ProviderConnection(api_key.strip(), base_url.strip().rstrip("/"))))
 
 
 def _validate_provider_credentials(provider: str, api_key: str, base_url: str) -> dict:
     """Validate a provider key using its non-generative model-list endpoint."""
-    api_key = api_key.strip()
-    base_url = base_url.strip().rstrip("/")
-    if not api_key:
-        raise ValueError("API key is required")
-    if not base_url:
-        raise ValueError("base URL is required")
-    version = "v1beta" if provider == "gemini" else "v1"
-    response = requests.get(
-        _provider_url(base_url, version, "models"),
-        headers=_provider_model_headers(provider, api_key, base_url), timeout=12)
-    response.raise_for_status()
-    return response.json()
+    return dict(PROVIDER_REGISTRY.validate(
+        provider, ProviderConnection(api_key.strip(), base_url.strip().rstrip("/"))))
+
+
+def _discover_provider_models(
+        provider: str, api_key: str, base_url: str) -> tuple[list[str], list[str]]:
+    catalog = PROVIDER_REGISTRY.discover_models(
+        provider, ProviderConnection(api_key.strip(), base_url.strip().rstrip("/")))
+    return list(catalog.audio_models), list(catalog.text_models)
 
 
 def _make_provider_icon(provider: str, size: int = 64):
@@ -1855,69 +1767,55 @@ def _make_provider_icon(provider: str, size: int = 64):
 
 
 def call_gemini(audio_path: Path, mode: str, lang: str = "en") -> str:
-    api_key = str(APP_CONFIG.get("gemini_api_key", "")).strip()
-    if not api_key:
-        return "[Error: No Gemini API key]"
-    audio_b64 = base64.b64encode(audio_path.read_bytes()).decode()
-    lang_name = LANG_NAMES.get(lang, "English")
-    instruction = (TRANSCRIPTION_INSTRUCTION if mode == "transcription" else PROMPT_INSTRUCTION).format(lang=lang_name)
-    prompt = "Transcribe this audio." if mode == "transcription" else "Transcribe and rewrite this audio for clarity."
-    body = {
-        "contents": [{"parts": [
-            {"inlineData": {"mimeType": _audio_mime_type(audio_path), "data": audio_b64}},
-            {"text": prompt},
-        ]}],
-        "systemInstruction": {"parts": [{"text": instruction}]},
-        "generationConfig": {"temperature": 0.0 if mode == "transcription" else 0.1},
-    }
-    base_url = str(APP_CONFIG.get("gemini_base_url", ""))
-    model = str(APP_CONFIG.get("gemini_model", "gemini-2.5-flash")).strip()
-    if model.startswith("models/"):
-        model = model.removeprefix("models/")
-    if not model:
-        return "[Error: No Gemini model]"
-    url = _provider_url(base_url, "v1beta", f"models/{model}:generateContent")
-    if not url:
-        return "[Error: No Gemini base URL]"
-    headers = {"x-goog-api-key": api_key}
-    if "generativelanguage.googleapis.com" not in base_url.lower():
-        headers["Authorization"] = f"Bearer {api_key}"
+    return _call_provider_audio("gemini", audio_path, mode, lang)
+
+
+def _provider_connection(provider: str) -> ProviderConnection:
+    return PROVIDER_REGISTRY.connection_from_legacy(provider, APP_CONFIG)
+
+
+def _call_provider_audio(
+        provider: str, audio_path: Path, mode: str, lang: str = "en") -> str:
     try:
-        r = requests.post(url, headers=headers, json=body, timeout=60)
-        r.raise_for_status()
-        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        return _http_error("Gemini", e)
+        metadata = PROVIDER_REGISTRY.describe(provider)
+        connection = _provider_connection(provider)
+        model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
+        instruction = (
+            TRANSCRIPTION_INSTRUCTION if mode == "transcription" else PROMPT_INSTRUCTION
+        ).format(lang=LANG_NAMES.get(lang, "English"))
+        request = TranscriptionRequest(
+            audio_path=audio_path,
+            model=model,
+            language=lang,
+            instruction=instruction,
+            prompt=("Transcribe this audio." if mode == "transcription"
+                else "Transcribe and rewrite this audio for clarity."),
+            temperature=0.0 if mode == "transcription" else 0.1,
+        )
+        transcript = PROVIDER_REGISTRY.transcribe(
+            provider, request, connection).text
+        if (mode == "prompt" and not metadata.supports(
+                ProviderCapability.MULTIMODAL_AUDIO)):
+            return _refine_transcript(transcript, lang)
+        return transcript
+    except Exception as error:
+        try:
+            metadata = PROVIDER_REGISTRY.describe(provider)
+            label = metadata.display_name
+            if not metadata.supports(ProviderCapability.MULTIMODAL_AUDIO):
+                label = f"{label} Whisper"
+        except ProviderError:
+            label = "Provider"
+        return _http_error(label, error)
 
 
 def _rewrite_openai_compatible(
         provider: str, transcript: str, lang: str, model_override: str = "",
         instruction: str = "", temperature: float = 0.1,
         source_message: str = "") -> str:
-    label = "Groq" if provider == "groq" else "OpenAI"
-    api_key = str(APP_CONFIG.get(f"{provider}_api_key", "")).strip()
-    url = _provider_url(
-        str(APP_CONFIG.get(f"{provider}_base_url", "")), "v1", "chat/completions")
-    default_model = "llama-3.3-70b-versatile" if provider == "groq" else "gpt-4o-mini"
-    model = (model_override.strip()
-        or str(APP_CONFIG.get(f"{provider}_text_model", default_model)).strip()
-        or default_model)
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": instruction or TRANSCRIPT_REWRITE_INSTRUCTION.format(
-                lang=LANG_NAMES.get(lang, "English"))},
-            {"role": "user", "content": source_message or _source_text_message(transcript)},
-        ],
-        "temperature": temperature,
-    }
-    try:
-        response = requests.post(
-            url, headers={"Authorization": f"Bearer {api_key}"}, json=body, timeout=60)
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"].strip()
-    except Exception as error:
-        return _http_error(f"{label} prompt", error)
+    return _rewrite_with_provider(
+        provider, transcript, lang, model_override, instruction,
+        temperature, source_message)
 
 
 def _rewrite_openai(transcript: str, lang: str) -> str:
@@ -1927,38 +1825,43 @@ def _rewrite_openai(transcript: str, lang: str) -> str:
 def _rewrite_gemini_text(
         transcript: str, lang: str, model: str, instruction: str = "",
         temperature: float = 0.1, source_message: str = "") -> str:
-    api_key = str(APP_CONFIG.get("gemini_api_key", "")).strip()
-    base_url = str(APP_CONFIG.get("gemini_base_url", ""))
-    model = model.removeprefix("models/").strip()
-    if not api_key or not model:
-        return "[Error: Gemini refinement is not configured]"
-    headers = {"x-goog-api-key": api_key}
-    if "generativelanguage.googleapis.com" not in base_url.lower():
-        headers["Authorization"] = f"Bearer {api_key}"
-    body = {
-        "contents": [{"parts": [{"text": source_message or _source_text_message(transcript)}]}],
-        "systemInstruction": {"parts": [{"text": instruction or TRANSCRIPT_REWRITE_INSTRUCTION.format(
-            lang=LANG_NAMES.get(lang, "English"))}]},
-        "generationConfig": {"temperature": temperature},
-    }
+    return _rewrite_with_provider(
+        "gemini", transcript, lang, model, instruction,
+        temperature, source_message)
+
+
+def _rewrite_with_provider(
+        provider: str, transcript: str, lang: str, model_override: str = "",
+        instruction: str = "", temperature: float = 0.1,
+        source_message: str = "") -> str:
     try:
-        response = requests.post(
-            _provider_url(base_url, "v1beta", f"models/{model}:generateContent"),
-            headers=headers, json=body, timeout=60)
-        response.raise_for_status()
-        return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        model = PROVIDER_REGISTRY.text_model_from_legacy(
+            provider, APP_CONFIG, model_override)
+        request = RewriteRequest(
+            text=transcript,
+            model=model,
+            language=lang,
+            instruction=(instruction or TRANSCRIPT_REWRITE_INSTRUCTION.format(
+                lang=LANG_NAMES.get(lang, "English"))),
+            source_message=(source_message or _source_text_message(transcript)),
+            temperature=temperature,
+        )
+        return PROVIDER_REGISTRY.rewrite(
+            provider, request, _provider_connection(provider)).text
     except Exception as error:
-        return _http_error("Gemini refinement", error)
+        try:
+            label = f"{PROVIDER_REGISTRY.describe(provider).display_name} refinement"
+        except ProviderError:
+            label = "Provider refinement"
+        return _http_error(label, error)
 
 
 def _refine_transcript(transcript: str, lang: str) -> str:
     provider = str(APP_CONFIG.get("refinement_provider", "openai"))
     model = str(APP_CONFIG.get("refinement_model", "")).strip()
-    if provider == "gemini":
-        return _rewrite_gemini_text(transcript, lang, model)
-    if provider in ("openai", "groq"):
-        return _rewrite_openai_compatible(provider, transcript, lang, model)
-    return "[Error: No text refinement model configured]"
+    if not model:
+        return "[Error: No text refinement model configured]"
+    return _rewrite_with_provider(provider, transcript, lang, model)
 
 
 def rewrite_selected_text(text: str) -> str:
@@ -1968,16 +1871,11 @@ def rewrite_selected_text(text: str) -> str:
         return "[Error: No text selected]"
     provider = str(APP_CONFIG.get("refinement_provider", "")).strip().lower()
     model = str(APP_CONFIG.get("refinement_model", "")).strip()
-    if provider not in ("gemini", "openai", "groq") or not model:
+    if not PROVIDER_REGISTRY.supports(
+            provider, ProviderCapability.TEXT_GENERATION) or not model:
         return "[Error: No text refinement model configured]"
-    if not str(APP_CONFIG.get(f"{provider}_api_key", "")).strip():
-        return f"[Error: No {provider.title()} API key]"
-    if provider == "gemini":
-        result = _rewrite_gemini_text(
-            source, "en", model, SELECTION_REWRITE_INSTRUCTION)
-    else:
-        result = _rewrite_openai_compatible(
-            provider, source, "en", model, SELECTION_REWRITE_INSTRUCTION)
+    result = _rewrite_with_provider(
+        provider, source, "en", model, SELECTION_REWRITE_INSTRUCTION)
     if not result or not result.strip():
         return "[Error: Provider returned an empty rewrite]"
     return result.strip()
@@ -1992,77 +1890,51 @@ def translate_selected_text(text: str, target_language: str) -> str:
         return "[Error: Unsupported target language]"
     provider = str(APP_CONFIG.get("refinement_provider", "")).strip().lower()
     model = str(APP_CONFIG.get("refinement_model", "")).strip()
-    if provider not in ("gemini", "openai", "groq") or not model:
+    if not PROVIDER_REGISTRY.supports(
+            provider, ProviderCapability.TEXT_GENERATION) or not model:
         return "[Error: No text refinement model configured]"
-    if not str(APP_CONFIG.get(f"{provider}_api_key", "")).strip():
-        return f"[Error: No {provider.title()} API key]"
     instruction = TRANSLATION_INSTRUCTION.format(
         target_language=LANG_NAMES[target_language])
     source_message = _translation_source_message(source)
-    if provider == "gemini":
-        result = _rewrite_gemini_text(
-            source, target_language, model, instruction,
-            temperature=0.0, source_message=source_message)
-    else:
-        result = _rewrite_openai_compatible(
-            provider, source, target_language, model, instruction,
-            temperature=0.0, source_message=source_message)
+    try:
+        request = TranslationRequest(
+            text=source,
+            model=model,
+            target_language=target_language,
+            instruction=instruction,
+            source_message=source_message,
+            temperature=0.0,
+        )
+        result = PROVIDER_REGISTRY.translate(
+            provider, request, _provider_connection(provider)).text
+    except Exception as error:
+        try:
+            label = f"{PROVIDER_REGISTRY.describe(provider).display_name} translation"
+        except ProviderError:
+            label = "Provider translation"
+        result = _http_error(label, error)
     if not result or not result.strip():
         return "[Error: Provider returned an empty translation]"
     return result.strip()
 
 
 def call_openai(audio_path: Path, mode: str, lang: str = "en") -> str:
-    return _call_openai_compatible_audio("openai", audio_path, mode, lang)
+    return _call_provider_audio("openai", audio_path, mode, lang)
 
 
 def _call_openai_compatible_audio(
         provider: str, audio_path: Path, mode: str, lang: str = "en") -> str:
-    label = "Groq" if provider == "groq" else "OpenAI"
-    api_key = str(APP_CONFIG.get(f"{provider}_api_key", "")).strip()
-    if not api_key:
-        return f"[Error: No {label} API key]"
-    url = _provider_url(
-        str(APP_CONFIG.get(f"{provider}_base_url", "")), "v1", "audio/transcriptions")
-    if not url:
-        return f"[Error: No {label} base URL]"
-    default_model = "whisper-large-v3-turbo" if provider == "groq" else "whisper-1"
-    try:
-        with audio_path.open("rb") as audio_file:
-            response = requests.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}"},
-                files={"file": (audio_path.name, audio_file, _audio_mime_type(audio_path))},
-                data={
-                    "model": _canonical_audio_model(provider, APP_CONFIG.get(
-                        f"{provider}_audio_model", default_model)),
-                    "response_format": "json",
-                    "language": lang,
-                },
-                timeout=60,
-            )
-        response.raise_for_status()
-        payload = response.json()
-        transcript = str(payload.get("text", "")).strip()
-        if not transcript:
-            return f"[Error: {label} returned an empty transcription]"
-        return (_refine_transcript(transcript, lang)
-                if mode == "prompt" else transcript)
-    except Exception as error:
-        return _http_error(f"{label} Whisper", error)
+    return _call_provider_audio(provider, audio_path, mode, lang)
 
 
 def call_groq(audio_path: Path, mode: str, lang: str = "en") -> str:
-    return _call_openai_compatible_audio("groq", audio_path, mode, lang)
+    return _call_provider_audio("groq", audio_path, mode, lang)
 
 
 def call_transcription_provider(audio_path: Path, mode: str, lang: str = "en") -> str:
-    provider = APP_CONFIG.get("transcription_provider")
-    if provider == "openai":
-        return call_openai(audio_path, mode, lang)
-    if provider == "groq":
-        return call_groq(audio_path, mode, lang)
-    return call_gemini(audio_path, mode, lang)
+    return _call_provider_audio(
+        str(APP_CONFIG.get("transcription_provider", "gemini")),
+        audio_path, mode, lang)
 
 # ---------------------------------------------------------------------------
 # Recorder
@@ -4925,7 +4797,8 @@ class App(ctk.CTk):
             drafts[provider]["base"] = base_entry.get().strip().rstrip("/")
             drafts[provider]["custom_endpoint"] = bool(endpoint_switch.get())
             drafts[provider]["audio_model"] = model_menu.get().strip()
-            if provider in ("openai", "groq"):
+            if not PROVIDER_REGISTRY.supports(
+                    provider, ProviderCapability.MULTIMODAL_AUDIO):
                 drafts[provider]["text_model"] = text_model_entry.get().strip()
 
         def fill_entry(entry, value):
@@ -5010,7 +4883,8 @@ class App(ctk.CTk):
             model_menu.configure(values=[values["audio_model"]])
             model_menu.set(values["audio_model"])
             key_label.configure(text=f"{display_name} {self._t('api_key')}")
-            if provider in ("openai", "groq"):
+            if not PROVIDER_REGISTRY.supports(
+                    provider, ProviderCapability.MULTIMODAL_AUDIO):
                 fill_entry(text_model_entry, values["text_model"])
                 prompt_fields.pack(fill="x", padx=16, pady=(0, 8), before=hint)
                 hint.configure(text="")
@@ -5119,18 +4993,25 @@ class App(ctk.CTk):
         content = ctk.CTkFrame(body, fg_color="#0b0b0b", corner_radius=13)
         content.pack(side="left", fill="both", expand=True)
 
-        provider_names = {"gemini": "Gemini", "openai": "OpenAI", "groq": "Groq"}
-        provider_ids = ("gemini", "openai", "groq")
+        provider_ids = PROVIDER_REGISTRY.provider_ids
+        provider_metadata = {
+            metadata.provider_id: metadata
+            for metadata in PROVIDER_REGISTRY.metadata
+        }
+        provider_names = {
+            provider: provider_metadata[provider].display_name
+            for provider in provider_ids
+        }
         model_config_keys = {
-            "gemini": "gemini_model", "openai": "openai_audio_model",
-            "groq": "groq_audio_model",
+            provider: provider_metadata[provider].audio_model_key
+            for provider in provider_ids
         }
         default_models = {
-            "gemini": "gemini-2.5-flash", "openai": "whisper-1",
-            "groq": "whisper-large-v3-turbo",
+            provider: provider_metadata[provider].default_audio_model
+            for provider in provider_ids
         }
         default_bases = {
-            provider: str(DEFAULT_CONFIG[f"{provider}_base_url"])
+            provider: provider_metadata[provider].default_base_url
             for provider in provider_ids
         }
         provider_state = {
@@ -5354,15 +5235,8 @@ class App(ctk.CTk):
 
             def run():
                 try:
-                    catalog = _validate_provider_credentials(provider, api_key, base_url)
-                    models = _parse_audio_models(provider, catalog)
-                    if (provider == "openai" and "api.openai.com" in base_url.lower()
-                            and not models):
-                        models = list(OPENAI_OFFICIAL_AUDIO_MODELS)
-                    if (provider == "groq" and "api.groq.com" in base_url.lower()
-                            and not models):
-                        models = list(GROQ_OFFICIAL_AUDIO_MODELS)
-                    text_models = _parse_text_models(provider, catalog)
+                    models, text_models = _discover_provider_models(
+                        provider, api_key, base_url)
                     error = ""
                 except Exception as exc:
                     models = []
@@ -5611,18 +5485,25 @@ class App(ctk.CTk):
         content = ctk.CTkFrame(body, fg_color="#0b0b0b", corner_radius=13)
         content.pack(side="left", fill="both", expand=True)
 
-        provider_ids = ("gemini", "openai", "groq")
-        provider_names = {"gemini": "Gemini", "openai": "OpenAI", "groq": "Groq"}
+        provider_ids = PROVIDER_REGISTRY.provider_ids
+        provider_metadata = {
+            metadata.provider_id: metadata
+            for metadata in PROVIDER_REGISTRY.metadata
+        }
+        provider_names = {
+            provider: provider_metadata[provider].display_name
+            for provider in provider_ids
+        }
         model_keys = {
-            "gemini": "gemini_model", "openai": "openai_audio_model",
-            "groq": "groq_audio_model",
+            provider: provider_metadata[provider].audio_model_key
+            for provider in provider_ids
         }
         default_models = {
-            "gemini": "gemini-2.5-flash", "openai": "whisper-1",
-            "groq": "whisper-large-v3-turbo",
+            provider: provider_metadata[provider].default_audio_model
+            for provider in provider_ids
         }
         default_bases = {
-            provider: str(DEFAULT_CONFIG[f"{provider}_base_url"])
+            provider: provider_metadata[provider].default_base_url
             for provider in provider_ids
         }
         state = {
@@ -6066,7 +5947,9 @@ class App(ctk.CTk):
                 refinement_menu_visible["value"] = False
                 multimodal_hint.pack_forget()
                 return
-            if selected["provider"] == "gemini":
+            if PROVIDER_REGISTRY.supports(
+                    selected["provider"],
+                    ProviderCapability.MULTIMODAL_AUDIO):
                 multimodal_hint.pack(fill="x", pady=(18, 0))
             else:
                 multimodal_hint.pack_forget()
@@ -6215,15 +6098,8 @@ class App(ctk.CTk):
 
             def run():
                 try:
-                    catalog = _validate_provider_credentials(provider, api_key, base_url)
-                    models = _parse_audio_models(provider, catalog)
-                    if (provider == "openai" and "api.openai.com" in base_url.lower()
-                            and not models):
-                        models = list(OPENAI_OFFICIAL_AUDIO_MODELS)
-                    if (provider == "groq" and "api.groq.com" in base_url.lower()
-                            and not models):
-                        models = list(GROQ_OFFICIAL_AUDIO_MODELS)
-                    text_models = _parse_text_models(provider, catalog)
+                    models, text_models = _discover_provider_models(
+                        provider, api_key, base_url)
                     error = ""
                 except Exception as exc:
                     models = []
@@ -6289,12 +6165,17 @@ class App(ctk.CTk):
             key_entry.pack(fill="x", pady=(0, 10))
             key_entry.insert(0, str(APP_CONFIG.get(f"{provider}_api_key", "")))
             saved_base = str(APP_CONFIG.get(f"{provider}_base_url", default_bases[provider]))
-            custom = saved_base.rstrip("/").lower() != default_bases[provider].rstrip("/").lower()
+            allows_custom_endpoint = PROVIDER_REGISTRY.supports(
+                provider, ProviderCapability.CUSTOM_BASE_URL)
+            custom = (allows_custom_endpoint
+                and saved_base.rstrip("/").lower()
+                != default_bases[provider].rstrip("/").lower())
             endpoint_switch = ctk.CTkSwitch(inner, text=self._t("custom_endpoint"),
                 height=22, switch_width=36, switch_height=18, corner_radius=9,
                 border_width=1, fg_color="#171717", progress_color="#e7e7e7",
                 button_color="#777777", text_color=DIM, font=font_label)
-            endpoint_switch.pack(fill="x", padx=2)
+            if allows_custom_endpoint:
+                endpoint_switch.pack(fill="x", padx=2)
             endpoint_fields = ctk.CTkFrame(inner, fg_color="transparent")
             ctk.CTkLabel(endpoint_fields, text=self._t("base_url"), text_color=DIM,
                 font=font_label, anchor="w").pack(fill="x", padx=2, pady=(8, 4))

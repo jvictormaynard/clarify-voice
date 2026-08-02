@@ -1,0 +1,251 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import app
+from provider_adapters import GeminiAdapter, OpenAICompatibleAdapter
+from provider_registry import ProviderRegistry, build_provider_registry
+from provider_types import (
+    ModelCatalog,
+    ProviderCapability,
+    ProviderConfigurationError,
+    ProviderConnection,
+    ProviderMetadata,
+    RewriteRequest,
+    TranscriptionRequest,
+    TranslationRequest,
+    UnsupportedCapabilityError,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class FakeResponse:
+    def __init__(self, payload, status_code=200, text=""):
+        self.payload = payload
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        return self.payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class FakeHttp:
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def _request(self, method, url, kwargs):
+        self.calls.append((method, url, kwargs))
+        if not self.responses:
+            raise AssertionError(f"unexpected {method} request to {url}")
+        return self.responses.pop(0)
+
+    def get(self, url, **kwargs):
+        return self._request("GET", url, kwargs)
+
+    def post(self, url, **kwargs):
+        return self._request("POST", url, kwargs)
+
+
+def compatible_metadata(provider_id="compatible", capabilities=None):
+    return ProviderMetadata(
+        provider_id=provider_id,
+        display_name=provider_id.title(),
+        capabilities=frozenset(capabilities or {
+            ProviderCapability.AUDIO_TRANSCRIPTION,
+            ProviderCapability.TEXT_GENERATION,
+            ProviderCapability.MODEL_DISCOVERY,
+            ProviderCapability.CUSTOM_BASE_URL,
+        }),
+        default_base_url="https://compatible.example/v1",
+        audio_model_key=f"{provider_id}_audio_model",
+        text_model_key=f"{provider_id}_text_model",
+        default_audio_model="whisper-compatible",
+        default_text_model="chat-compatible",
+    )
+
+
+class ProviderRegistryContractTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.audio_path = Path(self.directory.name) / "sample.wav"
+        self.audio_path.write_bytes(b"RIFFfake-wave")
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_default_registry_is_authoritative_for_ids_metadata_and_capabilities(self):
+        registry = build_provider_registry(FakeHttp())
+
+        self.assertEqual(registry.provider_ids, ("gemini", "openai", "groq"))
+        self.assertEqual(registry.describe("openai").display_name, "OpenAI")
+        self.assertEqual(
+            registry.describe("groq").audio_model_key, "groq_audio_model")
+        self.assertTrue(registry.supports(
+            "gemini", ProviderCapability.MULTIMODAL_AUDIO))
+        self.assertFalse(registry.supports(
+            "groq", ProviderCapability.MULTIMODAL_AUDIO))
+
+    def test_gemini_contract_discovers_canonical_ids_and_uses_custom_proxy_auth(self):
+        http = FakeHttp(
+            FakeResponse({"models": [
+                {"name": "models/gemini-3-flash",
+                 "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/embed-1",
+                 "supportedGenerationMethods": ["embedContent"]},
+            ]}),
+            FakeResponse({
+                "candidates": [{"content": {"parts": [{"text": "hello"}]}}],
+            }),
+        )
+        registry = build_provider_registry(http)
+        connection = ProviderConnection("proxy-key", "https://proxy.example")
+
+        catalog = registry.discover_models("gemini", connection)
+        result = registry.transcribe("gemini", TranscriptionRequest(
+            audio_path=self.audio_path,
+            model="models/gemini-3-flash",
+            language="en",
+            instruction="Transcribe faithfully.",
+            prompt="Transcribe this audio.",
+            temperature=0.0,
+        ), connection)
+
+        self.assertEqual(catalog, ModelCatalog(
+            ("gemini-3-flash",), ("gemini-3-flash",)))
+        self.assertEqual(result.text, "hello")
+        self.assertEqual(result.model, "gemini-3-flash")
+        self.assertEqual(
+            http.calls[0][1], "https://proxy.example/v1beta/models")
+        self.assertEqual(http.calls[0][2]["headers"], {
+            "x-goog-api-key": "proxy-key",
+            "Authorization": "Bearer proxy-key",
+        })
+        self.assertEqual(
+            http.calls[1][1],
+            "https://proxy.example/v1beta/models/gemini-3-flash:generateContent",
+        )
+
+    def test_openai_compatible_contract_filters_catalog_and_uses_api_ids(self):
+        http = FakeHttp(
+            FakeResponse({"data": [
+                {"id": "whisper-compatible", "name": "Pretty Whisper"},
+                {"id": "chat-compatible", "name": "Pretty Chat"},
+                {"id": "text-embedding-compatible"},
+            ]}),
+            FakeResponse({"text": "raw transcript"}),
+            FakeResponse({"choices": [{"message": {"content": "rewritten"}}]}),
+        )
+        registry = ProviderRegistry()
+        registry.register_openai_compatible(
+            compatible_metadata(), http,
+            audio_model_aliases={"Pretty Whisper": "whisper-compatible"},
+        )
+        connection = ProviderConnection("key", "https://proxy.example/v1")
+
+        catalog = registry.discover_models("compatible", connection)
+        transcript = registry.transcribe("compatible", TranscriptionRequest(
+            self.audio_path, "Pretty Whisper", "pt", "unused", "unused", 0.0,
+        ), connection)
+        rewrite = registry.rewrite("compatible", RewriteRequest(
+            "raw transcript", "chat-compatible", "pt", "Rewrite.",
+            "SOURCE", 0.1,
+        ), connection)
+
+        self.assertEqual(catalog.audio_models, ("whisper-compatible",))
+        self.assertEqual(catalog.text_models, ("chat-compatible",))
+        self.assertEqual(transcript.model, "whisper-compatible")
+        self.assertEqual(rewrite.text, "rewritten")
+        self.assertEqual(
+            http.calls[1][1], "https://proxy.example/v1/audio/transcriptions")
+        self.assertEqual(
+            http.calls[1][2]["data"]["model"], "whisper-compatible")
+        self.assertEqual(
+            http.calls[2][1], "https://proxy.example/v1/chat/completions")
+
+    def test_compatible_provider_routes_without_changes_to_workflow_code(self):
+        http = FakeHttp(
+            FakeResponse({"text": "transcribed"}),
+            FakeResponse({"choices": [{"message": {"content": "translated"}}]}),
+        )
+        registry = ProviderRegistry()
+        registry.register_openai_compatible(compatible_metadata("acme"), http)
+        connection = ProviderConnection("key", "https://acme.example")
+
+        transcription = registry.transcribe("acme", TranscriptionRequest(
+            self.audio_path, "whisper-acme", "en", "unused", "unused", 0.0,
+        ), connection)
+        translation = registry.translate("acme", TranslationRequest(
+            "Hello", "chat-acme", "de", "Translate to German.", "SOURCE", 0.0,
+        ), connection)
+
+        self.assertEqual(transcription.text, "transcribed")
+        self.assertEqual(translation.text, "translated")
+        self.assertEqual(translation.target_language, "de")
+
+    def test_desktop_workflow_routes_a_registered_compatible_provider(self):
+        http = FakeHttp(FakeResponse({"text": "desktop transcript"}))
+        registry = ProviderRegistry()
+        registry.register_openai_compatible(compatible_metadata("acme"), http)
+        config = {
+            "transcription_provider": "acme",
+            "acme_api_key": "key",
+            "acme_base_url": "https://acme.example",
+            "acme_audio_model": "whisper-acme",
+        }
+
+        with patch.object(app, "PROVIDER_REGISTRY", registry), patch.dict(
+                app.APP_CONFIG, config, clear=False):
+            result = app.call_transcription_provider(
+                self.audio_path, "transcription", "en")
+
+        self.assertEqual(result, "desktop transcript")
+        self.assertEqual(
+            http.calls[0][1], "https://acme.example/v1/audio/transcriptions")
+
+    def test_unsupported_capability_is_typed_and_actionable(self):
+        registry = ProviderRegistry()
+        metadata = compatible_metadata(
+            "textonly", {ProviderCapability.TEXT_GENERATION})
+        registry.register(OpenAICompatibleAdapter(metadata, FakeHttp()))
+
+        with self.assertRaises(UnsupportedCapabilityError) as raised:
+            registry.transcribe("textonly", TranscriptionRequest(
+                self.audio_path, "model", "en", "unused", "unused", 0.0,
+            ), ProviderConnection("key", "https://text.example"))
+
+        self.assertEqual(
+            raised.exception.capability,
+            ProviderCapability.AUDIO_TRANSCRIPTION,
+        )
+        self.assertIn("does not support audio transcription", str(raised.exception))
+        self.assertIn("Choose a provider", str(raised.exception))
+
+    def test_missing_credentials_raise_typed_configuration_error(self):
+        registry = build_provider_registry(FakeHttp())
+
+        with self.assertRaises(ProviderConfigurationError) as raised:
+            registry.validate("gemini", ProviderConnection(
+                "", "https://generativelanguage.googleapis.com/v1beta"))
+
+        self.assertEqual(raised.exception.provider_id, "gemini")
+        self.assertIn("API key", str(raised.exception))
+
+    def test_provider_layer_never_imports_tk_or_ui_modules(self):
+        for filename in (
+                "provider_types.py", "provider_adapters.py", "provider_registry.py"):
+            source = (ROOT / filename).read_text(encoding="utf-8").lower()
+            self.assertNotIn("tkinter", source, filename)
+            self.assertNotIn("customtkinter", source, filename)
+            self.assertNotIn("from app", source, filename)
+
+
+if __name__ == "__main__":
+    unittest.main()

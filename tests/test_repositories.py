@@ -30,6 +30,7 @@ class ConfigurationRepositoryTests(unittest.TestCase):
         self.assertEqual(config.selection.transcription_provider, "openai")
         self.assertEqual(config.openai.api_key, "secret")
         self.assertEqual(config.openai.audio_model, "whisper-1")
+        self.assertEqual(config.gemini.text_model, "")
         self.assertFalse(hasattr(config, "unknown_future_setting"))
 
     def test_invalid_values_fall_back_without_crashing(self):
