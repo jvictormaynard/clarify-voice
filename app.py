@@ -2430,6 +2430,7 @@ class RecordingSession:
             return False
 
     def _finish_shutdown(self):
+        rearm_watcher = None
         try:
             deadline = time.monotonic() + SESSION_WORKER_JOIN_SECONDS
             for worker in self._active_workers():
@@ -2438,7 +2439,8 @@ class RecordingSession:
                     if remaining <= 0:
                         break
                     worker.join(remaining)
-            if self._active_workers():
+            remaining_workers = self._active_workers()
+            if remaining_workers:
                 self.shutdown_error = RecordingError(
                     "Provider worker did not finish before shutdown deadline")
                 if self.error is None:
@@ -2454,9 +2456,29 @@ class RecordingSession:
             # The watcher owns the finite retry policy. Release observers wait
             # on this event instead of applying the shorter UI timeout. On
             # persistent failure it is terminal without claiming success.
-            self.cleanup_terminal.set()
             with self._workers_lock:
                 self._shutdown_watcher_started = False
+                if (self.shutdown_timed_out and not self._cleanup_done.is_set()
+                        and not self._active_workers()):
+                    # A provider may detach in the handoff window after the
+                    # deadline read but before this finally block. Claim the
+                    # watcher slot atomically and rearm exactly once; a normal
+                    # cleanup failure does not set shutdown_timed_out and
+                    # therefore cannot create an infinite watcher loop.
+                    self.shutdown_timed_out = False
+                    self.cleanup_retry_exhausted = False
+                    self.cleanup_terminal.clear()
+                    self._shutdown_watcher_started = True
+                    rearm_watcher = threading.Thread(
+                        target=self._finish_shutdown,
+                        name="ClarifyVoiceShutdown",
+                        daemon=False,
+                    )
+                    self._shutdown_watcher = rearm_watcher
+            if rearm_watcher is not None:
+                rearm_watcher.start()
+            else:
+                self.cleanup_terminal.set()
 
     def _ensure_shutdown_watcher(self):
         with self._workers_lock:

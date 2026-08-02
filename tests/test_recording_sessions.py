@@ -302,6 +302,59 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertTrue(session.wait_for_shutdown(1))
             self.assertFalse(path.exists())
 
+    def test_late_worker_detach_rearms_shutdown_handoff_once(self):
+        release_provider = threading.Event()
+        active_checked = threading.Event()
+        allow_handoff = threading.Event()
+        provider_started = threading.Event()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recording.wav"
+            path.write_bytes(b"audio")
+            session = app.RecordingSession(recorder=Mock(), audio_path=path)
+            session.state = "completed"
+
+            def provider_worker():
+                provider_started.set()
+                release_provider.wait(1)
+                session.detach_worker(threading.current_thread())
+
+            worker = threading.Thread(target=provider_worker, daemon=True)
+            session.attach_worker(worker)
+            worker.start()
+            self.assertTrue(provider_started.wait(1))
+
+            original_active_workers = session._active_workers
+            active_calls = [0]
+
+            def active_workers_with_barrier():
+                active_calls[0] += 1
+                result = original_active_workers()
+                if active_calls[0] == 3:
+                    active_checked.set()
+                    self.assertTrue(allow_handoff.wait(1))
+                return result
+
+            def delete(path_to_remove, *, strict=False):
+                path_to_remove.unlink(missing_ok=True)
+
+            with patch.object(app, "SESSION_WORKER_JOIN_SECONDS", 0.01), \
+                    patch.object(session, "_active_workers",
+                                 side_effect=active_workers_with_barrier), \
+                    patch.object(app.Recorder, "_safe_delete", side_effect=delete) as cleanup:
+                session.finalize("completed")
+                self.assertTrue(active_checked.wait(1))
+                release_provider.set()
+                worker.join(1)
+                self.assertFalse(worker.is_alive())
+                allow_handoff.set()
+                self.assertTrue(session.wait_for_shutdown(1))
+
+            self.assertTrue(session._cleanup_done.is_set())
+            self.assertFalse(session.cleanup_retry_exhausted)
+            self.assertEqual(cleanup.call_count, 1)
+            self.assertFalse(path.exists())
+            self.assertFalse(session._shutdown_watcher.is_alive())
+
     def test_cleanup_exhaustion_rechecks_concurrent_late_success(self):
         failure_returned = threading.Event()
         allow_exhaustion = threading.Event()
