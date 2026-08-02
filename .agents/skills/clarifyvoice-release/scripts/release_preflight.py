@@ -25,6 +25,7 @@ REQUIRED_FILES = (
     "requirements-lock-windows.txt",
     "requirements-lock-runtime-windows.txt",
     "scripts/check_runtime_lock.py",
+    "scripts/add_sbom_component.py",
     "scripts/build.ps1",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",

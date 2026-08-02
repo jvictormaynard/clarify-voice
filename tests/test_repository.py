@@ -109,6 +109,7 @@ class RepositorySafetyTests(unittest.TestCase):
         checker = ROOT / "scripts" / "check_dependency_lock.py"
         self.assertTrue(checker.is_file())
         self.assertTrue((ROOT / "scripts" / "check_runtime_lock.py").is_file())
+        self.assertTrue((ROOT / "scripts" / "add_sbom_component.py").is_file())
         checker_content = checker.read_text(encoding="utf-8")
         self.assertNotIn("--check", checker_content)
         self.assertIn("shutil.copyfile(lockfile, generated)", checker_content)
@@ -207,6 +208,11 @@ class RepositorySafetyTests(unittest.TestCase):
         )
         self.assertNotIn(
             "cyclonedx-py requirements requirements-lock-windows.txt", workflow
+        )
+        self.assertIn("scripts/add_sbom_component.py", workflow)
+        self.assertIn(
+            "b45f598643ffbd8e363ff24d61166ccec4836fea6d3888881b8df53e3bb55f6c",
+            workflow,
         )
 
     def test_release_has_sbom_and_provenance_contract(self):

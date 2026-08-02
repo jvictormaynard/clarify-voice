@@ -131,7 +131,9 @@ in that file and should be removed as soon as the dependency can be upgraded.
 
 Tagged releases also publish `ClarifyVoice.sbom.json` (CycloneDX) from the
 runtime-only `requirements-lock-runtime-windows.txt` lock, include it in the
-portable ZIP, and create GitHub artifact attestations for the release files.
+portable ZIP. The SBOM is augmented with the bundled SoX 14.4.2 component and
+the verified source-archive SHA-256 before creating GitHub artifact attestations
+for the release files.
 The attestation is verifiable with GitHub's artifact-attestation tooling and is
 separate from the existing SHA-256 checksum.
 
