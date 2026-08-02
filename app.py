@@ -2310,8 +2310,13 @@ class RecordingSession:
         self._cleanup_done = threading.Event()
         self.cleanup_retry_exhausted = False
         self.shutdown_complete = threading.Event()
+        # Signals the end of the bounded cleanup policy: either cleanup has
+        # succeeded and shutdown is complete, or all automatic retries have
+        # been exhausted and ownership must remain attached to this session.
+        self.cleanup_terminal = threading.Event()
         self._shutdown_watcher_started = False
         self._shutdown_watcher = None
+        self._owner_release_observer_started = False
 
     @property
     def terminal(self):
@@ -2386,6 +2391,7 @@ class RecordingSession:
         if (self.terminal and not self._active_workers()
                 and self._cleanup_done.is_set()):
             self.shutdown_complete.set()
+            self.cleanup_terminal.set()
 
     def _retry_cleanup(self):
         for attempt in range(SESSION_CLEANUP_RETRY_ATTEMPTS):
@@ -2404,6 +2410,10 @@ class RecordingSession:
             self._retry_cleanup()
             self._complete_shutdown_if_ready()
         finally:
+            # The watcher owns the finite retry policy. Release observers wait
+            # on this event instead of applying the shorter UI timeout. On
+            # persistent failure it is terminal without claiming success.
+            self.cleanup_terminal.set()
             with self._workers_lock:
                 self._shutdown_watcher_started = False
 
@@ -2421,6 +2431,10 @@ class RecordingSession:
 
     def wait_for_shutdown(self, timeout=None):
         return self.shutdown_complete.wait(timeout)
+
+    def wait_for_cleanup_terminal(self, timeout=None):
+        """Wait until bounded cleanup succeeds or retries are exhausted."""
+        return self.cleanup_terminal.wait(timeout)
 
     def begin_processing(self):
         with self._lock:
@@ -4404,11 +4418,11 @@ class App(ctk.CTk):
             if session is not None:
                 def cancel_session():
                     session.cancel()
-                    shutdown_complete = session.wait_for_shutdown(
-                        SESSION_SHUTDOWN_JOIN_SECONDS)
-                    if (shutdown_complete
-                            and getattr(self, "_recording_session", None) is session):
-                        self._recording_session = None
+                    observer = getattr(
+                        self, "_observe_recording_session_release", None)
+                    if observer is None:
+                        observer = App._observe_recording_session_release.__get__(self)
+                    observer(session)
                 threading.Thread(target=cancel_session, daemon=True).start()
             else:
                 threading.Thread(target=self.recorder.cancel, daemon=True).start()
@@ -4961,7 +4975,6 @@ class App(ctk.CTk):
         # Capture the target before showing ClarifyVoice can affect foreground focus.
         self._update_focused_icon(target_executable)
         self._recording_target_window = target_window
-        self._recording_target_window = target_window
         self._was_hidden_before_recording = not self.winfo_viewable()
         if self._was_hidden_before_recording and not IS_WIN:
             self._show_without_activation()
@@ -5015,7 +5028,10 @@ class App(ctk.CTk):
         if ((session is None or self._session_is_current(session))
                 and self.app_state == "recording"):
             if session is not None:
-                self._recording_session = None
+                if session.shutdown_complete.is_set():
+                    self._recording_session = None
+                else:
+                    self._observe_recording_session_release(session)
             self._set_state("microphone_unavailable")
 
     def _finish_recording_session(
@@ -5030,14 +5046,54 @@ class App(ctk.CTk):
         else:
             self._set_state("ready", self._t(status_key or "error"))
         if cleanup_pending:
-            def release_after_cleanup():
-                if (session.wait_for_shutdown(SESSION_SHUTDOWN_JOIN_SECONDS)
-                        and self._session_is_current(session)):
+            observer = getattr(self, "_observe_recording_session_release", None)
+            if observer is None:
+                observer = App._observe_recording_session_release.__get__(self)
+            observer(session)
+
+    def _observe_recording_session_release(self, session):
+        """Release UI ownership only after the session's finite policy ends.
+
+        The shutdown watcher performs a bounded join/retry sequence. This
+        observer waits on its terminal event rather than the shorter UI
+        timeout, then schedules the ownership change on Tk's event loop. A
+        persistent cleanup failure sets the terminal event without
+        ``shutdown_complete``, so the observer exits while ownership/path
+        remain intentionally attached to the failed session.
+        """
+        is_current = getattr(
+            self, "_session_is_current",
+            lambda candidate: (getattr(self, "_recording_session", None) is candidate
+                               and not getattr(self, "_closing", False)),
+        )
+        if not is_current(session):
+            return
+        with session._lock:
+            if session._owner_release_observer_started:
+                return
+            session._owner_release_observer_started = True
+
+        def release_after_cleanup():
+            session.wait_for_cleanup_terminal()
+            if not session.shutdown_complete.is_set():
+                return
+
+            def release_on_tk_loop():
+                if (session.shutdown_complete.is_set()
+                        and is_current(session)):
                     self._recording_session = None
-            threading.Thread(
-                target=release_after_cleanup,
-                name="ClarifyVoiceCleanupRelease",
-                daemon=True).start()
+
+            try:
+                self.after(0, release_on_tk_loop)
+            except Exception:
+                # Tk may already be tearing down. The ownership check still
+                # prevents a stale session from clearing a newer one.
+                release_on_tk_loop()
+
+        threading.Thread(
+            target=release_after_cleanup,
+            name="ClarifyVoiceCleanupRelease",
+            daemon=True).start()
 
     def _stop_recording(self):
         session = getattr(self, "_recording_session", None)

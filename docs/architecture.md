@@ -163,7 +163,10 @@ shutdown watcher keeps the process alive until the provider worker releases
 the file, then performs bounded cleanup retries; provider requests are bounded
 to 60 seconds. Shutdown is not marked complete until deletion succeeds. A
 persistent cleanup failure remains observable and retains session ownership so
-the path cannot be overwritten by a later recording. Escape cancellation
+the path cannot be overwritten by a later recording. UI ownership observers
+wait for the watcher's explicit terminal signal rather than the shorter
+two-second UI timeout; a late successful retry is released on Tk's event loop,
+while exhausted cleanup remains owned and visible. Escape cancellation
 likewise retains ownership until recorder shutdown completes, preventing
 immediate restart from reusing the recorder concurrently.
 

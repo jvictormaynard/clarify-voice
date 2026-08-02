@@ -17,6 +17,9 @@ Notable user-facing changes are documented here. This project follows
   app data directory
 - Kept failed-cleanup sessions owned until a bounded retry succeeds, preventing
   a later recording from overwriting an unremoved temporary WAV
+- Kept UI ownership observers alive through the bounded cleanup policy so a
+  late successful retry releases the session, while exhausted cleanup remains
+  deterministically owned and observable
 
 ## [0.1.2] - 2026-07-31
 
