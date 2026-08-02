@@ -17,17 +17,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from provider_registry import PROVIDER_IDS, PROVIDER_REGISTRY
+from provider_types import ProviderCapability
+
 
 CONFIG_SCHEMA_VERSION = 1
 STATS_SCHEMA_VERSION = 1
-SUPPORTED_PROVIDERS = ("openai", "gemini", "groq")
+SUPPORTED_PROVIDERS = PROVIDER_IDS
 SUPPORTED_UI_MODES = ("prompt", "transcription")
 SUPPORTED_LANGUAGES = ("en", "pt", "es", "de", "ru")
-AUDIO_MODEL_ALIASES = {
-    ("groq", "whisper large v3 turbo"): "whisper-large-v3-turbo",
-    ("groq", "whisper large v3"): "whisper-large-v3",
-    ("openai", "whisper 1"): "whisper-1",
-}
 
 
 def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -136,48 +134,49 @@ class AppConfig:
         refinement_provider = choice(
             "refinement_provider", SUPPORTED_PROVIDERS, "openai")
         if not string("refinement_provider"):
-            refinement_provider = provider if provider in ("openai", "groq") else "openai"
+            refinement_provider = (
+                provider if (
+                    PROVIDER_REGISTRY.supports(
+                        provider, ProviderCapability.TEXT_GENERATION)
+                    and not PROVIDER_REGISTRY.supports(
+                        provider, ProviderCapability.MULTIMODAL_AUDIO)
+                )
+                else "openai")
 
         provider_defaults = {
-            "gemini": {
-                "base_url": "https://generativelanguage.googleapis.com/v1beta",
-                "audio_model": "gemini-2.5-flash",
-            },
-            "openai": {
-                "base_url": "https://api.openai.com/v1",
-                "audio_model": "whisper-1",
-                "text_model": "gpt-4o-mini",
-            },
-            "groq": {
-                "base_url": "https://api.groq.com/openai/v1",
-                "audio_model": "whisper-large-v3-turbo",
-                "text_model": "llama-3.3-70b-versatile",
-            },
+            metadata.provider_id: {
+                "base_url": metadata.default_base_url,
+                "audio_model": metadata.default_audio_model,
+                "text_model": metadata.default_text_model,
+            }
+            for metadata in PROVIDER_REGISTRY.metadata
         }
 
         def provider_config(name: str) -> ProviderConfig:
+            metadata = PROVIDER_REGISTRY.describe(name)
             defaults_for_provider = provider_defaults[name]
             audio_model = string(
-                f"{name}_{'model' if name == 'gemini' else 'audio_model'}",
+                metadata.audio_model_key,
                 defaults_for_provider["audio_model"])
-            audio_model = AUDIO_MODEL_ALIASES.get(
-                (name, audio_model.casefold()), audio_model)
+            audio_model = PROVIDER_REGISTRY.canonical_audio_model(
+                name, audio_model)
             return ProviderConfig(
                 api_key=string(f"{name}_api_key"),
                 base_url=string(
                     f"{name}_base_url", defaults_for_provider["base_url"]),
                 audio_model=audio_model,
-                text_model=string(
-                    f"{name}_text_model", defaults_for_provider.get("text_model", "")),
+                # Gemini historically stores its shared multimodal model only
+                # in ``gemini_model``; do not synthesize a new text-model field
+                # in the typed legacy adapter.
+                text_model=("" if name == "gemini" else string(
+                    metadata.text_model_key, defaults_for_provider["text_model"])),
             )
 
         refinement_model = string("refinement_model")
         if not refinement_model:
+            metadata = PROVIDER_REGISTRY.describe(refinement_provider)
             refinement_model = (
-                string(f"{refinement_provider}_text_model")
-                or ("llama-3.3-70b-versatile" if refinement_provider == "groq"
-                    else "gpt-4o-mini")
-            )
+                string(metadata.text_model_key) or metadata.default_text_model)
 
         mode = choice("ui_mode", SUPPORTED_UI_MODES, "prompt")
         language = choice("ui_language", SUPPORTED_LANGUAGES, "en")

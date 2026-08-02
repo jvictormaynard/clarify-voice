@@ -12,7 +12,11 @@ Global hotkey
 Desktop workflow ----> temporary audio or selected text
     |                              |
     v                              v
-Provider client ------------> Gemini / OpenAI / Groq / custom endpoint
+Provider registry ----------> Gemini / OpenAI-compatible adapter
+    |                              |
+    |                              +----> OpenAI / Groq / custom endpoint
+    v
+Typed capability result
     |
     v
 Focus and selection safety check
@@ -31,11 +35,9 @@ run outside that loop so the floating window remains responsive.
 
 The application entry point currently owns:
 
-- provider workflows and UI integration. Configuration and local statistics are
+- desktop workflows and UI integration. Configuration and local statistics are
   accessed through the repository boundary in `repositories.py` (the legacy
-  `APP_CONFIG` mapping remains as a compatibility adapter while extraction is
-  staged);
-- provider discovery, validation, transcription, rewriting, and translation;
+  `APP_CONFIG` mapping remains as a compatibility adapter);
 - audio capture and conversion;
 - clipboard and focus safety, including serialized rich-format snapshots;
 - the CustomTkinter interface, tray, pill, and result surfaces;
@@ -45,6 +47,42 @@ This is intentionally documented as a known concentration of responsibilities.
 New contributions should extract cohesive, testable units when doing so makes a
 change safer, but broad rewrites of stable UI code should be proposed in an
 issue before implementation.
+
+### Provider layer
+
+Provider code is split into three UI-independent modules:
+
+- `provider_types.py` defines capabilities, metadata, connections, typed
+  transcription/rewrite/translation requests and results, model catalogs, and
+  actionable provider errors;
+- `provider_adapters.py` implements Gemini and the shared OpenAI-compatible
+  protocol used by OpenAI and Groq. Endpoint normalization and model filtering
+  live here so display labels never become API IDs;
+- `provider_registry.py` is authoritative for provider IDs, display metadata,
+  capabilities, default endpoints/models, adapters, and request routing.
+
+The desktop asks the registry whether a provider supports multimodal audio,
+text generation, model discovery, or custom base URLs. It does not select a
+workflow by comparing provider names. Compatibility functions in `app.py`
+retain the existing public call surface while delegating to typed requests.
+
+The HTTP dependency is intentionally the narrow `HttpClient` protocol with
+`get` and `post`. Adapters preserve the existing request timeouts and response
+shapes; retry, session, logging, and shared error policy belong to issue #17.
+
+#### Adding an OpenAI-compatible provider
+
+1. Add `ProviderMetadata` with a canonical lowercase API ID, a separate display
+   name, config keys/defaults, and the capabilities the endpoint really offers.
+2. Call `ProviderRegistry.register_openai_compatible`, supplying official model
+   IDs or legacy label aliases only when the provider needs them.
+3. Extend persisted configuration fields and provider artwork for the new ID.
+4. Add fake-HTTP contract tests for discovery, authentication, transcription,
+   text generation, custom URL normalization, and unsupported capabilities.
+
+Dictation, rewrite, translation, and model-picker workflows require no new
+provider-specific branch. A protocol that is not OpenAI-compatible should use a
+new adapter implementing the same typed operations, then be registered once.
 
 ### `desktop_state.py`
 
@@ -87,7 +125,9 @@ compatibility; saves are refused until a version that understands that schema
 is running, so a downgrade cannot delete newer fields. The same on-disk check
 guards statistics appends, including when a fresh repository instance writes
 without a preceding load. The legacy mapping adapter retains recognized
-startup settings such as `autostart` during round-trips.
+startup settings such as `autostart` during round-trips. Supported provider
+choices and model canonicalization come from the provider registry while the
+on-disk keys remain unchanged.
 
 ## Data ownership
 
