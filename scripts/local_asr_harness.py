@@ -55,8 +55,16 @@ def _progress(stage: str, current: int, total: int) -> None:
 
 
 def _audio_duration(path: Path) -> float:
-    with wave.open(str(path), "rb") as audio:
-        return audio.getnframes() / max(1, audio.getframerate())
+    try:
+        with wave.open(str(path), "rb") as audio:
+            frame_rate = audio.getframerate()
+            frame_count = audio.getnframes()
+    except Exception as error:
+        raise LocalASRError(
+            f"Unsupported or invalid WAV audio: {path.name}") from error
+    if frame_rate <= 0:
+        raise LocalASRError(f"Unsupported WAV audio rate: {path.name}")
+    return frame_count / frame_rate
 
 
 def _words(text: str) -> list[str]:
@@ -129,6 +137,7 @@ def _benchmark(args) -> dict:
     audio_path = Path(args.file).expanduser().resolve()
     if not audio_path.is_file():
         raise LocalASRError(f"Audio file does not exist: {audio_path}")
+    duration = _audio_duration(audio_path)
     manager = LocalASRSidecarManager(installer, idle_seconds=0)
     stop_sampling = threading.Event()
     memory_samples: list[int] = []
@@ -152,7 +161,6 @@ def _benchmark(args) -> dict:
         stop_sampling.set()
         sampler.join(timeout=1)
         manager.shutdown()
-    duration = _audio_duration(audio_path)
     expected = args.expected_text or ""
     return {
         "platform": platform.platform(),

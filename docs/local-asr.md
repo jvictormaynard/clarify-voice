@@ -133,6 +133,11 @@ py scripts\local_asr_harness.py --root "$env:TEMP\clarify-local-asr" benchmark `
   --expected-text "Reference transcript"
 ```
 
+The benchmark validates the WAV header and duration before starting the sidecar;
+invalid or unsupported formats return a structured harness error without paying
+the startup/inference cost. Product integration still needs its own audio
+format policy.
+
 No Windows benchmark or product acceptance result is claimed by this groundwork
 PR. The following remains pending before #23 can be closed. The #32 staged
 installer/update contract does not substitute for these local-ASR checks, and

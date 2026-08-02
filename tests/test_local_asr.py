@@ -2,11 +2,14 @@ import ctypes
 import hashlib
 import io
 import json
+import struct
 import tempfile
 import threading
 import time
 import unittest
 import zipfile
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -1271,6 +1274,73 @@ class LocalASRRecordedProcessTests(unittest.TestCase):
                 local_asr.cleanup_recorded_sidecar(record_path, executable)
 
             self.assertFalse(record_path.exists())
+
+
+class LocalASRHarnessTests(unittest.TestCase):
+    def _invalid_audio(self, directory):
+        audio = Path(directory) / "invalid-float.wav"
+        audio.write_bytes(b"RIFF-not-a-wave")
+        return audio
+
+    def _unsupported_float_audio(self, directory):
+        audio = Path(directory) / "ieee-float.wav"
+        audio.write_bytes(
+            b"RIFF" + struct.pack("<I4s", 48, b"WAVE")
+            + b"fmt " + struct.pack(
+                "<IHHIIHH", 16, 3, 1, 16000, 64000, 4, 32,
+            )
+            + b"data" + struct.pack("<I", 4) + b"\0\0\0\0"
+        )
+        return audio
+
+    def _benchmark_args(self, audio):
+        return SimpleNamespace(
+            root=None, file=str(audio), language="en", expected_text="",
+        )
+
+    def test_benchmark_rejects_invalid_wav_before_sidecar_start(self):
+        for make_audio in (self._invalid_audio, self._unsupported_float_audio):
+            with self.subTest(audio_factory=make_audio.__name__), \
+                    tempfile.TemporaryDirectory() as directory:
+                audio = make_audio(directory)
+                installer = Mock()
+                installer.verify.return_value = None
+                args = self._benchmark_args(audio)
+
+                with patch.object(local_asr_harness, "_require_windows"), \
+                        patch.object(
+                            local_asr_harness, "_installer", return_value=installer,
+                        ), patch.object(
+                            local_asr_harness, "LocalASRSidecarManager",
+                        ) as manager:
+                    with self.assertRaises(local_asr.LocalASRError):
+                        local_asr_harness._benchmark(args)
+
+                installer.verify.assert_called_once_with()
+                manager.assert_not_called()
+
+    def test_benchmark_invalid_wav_returns_structured_json_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._unsupported_float_audio(directory)
+            installer = Mock()
+            installer.verify.return_value = None
+            output = StringIO()
+
+            with patch.object(local_asr_harness, "_require_windows"), \
+                    patch.object(
+                        local_asr_harness, "_installer", return_value=installer,
+                    ), patch.object(local_asr_harness, "LocalASRSidecarManager") as manager, \
+                    redirect_stdout(output):
+                result = local_asr_harness.main([
+                    "benchmark", "--file", str(audio),
+                ])
+
+            self.assertEqual(result, 1)
+            payload = json.loads(output.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertIn("invalid WAV", payload["error"])
+            self.assertNotIn("Traceback", output.getvalue())
+            manager.assert_not_called()
 
 
 class LocalASRProviderAdapterTests(unittest.TestCase):
