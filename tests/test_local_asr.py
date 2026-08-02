@@ -236,6 +236,60 @@ class LocalASRInstallerTests(unittest.TestCase):
 
             self.assertEqual(installer.status()["state"], "invalid")
 
+    def test_unreadable_installed_hash_is_an_invalid_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer.install()
+            original_sha256 = local_asr._sha256
+
+            def unreadable_hash(path, *args, **kwargs):
+                if Path(path) == installer.model_path:
+                    raise PermissionError("private ACL detail")
+                return original_sha256(path, *args, **kwargs)
+
+            with patch.object(local_asr, "_sha256", side_effect=unreadable_hash):
+                with self.assertRaises(local_asr.LocalASRIntegrityError):
+                    installer.verify()
+                status = installer.status()
+
+            self.assertEqual(status["state"], "invalid")
+            self.assertIn("model.bin", status["detail"])
+            self.assertIn("reinstall", status["detail"].casefold())
+            self.assertNotIn("private ACL detail", status["detail"])
+
+    def test_installed_stat_error_is_an_invalid_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer.install()
+            original_stat = Path.stat
+
+            def unreadable_stat(path, *args, **kwargs):
+                if Path(path) == installer.executable_path:
+                    raise OSError("private filesystem detail")
+                return original_stat(path, *args, **kwargs)
+
+            with patch.object(Path, "stat", new=unreadable_stat):
+                status = installer.status()
+
+            self.assertEqual(status["state"], "invalid")
+            self.assertIn("whisper-server.exe", status["detail"])
+            self.assertIn("reinstall", status["detail"].casefold())
+            self.assertNotIn("private filesystem detail", status["detail"])
+
+    def test_missing_installed_file_remains_not_installed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer.install()
+            installer.model_path.unlink()
+
+            status = installer.status()
+
+            self.assertEqual(status["state"], "not_installed")
+            self.assertIn("missing model.bin", status["detail"])
+
     def test_remove_deletes_every_asset_and_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)
@@ -439,6 +493,165 @@ class LocalASRSidecarTests(unittest.TestCase):
             self.assertEqual(installer.verify_calls, 2)
             self.assertEqual(factory.processes[0].terminate_calls, 1)
             manager.shutdown()
+
+    def test_concurrent_requests_are_serialized_across_failure_and_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_request_started = threading.Event()
+            release_first_request = threading.Event()
+
+            def fail_first_request():
+                first_request_started.set()
+                release_first_request.wait(2)
+                raise ConnectionError("first request failed")
+
+            session = SidecarSession([
+                fail_first_request,
+                FakeResponse(payload={"text": "first recovered"}),
+                FakeResponse(payload={"text": "second completed"}),
+            ])
+            manager, _installer, _session, factory = self._manager(
+                directory, session=session)
+            first_audio = Path(directory) / "first.wav"
+            second_audio = Path(directory) / "second.wav"
+            first_audio.write_bytes(b"RIFF-first")
+            second_audio.write_bytes(b"RIFF-second")
+            results = {}
+            errors = {}
+
+            def transcribe(name, audio):
+                try:
+                    results[name] = manager.transcribe(audio)
+                except Exception as error:
+                    errors[name] = error
+
+            first = threading.Thread(
+                target=transcribe, args=("first", first_audio))
+            second = threading.Thread(
+                target=transcribe, args=("second", second_audio))
+            first.start()
+            self.assertTrue(first_request_started.wait(0.5))
+            second.start()
+            time.sleep(0.1)
+
+            self.assertEqual(len(session.post_calls), 1)
+            release_first_request.set()
+            first.join(1)
+            second.join(1)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, {})
+            self.assertEqual(results, {
+                "first": "first recovered",
+                "second": "second completed",
+            })
+            self.assertEqual(len(factory.processes), 2)
+            self.assertEqual(factory.processes[0].terminate_calls, 1)
+            self.assertEqual(factory.processes[1].terminate_calls, 0)
+            manager.shutdown()
+
+    def test_per_call_cancel_does_not_cancel_queued_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_request_started = threading.Event()
+            terminated = threading.Event()
+
+            def block_first_request():
+                first_request_started.set()
+                terminated.wait(2)
+                raise ConnectionError("cancelled sidecar stopped")
+
+            session = SidecarSession([
+                block_first_request,
+                FakeResponse(payload={"text": "queued completed"}),
+            ])
+            factory = PopenFactory(terminated)
+            manager, _installer, _session, _factory = self._manager(
+                directory, session=session, factory=factory)
+            first_audio = Path(directory) / "first.wav"
+            second_audio = Path(directory) / "second.wav"
+            first_audio.write_bytes(b"RIFF-first")
+            second_audio.write_bytes(b"RIFF-second")
+            first_cancel = threading.Event()
+            results = {}
+            errors = {}
+
+            def first_transcription():
+                try:
+                    results["first"] = manager.transcribe(
+                        first_audio, cancel_event=first_cancel)
+                except Exception as error:
+                    errors["first"] = error
+
+            def second_transcription():
+                try:
+                    results["second"] = manager.transcribe(second_audio)
+                except Exception as error:
+                    errors["second"] = error
+
+            first = threading.Thread(target=first_transcription)
+            second = threading.Thread(target=second_transcription)
+            first.start()
+            self.assertTrue(first_request_started.wait(0.5))
+            second.start()
+            time.sleep(0.1)
+
+            self.assertEqual(len(session.post_calls), 1)
+            first_cancel.set()
+            first.join(1)
+            second.join(1)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertIsInstance(
+                errors.get("first"), local_asr.LocalASRCancelledError)
+            self.assertNotIn("second", errors)
+            self.assertEqual(results.get("second"), "queued completed")
+            self.assertEqual(len(factory.processes), 2)
+            self.assertEqual(factory.processes[0].terminate_calls, 1)
+            self.assertEqual(factory.processes[1].terminate_calls, 0)
+            manager.shutdown()
+
+    def test_manager_cancel_cancels_active_and_queued_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_request_started = threading.Event()
+            terminated = threading.Event()
+
+            def block_first_request():
+                first_request_started.set()
+                terminated.wait(2)
+                raise ConnectionError("manager stopped")
+
+            session = SidecarSession([block_first_request])
+            factory = PopenFactory(terminated)
+            manager, _installer, _session, _factory = self._manager(
+                directory, session=session, factory=factory)
+            audio = Path(directory) / "input.wav"
+            audio.write_bytes(b"RIFF-audio")
+            errors = []
+
+            def transcribe():
+                try:
+                    manager.transcribe(audio)
+                except Exception as error:
+                    errors.append(error)
+
+            first = threading.Thread(target=transcribe)
+            second = threading.Thread(target=transcribe)
+            first.start()
+            self.assertTrue(first_request_started.wait(0.5))
+            second.start()
+            time.sleep(0.1)
+
+            manager.cancel()
+            first.join(1)
+            second.join(1)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(len(errors), 2)
+            self.assertTrue(all(isinstance(
+                error, local_asr.LocalASRCancelledError) for error in errors))
+            self.assertEqual(len(factory.processes), 1)
 
     def test_cancellation_terminates_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:

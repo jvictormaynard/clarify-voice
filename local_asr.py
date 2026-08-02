@@ -266,11 +266,28 @@ class LocalASRInstaller:
         for path, expected_size, expected_digest in self._expected_installed_files():
             try:
                 actual_size = path.stat().st_size
-            except OSError as error:
+            except FileNotFoundError as error:
                 raise LocalASRInstallRequiredError(
                     f"Local ASR is incomplete; missing {path.name}. Reinstall it.") from error
-            if (actual_size != expected_size
-                    or _sha256(path, cancel_check=cancel_check) != expected_digest):
+            except OSError as error:
+                raise LocalASRIntegrityError(
+                    f"Cannot read installed {path.name}. Remove and reinstall Local ASR."
+                ) from error
+            if actual_size != expected_size:
+                raise LocalASRIntegrityError(
+                    f"Integrity check failed for {path.name}. Remove and reinstall Local ASR.")
+            try:
+                actual_digest = _sha256(path, cancel_check=cancel_check)
+            except LocalASRCancelledError:
+                raise
+            except FileNotFoundError as error:
+                raise LocalASRInstallRequiredError(
+                    f"Local ASR is incomplete; missing {path.name}. Reinstall it.") from error
+            except OSError as error:
+                raise LocalASRIntegrityError(
+                    f"Cannot read installed {path.name}. Remove and reinstall Local ASR."
+                ) from error
+            if actual_digest != expected_digest:
                 raise LocalASRIntegrityError(
                     f"Integrity check failed for {path.name}. Remove and reinstall Local ASR.")
         return self.install_dir
@@ -595,6 +612,7 @@ class LocalASRSidecarManager:
         self._request_path = ""
         self._lock = threading.RLock()
         self._startup_lock = threading.Lock()
+        self._transcribe_lock = threading.Lock()
         self._startup_cancel: threading.Event | None = None
         self._shutdown_event = threading.Event()
         self._active_cancellations: set[threading.Event] = set()
@@ -919,7 +937,15 @@ class LocalASRSidecarManager:
             self._cancel_idle_shutdown_locked()
         combined_cancel = _CancellationView(
             operation_cancel, cancel_event, self._shutdown_event)
+        owns_transcription = False
         try:
+            while not self._transcribe_lock.acquire(timeout=0.05):
+                if combined_cancel.is_set():
+                    raise LocalASRCancelledError(
+                        "Local transcription was cancelled")
+            owns_transcription = True
+            if combined_cancel.is_set():
+                raise LocalASRCancelledError("Local transcription was cancelled")
             last_error: Exception | None = None
             for attempt in range(2):
                 try:
@@ -940,6 +966,8 @@ class LocalASRSidecarManager:
                 "whisper.cpp failed after one automatic restart: "
                 f"{last_error}")
         finally:
+            if owns_transcription:
+                self._transcribe_lock.release()
             with self._lock:
                 self._active_cancellations.discard(operation_cancel)
                 self._schedule_idle_shutdown_locked()

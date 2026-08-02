@@ -75,6 +75,9 @@ against the committed manifest. The manager then:
   waiting for the full startup timeout;
 - terminates on cancellation or application shutdown without retrying a
   cancelled request, and starts idle expiry only after inference finishes;
+- serializes inference calls through one sidecar; per-call cancellation affects
+  only that call, while manager cancellation or shutdown also cancels queued
+  calls;
 - records the owned PID and verifies its executable path before stale cleanup;
 - on Windows, retains that record and blocks asset removal unless sidecar
   termination is confirmed;
