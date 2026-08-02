@@ -3345,33 +3345,6 @@ class AppWorkflowClipboard:
         return bool(target.window) and _foreground_window_handle() == target.window
 
     @staticmethod
-    def _restore_failed_capture(
-            previous, copy_start_sequence, copy_observed_sequence):
-        """Return clipboard ownership after a copy produced no text.
-
-        ``Ctrl+C`` can replace the clipboard with an image/file selection while
-        ``_copy_selected_text`` still returns ``None``.  Only repair a
-        snapshot whose sequence shows exactly this copy.  The final restore is
-        still atomic, so a user write between the copy's sequence observation
-        and the restore cannot be overwritten.  If the ownership evidence is
-        missing or ambiguous, fail closed.
-        """
-        if (
-            not isinstance(previous, ClipboardSnapshot)
-            or not previous.restorable
-            or copy_start_sequence is None
-            or copy_observed_sequence is None
-            or copy_start_sequence != previous.sequence
-            or copy_observed_sequence == copy_start_sequence
-        ):
-            return
-        try:
-            _restore_clipboard_snapshot_if_owned(
-                previous, copy_observed_sequence, None)
-        except Exception:
-            pass
-
-    @staticmethod
     def capture_selection(target):
         if not AppWorkflowClipboard.is_target_current(target):
             return None
@@ -3391,15 +3364,16 @@ class AppWorkflowClipboard:
         # chord act on an unrelated foreground application.
         if not AppWorkflowClipboard.is_target_current(target):
             return None
-        selected, copy_start_sequence, copy_observed_sequence = (
+        selected, _, _ = (
             _copy_selected_text_with_sequence(
                 expected_sequence=previous.sequence,
                 suppress_read_errors=True,
                 before_copy=lambda: AppWorkflowClipboard.is_target_current(
                     target)))
-        if selected is None:
-            AppWorkflowClipboard._restore_failed_capture(
-                previous, copy_start_sequence, copy_observed_sequence)
+        if not isinstance(selected, str):
+            # A sequence change without verifiable text may belong to a
+            # concurrent non-text clipboard write.  Restore would be unsafe;
+            # preserve the current clipboard and fail closed.
             return None
         context = {
             "previous": previous,

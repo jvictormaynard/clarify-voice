@@ -27,7 +27,12 @@ from provider_http import AuthenticationError
 from version import __version__
 from update_security import UpdateTransportError
 import windows_hotkeys
-from windows_clipboard import CF_UNICODETEXT, ClipboardFormat, ClipboardSnapshot
+from windows_clipboard import (
+    CF_DIB,
+    CF_UNICODETEXT,
+    ClipboardFormat,
+    ClipboardSnapshot,
+)
 from PIL import Image as PILImage
 from PIL import ImageDraw as PILImageDraw
 
@@ -1019,24 +1024,43 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
     def setUp(self):
         self.target = app.SelectionTarget(77, "editor.exe")
 
-    def test_capture_without_text_restores_owned_snapshot_after_multiple_sequence_changes(self):
+    def test_capture_without_text_preserves_foreign_non_text_clipboard(self):
         previous = ClipboardSnapshot((ClipboardFormat(
             CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        foreign = ClipboardSnapshot((ClipboardFormat(
+            CF_DIB, b"foreign-image"),), 12)
+
+        class ForeignClipboard:
+            def __init__(self):
+                self.state = previous
+
+            def sequence(self):
+                return self.state.sequence
+
+            def snapshot(self):
+                return self.state
+
+            def text(self):
+                return self.state.text
+
+            def restore_if_owned(self, *_args):
+                raise AssertionError("non-text clipboard must not be restored")
+
+        clipboard = ForeignClipboard()
+
+        def copy_to_foreign_clipboard(_chord):
+            clipboard.state = foreign
+
         with patch.object(app.AppWorkflowClipboard, "is_target_current",
                           return_value=True), \
-                patch.object(app, "_snapshot_windows_clipboard",
-                             return_value=previous), \
-                patch.object(app, "_clipboard_sequence_number",
-                             side_effect=[10, 12]), \
-                patch.object(app, "_send_key_chord") as send_key, \
-                patch.object(app, "_get_windows_clipboard_text",
-                             return_value=None), \
-                patch.object(app, "_restore_clipboard_snapshot_if_owned") as restore:
+                patch.object(app, "_WINDOWS_CLIPBOARD", clipboard), \
+                patch.object(app, "_send_key_chord",
+                             side_effect=copy_to_foreign_clipboard) as send_key:
             capture = app.AppWorkflowClipboard.capture_selection(self.target)
 
         self.assertIsNone(capture)
         send_key.assert_called_once_with("ctrl+c")
-        restore.assert_called_once_with(previous, 12, None)
+        self.assertIs(clipboard.state, foreign)
 
     def test_capture_retries_snapshot_after_contention(self):
         previous = ClipboardSnapshot((ClipboardFormat(
@@ -1116,7 +1140,7 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
         self.assertIsNone(capture)
         copy.assert_not_called()
 
-    def test_capture_keeps_fail_closed_when_atomic_restore_sees_sequence_mismatch(self):
+    def test_capture_without_text_never_restores_by_sequence_alone(self):
         previous = ClipboardSnapshot((ClipboardFormat(
             CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
         with patch.object(app.AppWorkflowClipboard, "is_target_current",
@@ -1126,13 +1150,11 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
                 patch.object(app, "_copy_selected_text_with_sequence",
                              return_value=(None, 10, 11)), \
                 patch.object(app, "_restore_clipboard_snapshot_if_owned",
-                             return_value=False) as restore, \
-                patch.object(app, "_set_windows_clipboard_text") as unsafe_set:
+                             return_value=False) as restore:
             capture = app.AppWorkflowClipboard.capture_selection(self.target)
 
         self.assertIsNone(capture)
-        restore.assert_called_once_with(previous, 11, None)
-        unsafe_set.assert_not_called()
+        restore.assert_not_called()
 
     def test_apply_result_focus_change_copies_without_verification_chord(self):
         capture = app.SelectionCapture(self.target, "selected")
