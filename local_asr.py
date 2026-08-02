@@ -518,11 +518,16 @@ class LocalASRInstaller:
                 json.dumps(receipt, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8")
 
-            if self.install_dir.exists():
-                cleanup_recorded_sidecar(
-                    self.process_record_path, self.executable_path)
-                shutil.rmtree(self.install_dir)
-            os.replace(staging, self.install_dir)
+            try:
+                if self.install_dir.exists():
+                    cleanup_recorded_sidecar(
+                        self.process_record_path, self.executable_path)
+                    shutil.rmtree(self.install_dir)
+                os.replace(staging, self.install_dir)
+            except OSError as error:
+                raise LocalASRError(
+                    "Cannot publish local-ASR installation; "
+                    "retry the install.") from error
             result = self.status()
             if result["state"] != "installed":
                 raise LocalASRIntegrityError(result["detail"])
@@ -533,7 +538,6 @@ class LocalASRInstaller:
             raise
 
     def remove(self) -> bool:
-        cleanup_recorded_sidecar(self.process_record_path, self.executable_path)
         existed = self.root.exists()
         if not existed:
             return False
@@ -545,25 +549,13 @@ class LocalASRInstaller:
             owned = marker.read_text(encoding="utf-8").strip() == PROVIDER_ID
         except OSError:
             pass
-        if owned:
-            shutil.rmtree(self.root)
-            return True
-
-        # A missing marker must never turn a custom --root into an arbitrary
-        # recursive delete. Remove only paths whose ownership is unambiguous.
-        shutil.rmtree(self.install_dir, ignore_errors=True)
-        try:
-            self.process_record_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        for staging in self.root.glob(".install-*"):
-            if staging.is_dir():
-                shutil.rmtree(staging, ignore_errors=True)
-        try:
-            self.root.rmdir()
-        except OSError:
-            pass
-        return existed
+        if not owned:
+            raise LocalASRError(
+                f"Refusing to remove unowned local-ASR asset root: {self.root}")
+        cleanup_recorded_sidecar(
+            self.process_record_path, self.executable_path)
+        shutil.rmtree(self.root)
+        return True
 
 
 def _process_image_path(pid: int) -> Path | None:
@@ -1089,19 +1081,6 @@ class LocalASRSidecarManager:
         audio_bytes: bytes | None = None,
     ) -> str:
         audio_path = Path(audio_path)
-        if audio_bytes is None:
-            try:
-                audio_snapshot = audio_path.read_bytes()
-            except FileNotFoundError as error:
-                raise LocalASRError(
-                    f"Audio file does not exist: {audio_path}") from error
-            except OSError as error:
-                raise LocalASRError(
-                    f"Could not read local audio snapshot: {audio_path.name}") from error
-        else:
-            audio_snapshot = bytes(audio_bytes)
-        if not audio_snapshot:
-            raise LocalASRError("Local audio snapshot is empty")
         operation_cancel = threading.Event()
         with self._lock:
             if self._cancelled(cancel_event, self._shutdown_event):
@@ -1112,6 +1091,21 @@ class LocalASRSidecarManager:
             operation_cancel, cancel_event, self._shutdown_event)
         owns_transcription = False
         try:
+            if audio_bytes is None:
+                try:
+                    audio_snapshot = audio_path.read_bytes()
+                except FileNotFoundError as error:
+                    raise LocalASRError(
+                        f"Audio file does not exist: {audio_path}") from error
+                except OSError as error:
+                    raise LocalASRError(
+                        f"Could not read local audio snapshot: {audio_path.name}") from error
+            else:
+                audio_snapshot = bytes(audio_bytes)
+            if combined_cancel.is_set():
+                raise LocalASRCancelledError("Local transcription was cancelled")
+            if not audio_snapshot:
+                raise LocalASRError("Local audio snapshot is empty")
             while not self._transcribe_lock.acquire(timeout=0.05):
                 if combined_cancel.is_set():
                     raise LocalASRCancelledError(

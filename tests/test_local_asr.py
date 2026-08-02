@@ -415,10 +415,32 @@ class LocalASRInstallerTests(unittest.TestCase):
             unrelated = fixture.root / "keep.txt"
             unrelated.write_text("user data", encoding="utf-8")
 
-            self.assertTrue(installer.remove())
+            with self.assertRaises(local_asr.LocalASRError) as raised:
+                installer.remove()
 
-            self.assertFalse(installer.install_dir.exists())
+            self.assertIn("unowned", str(raised.exception))
+            self.assertTrue(installer.install_dir.exists())
             self.assertEqual(unrelated.read_text(encoding="utf-8"), "user data")
+
+    def test_install_wraps_publication_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            original_replace = local_asr.os.replace
+
+            def fail_publish(source, destination):
+                if Path(destination) == installer.install_dir:
+                    raise OSError("private sharing detail")
+                return original_replace(source, destination)
+
+            with patch.object(local_asr.os, "replace", new=fail_publish):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.install()
+
+            self.assertEqual(len(session.calls), 2)
+            self.assertIn("publish", str(raised.exception))
+            self.assertNotIn("private sharing detail", str(raised.exception))
+            self.assertFalse(installer.install_dir.exists())
 
     def test_install_rejects_mutated_traversal_component_before_deleting(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -939,6 +961,42 @@ class LocalASRSidecarTests(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertIsInstance(errors[0], local_asr.LocalASRCancelledError)
             self.assertEqual(factory.processes[0].terminate_calls, 1)
+            self.assertFalse(installer.process_record_path.exists())
+
+    def test_cancel_during_audio_snapshot_is_observed_before_startup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager, installer, _session, factory = self._manager(directory)
+            audio = Path(directory) / "input.wav"
+            audio.write_bytes(b"RIFF-audio")
+            read_started = threading.Event()
+            release_read = threading.Event()
+            original_read_bytes = Path.read_bytes
+            errors = []
+
+            def blocking_read(path):
+                if Path(path) == audio:
+                    read_started.set()
+                    release_read.wait(1)
+                return original_read_bytes(path)
+
+            def transcribe():
+                try:
+                    manager.transcribe(audio)
+                except Exception as error:
+                    errors.append(error)
+
+            with patch.object(Path, "read_bytes", new=blocking_read):
+                worker = threading.Thread(target=transcribe)
+                worker.start()
+                self.assertTrue(read_started.wait(0.5))
+                manager.cancel()
+                release_read.set()
+                worker.join(0.75)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], local_asr.LocalASRCancelledError)
+            self.assertEqual(factory.processes, [])
             self.assertFalse(installer.process_record_path.exists())
 
     def test_shutdown_concurrent_with_startup_is_bounded_and_cleans_record(self):
