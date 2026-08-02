@@ -71,8 +71,13 @@ against the committed manifest. The manager then:
 - waits for the sidecar's `/health` response before accepting inference;
 - uses CPU-only, no-context transcription and never enables conversion/ffmpeg;
 - applies startup and inference timeouts;
-- terminates the process on cancellation, application shutdown, or idle expiry;
+- observes cancellation during verification and startup health checks, without
+  waiting for the full startup timeout;
+- terminates on cancellation or application shutdown without retrying a
+  cancelled request, and starts idle expiry only after inference finishes;
 - records the owned PID and verifies its executable path before stale cleanup;
+- on Windows, retains that record and blocks asset removal unless sidecar
+  termination is confirmed;
 - restarts the sidecar once after a crash or broken request.
 
 Inference sends the WAV only to the random loopback endpoint. The sidecar does

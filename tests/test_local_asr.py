@@ -1,3 +1,4 @@
+import ctypes
 import hashlib
 import io
 import json
@@ -7,7 +8,8 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import local_asr
 
@@ -356,8 +358,10 @@ class FakeInstaller:
         self.executable_path.write_bytes(b"exe")
         self.model_path.write_bytes(b"model")
 
-    def verify(self):
+    def verify(self, cancel_check=None):
         self.verify_calls += 1
+        if cancel_check is not None and cancel_check():
+            raise local_asr.LocalASRCancelledError("cancelled during verification")
         return self.install_dir
 
 
@@ -370,8 +374,8 @@ class LocalASRSidecarTests(unittest.TestCase):
             installer,
             session=session,
             popen_factory=factory,
-            startup_timeout=0.5,
-            request_timeout=0.5,
+            startup_timeout=kwargs.get("startup_timeout", 0.5),
+            request_timeout=kwargs.get("request_timeout", 0.5),
             idle_seconds=kwargs.get("idle_seconds", 0),
         )
         return manager, installer, session, factory
@@ -459,6 +463,118 @@ class LocalASRSidecarTests(unittest.TestCase):
             self.assertTrue(terminated.is_set())
             self.assertIsNone(manager.process_id)
 
+    def test_cancel_during_request_does_not_retry_or_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request_started = threading.Event()
+            terminated = threading.Event()
+
+            def blocking_post():
+                request_started.set()
+                terminated.wait(2)
+                raise ConnectionError("server stopped")
+
+            session = SidecarSession([blocking_post])
+            factory = PopenFactory(terminated)
+            manager, installer, _session, _factory = self._manager(
+                directory, session=session, factory=factory)
+            audio = Path(directory) / "input.wav"
+            audio.write_bytes(b"RIFF-audio")
+            errors = []
+
+            def transcribe():
+                try:
+                    manager.transcribe(audio)
+                except Exception as error:
+                    errors.append(error)
+
+            worker = threading.Thread(target=transcribe)
+            worker.start()
+            self.assertTrue(request_started.wait(0.5))
+
+            manager.cancel()
+            worker.join(0.75)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], local_asr.LocalASRCancelledError)
+            self.assertEqual(len(factory.processes), 1)
+            self.assertTrue(terminated.is_set())
+            self.assertFalse(installer.process_record_path.exists())
+
+    def test_cancel_during_health_startup_is_bounded_and_cleans_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            health_polled = threading.Event()
+
+            class UnhealthySession(SidecarSession):
+                def get(self, url, timeout=None):
+                    self.get_calls.append((url, timeout))
+                    health_polled.set()
+                    return FakeResponse(status_code=503)
+
+            session = UnhealthySession()
+            manager, installer, _session, factory = self._manager(
+                directory, session=session, startup_timeout=5)
+            audio = Path(directory) / "input.wav"
+            audio.write_bytes(b"RIFF-audio")
+            cancelled = threading.Event()
+            errors = []
+
+            def transcribe():
+                try:
+                    manager.transcribe(audio, cancel_event=cancelled)
+                except Exception as error:
+                    errors.append(error)
+
+            worker = threading.Thread(target=transcribe)
+            worker.start()
+            self.assertTrue(health_polled.wait(0.5))
+
+            started = time.monotonic()
+            cancelled.set()
+            worker.join(0.75)
+
+            self.assertFalse(worker.is_alive())
+            self.assertLess(time.monotonic() - started, 0.75)
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], local_asr.LocalASRCancelledError)
+            self.assertEqual(factory.processes[0].terminate_calls, 1)
+            self.assertFalse(installer.process_record_path.exists())
+
+    def test_shutdown_concurrent_with_startup_is_bounded_and_cleans_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            health_polled = threading.Event()
+
+            class UnhealthySession(SidecarSession):
+                def get(self, url, timeout=None):
+                    self.get_calls.append((url, timeout))
+                    health_polled.set()
+                    return FakeResponse(status_code=503)
+
+            manager, installer, _session, factory = self._manager(
+                directory, session=UnhealthySession(), startup_timeout=5)
+            errors = []
+
+            def start():
+                try:
+                    manager.start()
+                except Exception as error:
+                    errors.append(error)
+
+            worker = threading.Thread(target=start)
+            worker.start()
+            self.assertTrue(health_polled.wait(0.5))
+
+            started = time.monotonic()
+            manager.shutdown()
+            worker.join(0.75)
+
+            self.assertFalse(worker.is_alive())
+            self.assertLess(time.monotonic() - started, 0.75)
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], local_asr.LocalASRCancelledError)
+            self.assertEqual(factory.processes[0].terminate_calls, 1)
+            self.assertFalse(installer.process_record_path.exists())
+
     def test_idle_shutdown_stops_verified_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:
             manager, _installer, _session, factory = self._manager(
@@ -470,6 +586,42 @@ class LocalASRSidecarTests(unittest.TestCase):
             self.assertEqual(factory.processes[0].terminate_calls, 1)
             self.assertIsNone(manager.process_id)
 
+    def test_idle_shutdown_waits_until_active_request_finishes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request_started = threading.Event()
+            release_request = threading.Event()
+
+            def blocking_post():
+                request_started.set()
+                release_request.wait(2)
+                return FakeResponse(payload={"text": "slow local text"})
+
+            session = SidecarSession([blocking_post])
+            manager, _installer, _session, factory = self._manager(
+                directory, session=session, idle_seconds=0.05,
+                request_timeout=1)
+            audio = Path(directory) / "input.wav"
+            audio.write_bytes(b"RIFF-audio")
+            results = []
+            worker = threading.Thread(
+                target=lambda: results.append(manager.transcribe(audio)))
+            worker.start()
+            self.assertTrue(request_started.wait(0.5))
+
+            time.sleep(0.12)
+
+            self.assertEqual(factory.processes[0].terminate_calls, 0)
+            self.assertTrue(worker.is_alive())
+            release_request.set()
+            worker.join(0.75)
+            self.assertEqual(results, ["slow local text"])
+
+            deadline = time.monotonic() + 0.5
+            while factory.processes[0].terminate_calls == 0:
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
+            self.assertEqual(factory.processes[0].terminate_calls, 1)
+
     def test_process_record_failure_does_not_orphan_started_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:
             manager, _installer, _session, factory = self._manager(directory)
@@ -480,6 +632,73 @@ class LocalASRSidecarTests(unittest.TestCase):
 
             self.assertEqual(factory.processes[0].terminate_calls, 1)
             self.assertIsNone(manager.process_id)
+
+    def test_unconfirmed_managed_termination_keeps_process_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            class StubbornProcess(FakeProcess):
+                def terminate(self):
+                    self.terminate_calls += 1
+
+                def kill(self):
+                    self.kill_calls += 1
+
+                def wait(self, timeout=None):
+                    raise TimeoutError("still running")
+
+            factory = PopenFactory()
+
+            def create_process(command, **kwargs):
+                factory.calls.append((command, kwargs))
+                process = StubbornProcess()
+                factory.processes.append(process)
+                return process
+
+            manager, installer, _session, _factory = self._manager(
+                directory, factory=create_process)
+            manager.start()
+
+            manager.stop()
+
+            self.assertTrue(installer.process_record_path.exists())
+
+
+class LocalASRRecordedProcessTests(unittest.TestCase):
+    def test_terminate_pid_requests_synchronize_and_confirms_wait(self):
+        kernel32 = SimpleNamespace(
+            OpenProcess=Mock(return_value=123),
+            TerminateProcess=Mock(return_value=1),
+            WaitForSingleObject=Mock(return_value=0),
+            CloseHandle=Mock(return_value=1),
+        )
+        windll = SimpleNamespace(kernel32=kernel32)
+
+        with patch.object(local_asr.platform, "system", return_value="Windows"), \
+                patch.object(ctypes, "windll", windll, create=True):
+            self.assertTrue(local_asr._terminate_pid(4321))
+
+        kernel32.OpenProcess.assert_called_once_with(0x00100001, False, 4321)
+        kernel32.TerminateProcess.assert_called_once_with(123, 1)
+        kernel32.WaitForSingleObject.assert_called_once_with(123, 2000)
+        kernel32.CloseHandle.assert_called_once_with(123)
+
+        kernel32.WaitForSingleObject.return_value = 0x00000102
+        with patch.object(local_asr.platform, "system", return_value="Windows"), \
+                patch.object(ctypes, "windll", windll, create=True):
+            self.assertFalse(local_asr._terminate_pid(4322))
+
+    def test_cleanup_keeps_record_when_termination_is_not_confirmed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record_path = Path(directory) / "sidecar-process.json"
+            executable = Path(directory) / "whisper-server.exe"
+            record_path.write_text(json.dumps({"pid": 4321}), encoding="utf-8")
+
+            with patch.object(
+                    local_asr, "_process_image_path", return_value=executable), \
+                    patch.object(local_asr, "_terminate_pid", return_value=False):
+                with self.assertRaises(local_asr.LocalASRSidecarError):
+                    local_asr.cleanup_recorded_sidecar(record_path, executable)
+
+            self.assertTrue(record_path.exists())
 
 
 if __name__ == "__main__":

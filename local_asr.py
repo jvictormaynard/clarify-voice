@@ -102,10 +102,16 @@ def default_install_root() -> Path:
     return parent / "ClarifyVoice" / "local-asr"
 
 
-def _sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
+def _sha256(
+    path: Path,
+    chunk_size: int = 1024 * 1024,
+    cancel_check: Callable[[], bool] | None = None,
+) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         while chunk := stream.read(chunk_size):
+            if cancel_check is not None and cancel_check():
+                raise LocalASRCancelledError("Local ASR startup was cancelled")
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -253,7 +259,7 @@ class LocalASRInstaller:
                     f"Bundled license notice is missing: {relative}") from error
             yield self.install_dir / relative, size, source_digest
 
-    def verify(self) -> Path:
+    def verify(self, cancel_check: Callable[[], bool] | None = None) -> Path:
         if not self.install_dir.is_dir():
             raise LocalASRInstallRequiredError(
                 "Local ASR is not installed. Run the explicit installer first.")
@@ -263,7 +269,8 @@ class LocalASRInstaller:
             except OSError as error:
                 raise LocalASRInstallRequiredError(
                     f"Local ASR is incomplete; missing {path.name}. Reinstall it.") from error
-            if actual_size != expected_size or _sha256(path) != expected_digest:
+            if (actual_size != expected_size
+                    or _sha256(path, cancel_check=cancel_check) != expected_digest):
                 raise LocalASRIntegrityError(
                     f"Integrity check failed for {path.name}. Remove and reinstall Local ASR.")
         return self.install_dir
@@ -507,9 +514,9 @@ def _process_image_path(pid: int) -> Path | None:
         return None
 
 
-def _terminate_pid(pid: int) -> None:
+def _terminate_pid(pid: int) -> bool:
     if platform.system() != "Windows" or pid <= 0:
-        return
+        return False
     try:
         import ctypes
         from ctypes import wintypes
@@ -523,15 +530,21 @@ def _terminate_pid(pid: int) -> None:
         kernel32.WaitForSingleObject.restype = wintypes.DWORD
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
-        process = kernel32.OpenProcess(0x0001, False, pid)
-        if process:
-            try:
-                kernel32.TerminateProcess(process, 1)
-                kernel32.WaitForSingleObject(process, 2000)
-            finally:
-                kernel32.CloseHandle(process)
+        process_terminate = 0x0001
+        synchronize = 0x00100000
+        wait_object_0 = 0
+        process = kernel32.OpenProcess(
+            process_terminate | synchronize, False, pid)
+        if not process:
+            return False
+        try:
+            if not kernel32.TerminateProcess(process, 1):
+                return False
+            return kernel32.WaitForSingleObject(process, 2000) == wait_object_0
+        finally:
+            kernel32.CloseHandle(process)
     except Exception:
-        pass
+        return False
 
 
 def cleanup_recorded_sidecar(record_path: Path, expected_executable: Path) -> None:
@@ -547,8 +560,9 @@ def cleanup_recorded_sidecar(record_path: Path, expected_executable: Path) -> No
         matches = actual is not None and actual.resolve() == Path(expected_executable).resolve()
     except OSError:
         matches = False
-    if matches:
-        _terminate_pid(pid)
+    if matches and not _terminate_pid(pid):
+        raise LocalASRSidecarError(
+            "Could not confirm that the recorded local-ASR sidecar terminated")
     try:
         record_path.unlink(missing_ok=True)
     except OSError:
@@ -580,6 +594,10 @@ class LocalASRSidecarManager:
         self._port = 0
         self._request_path = ""
         self._lock = threading.RLock()
+        self._startup_lock = threading.Lock()
+        self._startup_cancel: threading.Event | None = None
+        self._shutdown_event = threading.Event()
+        self._active_cancellations: set[threading.Event] = set()
         self._idle_timer: threading.Timer | None = None
 
     @property
@@ -621,88 +639,170 @@ class LocalASRSidecarManager:
                 pass
             raise
 
-    def _health(self) -> bool:
-        if self._process is None or self._process.poll() is not None:
-            return False
+    def _health(self, expected_process=None) -> bool:
+        with self._lock:
+            process = self._process
+            if (process is None or process.poll() is not None
+                    or (expected_process is not None and process is not expected_process)):
+                return False
+            url = f"http://127.0.0.1:{self._port}{self._request_path}/health"
         try:
-            response = self._session.get(f"{self.base_url}/health", timeout=(1, 1))
-            return response.status_code == 200 and response.json().get("status") == "ok"
+            response = self._session.get(url, timeout=(0.25, 0.25))
+            healthy = response.status_code == 200 and response.json().get("status") == "ok"
         except Exception:
             return False
-
-    def start(self) -> float:
         with self._lock:
-            if self._health():
-                self._schedule_idle_shutdown()
-                return 0.0
-            self._stop_locked()
-            self.installer.verify()
-            cleanup_recorded_sidecar(
-                self.installer.process_record_path, self.installer.executable_path)
+            return bool(
+                healthy
+                and self._process is process
+                and process.poll() is None
+            )
 
-            self._port = self._reserve_port()
-            self._request_path = f"/{secrets.token_urlsafe(24)}"
-            threads = max(1, min(8, (os.cpu_count() or 4) // 2))
-            command = [
-                str(self.installer.executable_path),
-                "--model", str(self.installer.model_path),
-                "--host", "127.0.0.1",
-                "--port", str(self._port),
-                "--request-path", self._request_path,
-                "--threads", str(threads),
-                "--language", "auto",
-                "--no-context",
-                "--no-timestamps",
-                "--no-gpu",
-            ]
-            flags = 0x08000000 if platform.system() == "Windows" else 0
-            started = time.perf_counter()
+    @staticmethod
+    def _cancelled(*events) -> bool:
+        return any(event is not None and event.is_set() for event in events)
+
+    def _raise_if_cancelled(self, cancel_event=None) -> None:
+        if self._cancelled(cancel_event, self._shutdown_event):
+            raise LocalASRCancelledError("Local ASR startup was cancelled")
+
+    def start(self, cancel_event=None) -> float:
+        while not self._startup_lock.acquire(timeout=0.05):
+            self._raise_if_cancelled(cancel_event)
+        try:
+            startup_cancel = threading.Event()
+            with self._lock:
+                self._raise_if_cancelled(cancel_event)
+                self._startup_cancel = startup_cancel
             try:
-                self._process = self._popen(
-                    command,
-                    cwd=str(self.installer.executable_path.parent),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=flags,
-                )
-                self._record_process()
-            except Exception as error:
-                self._stop_locked()
-                raise LocalASRSidecarError(f"Could not start whisper.cpp: {error}") from error
-
-            deadline = time.monotonic() + self.startup_timeout
-            while time.monotonic() < deadline:
                 if self._health():
-                    elapsed = time.perf_counter() - started
-                    self._schedule_idle_shutdown()
-                    return elapsed
-                if self._process.poll() is not None:
-                    code = self._process.returncode
+                    with self._lock:
+                        self._raise_if_cancelled(cancel_event)
+                        self._schedule_idle_shutdown_locked()
+                    return 0.0
+                with self._lock:
                     self._stop_locked()
-                    raise LocalASRSidecarError(
-                        f"whisper.cpp exited during startup (code {code})")
-                time.sleep(0.05)
-            self._stop_locked()
-            raise LocalASRSidecarError(
-                f"whisper.cpp did not become healthy within {self.startup_timeout:g}s")
+                self._raise_if_cancelled(cancel_event)
+                self.installer.verify(cancel_check=lambda: self._cancelled(
+                    cancel_event, startup_cancel, self._shutdown_event))
+                self._raise_if_cancelled(startup_cancel)
+                self._raise_if_cancelled(cancel_event)
+                cleanup_recorded_sidecar(
+                    self.installer.process_record_path, self.installer.executable_path)
+                self._raise_if_cancelled(startup_cancel)
+                self._raise_if_cancelled(cancel_event)
 
-    def _schedule_idle_shutdown(self) -> None:
+                port = self._reserve_port()
+                request_path = f"/{secrets.token_urlsafe(24)}"
+                threads = max(1, min(8, (os.cpu_count() or 4) // 2))
+                command = [
+                    str(self.installer.executable_path),
+                    "--model", str(self.installer.model_path),
+                    "--host", "127.0.0.1",
+                    "--port", str(port),
+                    "--request-path", request_path,
+                    "--threads", str(threads),
+                    "--language", "auto",
+                    "--no-context",
+                    "--no-timestamps",
+                    "--no-gpu",
+                ]
+                flags = 0x08000000 if platform.system() == "Windows" else 0
+                started = time.perf_counter()
+                process = None
+                try:
+                    with self._lock:
+                        self._raise_if_cancelled(startup_cancel)
+                        self._raise_if_cancelled(cancel_event)
+                        self._port = port
+                        self._request_path = request_path
+                        process = self._popen(
+                            command,
+                            cwd=str(self.installer.executable_path.parent),
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            creationflags=flags,
+                        )
+                        self._process = process
+                        self._record_process()
+                except LocalASRCancelledError:
+                    raise
+                except Exception as error:
+                    with self._lock:
+                        self._stop_locked(expected_process=process)
+                    raise LocalASRSidecarError(
+                        f"Could not start whisper.cpp: {error}") from error
+
+                deadline = time.monotonic() + self.startup_timeout
+                while time.monotonic() < deadline:
+                    if self._cancelled(
+                            cancel_event, startup_cancel, self._shutdown_event):
+                        with self._lock:
+                            self._stop_locked(expected_process=process)
+                        raise LocalASRCancelledError("Local ASR startup was cancelled")
+                    if self._health(expected_process=process):
+                        elapsed = time.perf_counter() - started
+                        with self._lock:
+                            self._raise_if_cancelled(startup_cancel)
+                            self._raise_if_cancelled(cancel_event)
+                            if self._process is not process:
+                                raise LocalASRCancelledError(
+                                    "Local ASR startup was cancelled")
+                            self._schedule_idle_shutdown_locked()
+                        return elapsed
+                    if process.poll() is not None:
+                        code = process.returncode
+                        with self._lock:
+                            self._stop_locked(expected_process=process)
+                        raise LocalASRSidecarError(
+                            f"whisper.cpp exited during startup (code {code})")
+                    startup_cancel.wait(0.05)
+                with self._lock:
+                    self._stop_locked(expected_process=process)
+                raise LocalASRSidecarError(
+                    "whisper.cpp did not become healthy within "
+                    f"{self.startup_timeout:g}s")
+            finally:
+                with self._lock:
+                    if self._startup_cancel is startup_cancel:
+                        self._startup_cancel = None
+        finally:
+            self._startup_lock.release()
+
+    def _cancel_idle_shutdown_locked(self) -> None:
         if self._idle_timer is not None:
             self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _schedule_idle_shutdown_locked(self) -> None:
+        self._cancel_idle_shutdown_locked()
         if self.idle_seconds <= 0:
             return
-        timer = threading.Timer(self.idle_seconds, self.stop)
+        if (self._active_cancellations or self._shutdown_event.is_set()
+                or self._process is None or self._process.poll() is not None):
+            return
+
+        def idle_shutdown() -> None:
+            with self._lock:
+                if self._idle_timer is not timer:
+                    return
+                self._idle_timer = None
+                if not self._active_cancellations:
+                    self._stop_locked()
+
+        timer = threading.Timer(self.idle_seconds, idle_shutdown)
         timer.daemon = True
         self._idle_timer = timer
         timer.start()
 
-    def _stop_locked(self) -> None:
-        if self._idle_timer is not None:
-            self._idle_timer.cancel()
-            self._idle_timer = None
+    def _stop_locked(self, expected_process=None) -> None:
+        if expected_process is not None and self._process is not expected_process:
+            return
+        self._cancel_idle_shutdown_locked()
         process = self._process
         self._process = None
+        termination_confirmed = process is not None and process.poll() is not None
         if process is not None and process.poll() is None:
             try:
                 process.terminate()
@@ -713,19 +813,36 @@ class LocalASRSidecarManager:
                     process.wait(timeout=2)
                 except Exception:
                     pass
-        try:
-            self.installer.process_record_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+            termination_confirmed = process.poll() is not None
+        if termination_confirmed:
+            try:
+                self.installer.process_record_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         self._port = 0
         self._request_path = ""
 
     def stop(self) -> None:
         with self._lock:
+            startup_cancel = self._startup_cancel
+        if startup_cancel is not None:
+            startup_cancel.set()
+        with self._lock:
             self._stop_locked()
 
-    shutdown = stop
-    cancel = stop
+    def cancel(self) -> None:
+        with self._lock:
+            cancellations = tuple(self._active_cancellations)
+            startup_cancel = self._startup_cancel
+        for event in cancellations:
+            event.set()
+        if startup_cancel is not None:
+            startup_cancel.set()
+        self.stop()
+
+    def shutdown(self) -> None:
+        self._shutdown_event.set()
+        self.cancel()
 
     def _post_inference(self, audio_path: Path, language: str, result: queue.Queue) -> None:
         try:
@@ -755,7 +872,7 @@ class LocalASRSidecarManager:
         language: str,
         cancel_event: threading.Event | None,
     ) -> str:
-        self.start()
+        self.start(cancel_event=cancel_event)
         result: queue.Queue = queue.Queue(maxsize=1)
         worker = threading.Thread(
             target=self._post_inference,
@@ -765,7 +882,7 @@ class LocalASRSidecarManager:
         worker.start()
         deadline = time.monotonic() + self.request_timeout + 5
         while worker.is_alive():
-            if cancel_event is not None and cancel_event.wait(0.05):
+            if cancel_event is not None and cancel_event.is_set():
                 self.stop()
                 worker.join(timeout=2)
                 raise LocalASRCancelledError("Local transcription was cancelled")
@@ -774,15 +891,15 @@ class LocalASRSidecarManager:
                 worker.join(timeout=2)
                 raise LocalASRSidecarError(
                     f"Local transcription exceeded {self.request_timeout:g}s")
-            if cancel_event is None:
-                worker.join(timeout=0.05)
+            worker.join(timeout=0.05)
+        if cancel_event is not None and cancel_event.is_set():
+            self.stop()
+            raise LocalASRCancelledError("Local transcription was cancelled")
         text, error = result.get_nowait()
         if error is not None:
             if isinstance(error, LocalASRError):
                 raise error
             raise LocalASRSidecarError(f"Local inference failed: {error}") from error
-        with self._lock:
-            self._schedule_idle_shutdown()
         return str(text)
 
     def transcribe(
@@ -794,19 +911,45 @@ class LocalASRSidecarManager:
         audio_path = Path(audio_path)
         if not audio_path.is_file():
             raise LocalASRError(f"Audio file does not exist: {audio_path}")
-        if cancel_event is not None and cancel_event.is_set():
-            raise LocalASRCancelledError("Local transcription was cancelled")
-        last_error: Exception | None = None
-        for attempt in range(2):
-            try:
-                return self._transcribe_once(audio_path, language, cancel_event)
-            except (LocalASRCancelledError, LocalASRInstallRequiredError,
-                    LocalASRIntegrityError):
-                raise
-            except LocalASRError as error:
-                last_error = error
-                self.stop()
-                if attempt == 0:
-                    continue
-        raise LocalASRSidecarError(
-            f"whisper.cpp failed after one automatic restart: {last_error}")
+        operation_cancel = threading.Event()
+        with self._lock:
+            if self._cancelled(cancel_event, self._shutdown_event):
+                raise LocalASRCancelledError("Local transcription was cancelled")
+            self._active_cancellations.add(operation_cancel)
+            self._cancel_idle_shutdown_locked()
+        combined_cancel = _CancellationView(
+            operation_cancel, cancel_event, self._shutdown_event)
+        try:
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    return self._transcribe_once(
+                        audio_path, language, combined_cancel)
+                except (LocalASRCancelledError, LocalASRInstallRequiredError,
+                        LocalASRIntegrityError):
+                    raise
+                except LocalASRError as error:
+                    if combined_cancel.is_set():
+                        raise LocalASRCancelledError(
+                            "Local transcription was cancelled") from error
+                    last_error = error
+                    self.stop()
+                    if attempt == 0:
+                        continue
+            raise LocalASRSidecarError(
+                "whisper.cpp failed after one automatic restart: "
+                f"{last_error}")
+        finally:
+            with self._lock:
+                self._active_cancellations.discard(operation_cancel)
+                self._schedule_idle_shutdown_locked()
+
+
+class _CancellationView:
+    """Read-only union of caller, lifecycle, and operation cancellation."""
+
+    def __init__(self, *events):
+        self._events = tuple(event for event in events if event is not None)
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
