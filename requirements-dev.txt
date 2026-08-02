@@ -6,3 +6,6 @@ mypy>=1.16,<2
 pip-audit>=2.9,<3
 cyclonedx-bom>=7,<8
 pip-tools>=7.4,<8
+# Keep the bootstrap toolchain compatible with the pinned pip-tools release.
+pip>=25.3,<26
+setuptools>=83,<84

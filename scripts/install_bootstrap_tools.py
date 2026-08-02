@@ -42,7 +42,15 @@ def main(argv: list[str] | None = None) -> int:
         [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *pins],
         check=False,
     )
-    return result.returncode
+    if result.returncode:
+        return result.returncode
+    # Import and execute the exact pip-tools entry point after bootstrap
+    # installation. A textually matching lock is not useful if pip-tools and
+    # pip cannot import one another on the runner.
+    validation = subprocess.run(
+        [sys.executable, "-m", "piptools", "compile", "--help"], check=False
+    )
+    return validation.returncode
 
 
 if __name__ == "__main__":

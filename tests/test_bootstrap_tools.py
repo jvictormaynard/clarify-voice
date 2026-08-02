@@ -32,8 +32,12 @@ class BootstrapToolTests(unittest.TestCase):
                 ),
                 0,
             )
-        command = run.call_args.args[0]
-        self.assertEqual(command[-2:], ["pip==26.2", "setuptools==83.0.0"])
+        install_command = run.call_args_list[0].args[0]
+        self.assertEqual(install_command[-2:], ["pip==25.3", "setuptools==83.0.0"])
+        self.assertEqual(
+            run.call_args_list[1].args[0][-4:],
+            ["-m", "piptools", "compile", "--help"],
+        )
 
 
 if __name__ == "__main__":
