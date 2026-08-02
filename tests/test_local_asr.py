@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import local_asr
+from provider_http import CancellationToken
 from scripts import local_asr_harness
 from provider_registry import ProviderRegistry, build_provider_registry
 from provider_types import (
@@ -1273,6 +1274,27 @@ class LocalASRRecordedProcessTests(unittest.TestCase):
 
 
 class LocalASRProviderAdapterTests(unittest.TestCase):
+    def test_adapter_forwards_registry_cancellation_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "input.wav"
+            audio.write_bytes(b"RIFF-audio")
+            backend = Mock()
+            backend.transcribe.return_value = "cancel-aware transcript"
+            token = CancellationToken()
+            adapter = local_asr.LocalASRProviderAdapter(backend)
+
+            adapter.transcribe(
+                TranscriptionRequest(
+                    audio, local_asr.MODEL_ID, "en", "", "", 0.0,
+                ),
+                ProviderConnection("", ""),
+                token,
+            )
+
+            backend.transcribe.assert_called_once_with(
+                audio, "en", audio_bytes=None, cancel_event=token,
+            )
+
     def test_adapter_registers_with_typed_audio_only_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             audio = Path(directory) / "input.wav"

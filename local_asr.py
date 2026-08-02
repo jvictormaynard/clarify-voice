@@ -828,7 +828,15 @@ class LocalASRSidecarManager:
 
     @staticmethod
     def _cancelled(*events) -> bool:
-        return any(event is not None and event.is_set() for event in events)
+        for event in events:
+            if event is None:
+                continue
+            is_set = getattr(event, "is_set", None)
+            if callable(is_set) and is_set():
+                return True
+            if bool(getattr(event, "cancelled", False)):
+                return True
+        return False
 
     def _raise_if_cancelled(self, cancel_event=None) -> None:
         if self._cancelled(cancel_event, self._shutdown_event):
@@ -1152,7 +1160,7 @@ class _CancellationView:
         self._events = tuple(event for event in events if event is not None)
 
     def is_set(self) -> bool:
-        return any(event.is_set() for event in self._events)
+        return LocalASRSidecarManager._cancelled(*self._events)
 
 
 class LocalASRProviderAdapter(ProviderAdapter):
@@ -1163,7 +1171,7 @@ class LocalASRProviderAdapter(ProviderAdapter):
         self.backend = backend or LocalASRSidecarManager()
 
     def transcribe(self, request: TranscriptionRequest,
-            connection: ProviderConnection) -> TranscriptionResult:
+            connection: ProviderConnection, cancel_token=None) -> TranscriptionResult:
         del connection
         self.require(ProviderCapability.AUDIO_TRANSCRIPTION)
         model = str(request.model or "").strip() or MODEL_ID
@@ -1174,11 +1182,11 @@ class LocalASRProviderAdapter(ProviderAdapter):
                 ProviderCapability.AUDIO_TRANSCRIPTION,
             )
         try:
+            backend_kwargs = {"audio_bytes": request.audio_bytes}
+            if cancel_token is not None:
+                backend_kwargs["cancel_event"] = cancel_token
             text = self.backend.transcribe(
-                request.audio_path,
-                request.language,
-                audio_bytes=request.audio_bytes,
-            )
+                request.audio_path, request.language, **backend_kwargs)
         except (LocalASRInstallRequiredError, LocalASRIntegrityError) as error:
             raise ProviderConfigurationError(
                 PROVIDER_ID, str(error),
