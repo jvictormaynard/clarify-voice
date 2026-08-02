@@ -1648,6 +1648,70 @@ class LocalASRRecordedProcessTests(unittest.TestCase):
                 patch.object(ctypes, "get_last_error", return_value=5, create=True):
             self.assertIsNone(local_asr._pid_running_state(4321))
 
+    def test_pid_running_state_uses_native_error_over_stale_ctypes_cache(self):
+        for native_error, stale_error, expected in (
+                (87, 5, False), (5, 87, None)):
+            with self.subTest(native_error=native_error):
+                kernel32 = SimpleNamespace(
+                    OpenProcess=Mock(return_value=0),
+                    GetLastError=Mock(return_value=native_error),
+                )
+                windll = SimpleNamespace(kernel32=kernel32)
+                with patch.object(local_asr.platform, "system", return_value="Windows"), \
+                        patch.object(ctypes, "windll", windll, create=True), \
+                        patch.object(
+                            ctypes, "get_last_error", return_value=stale_error,
+                            create=True,
+                        ):
+                    self.assertIs(local_asr._pid_running_state(4321), expected)
+
+    def test_kernel32_loader_requests_last_error_for_native_dll(self):
+        calls = []
+
+        class FakeWinDLL:
+            def __init__(self, name, **kwargs):
+                calls.append((name, kwargs))
+
+        candidate = FakeWinDLL("windll-kernel32")
+        calls.clear()
+        module = SimpleNamespace(
+            windll=SimpleNamespace(kernel32=candidate), WinDLL=FakeWinDLL)
+
+        selected = local_asr._windows_kernel32_with_last_error(module)
+
+        self.assertIsInstance(selected, FakeWinDLL)
+        self.assertIsNot(selected, candidate)
+        self.assertEqual(calls, [("kernel32", {"use_last_error": True})])
+
+    def test_kernel32_loader_preserves_test_double(self):
+        calls = []
+
+        class FakeWinDLL:
+            def __init__(self, name, **kwargs):
+                calls.append((name, kwargs))
+
+        candidate = SimpleNamespace(OpenProcess=Mock())
+        module = SimpleNamespace(
+            windll=SimpleNamespace(kernel32=candidate), WinDLL=FakeWinDLL)
+
+        selected = local_asr._windows_kernel32_with_last_error(module)
+
+        self.assertIs(selected, candidate)
+        self.assertEqual(calls, [])
+
+    def test_native_kernel32_reader_prefers_ctypes_last_error_copy(self):
+        class FakeWinDLL:
+            def __init__(self, _name):
+                self.GetLastError = Mock(return_value=5)
+
+        kernel32 = FakeWinDLL("kernel32")
+        module = SimpleNamespace(
+            WinDLL=FakeWinDLL, get_last_error=Mock(return_value=87))
+
+        self.assertEqual(local_asr._windows_last_error(module, kernel32), 87)
+        module.get_last_error.assert_called_once_with()
+        kernel32.GetLastError.assert_not_called()
+
     def test_terminate_pid_requests_synchronize_and_confirms_wait(self):
         kernel32 = SimpleNamespace(
             OpenProcess=Mock(return_value=123),
@@ -1712,6 +1776,33 @@ class LocalASRRecordedProcessTests(unittest.TestCase):
 
                 self.assertTrue(record_path.exists())
                 terminate.assert_not_called()
+
+    def test_cleanup_preserves_record_when_access_denied_overrides_stale_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record_path = root / "sidecar-process.json"
+            executable = root / "installed" / "runtime" / "whisper-server.exe"
+            executable.parent.mkdir(parents=True)
+            record_path.write_text(json.dumps({
+                "pid": 4321, "executable": str(executable),
+            }), encoding="utf-8")
+            kernel32 = SimpleNamespace(
+                OpenProcess=Mock(return_value=0),
+                GetLastError=Mock(return_value=5),
+            )
+            windll = SimpleNamespace(kernel32=kernel32)
+
+            with patch.object(local_asr.platform, "system", return_value="Windows"), \
+                    patch.object(ctypes, "windll", windll, create=True), \
+                    patch.object(
+                        ctypes, "get_last_error", return_value=87, create=True), \
+                    patch.object(local_asr, "_terminate_pid") as terminate:
+                with self.assertRaises(local_asr.LocalASRSidecarError):
+                    local_asr.cleanup_recorded_sidecar(
+                        record_path, executable, root)
+
+            terminate.assert_not_called()
+            self.assertTrue(record_path.exists())
 
     def test_cleanup_discards_record_after_proving_pid_exited(self):
         with tempfile.TemporaryDirectory() as directory:

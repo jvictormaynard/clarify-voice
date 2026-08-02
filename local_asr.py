@@ -870,30 +870,47 @@ def _process_image_path(pid: int) -> Path | None:
         return None
 
 
+def _is_native_kernel32(ctypes_module, kernel32) -> bool:
+    win_dll_type = getattr(ctypes_module, "WinDLL", None)
+    return (isinstance(win_dll_type, type)
+            and isinstance(kernel32, win_dll_type))
+
+
 def _windows_kernel32_with_last_error(ctypes_module):
     """Load kernel32 with a ctypes-owned last-error copy when available."""
     windll = getattr(ctypes_module, "windll", None)
     candidate = getattr(windll, "kernel32", None)
-    open_process = getattr(candidate, "OpenProcess", None)
-    if open_process is not None and type(open_process).__module__ != "_ctypes":
+    win_dll_type = getattr(ctypes_module, "WinDLL", None)
+    # Test doubles expose the same function names but are not WinDLL instances;
+    # preserve them rather than trying to load the host's kernel32.
+    if candidate is None or not _is_native_kernel32(ctypes_module, candidate):
         return candidate
     try:
-        return ctypes_module.WinDLL("kernel32", use_last_error=True)
+        return win_dll_type("kernel32", use_last_error=True)
     except (AttributeError, OSError):
         return candidate
 
 
 def _windows_last_error(ctypes_module, kernel32) -> int:
-    getter = getattr(ctypes_module, "get_last_error", None)
-    error = int(getter()) if callable(getter) else 0
-    if error:
-        return error
+    if _is_native_kernel32(ctypes_module, kernel32):
+        getter = getattr(ctypes_module, "get_last_error", None)
+        if callable(getter):
+            try:
+                return int(getter())
+            except (TypeError, ValueError):
+                pass
     native_getter = getattr(kernel32, "GetLastError", None)
     if callable(native_getter):
         try:
             return int(native_getter())
         except (TypeError, ValueError):
-            return 0
+            pass
+    getter = getattr(ctypes_module, "get_last_error", None)
+    if callable(getter):
+        try:
+            return int(getter())
+        except (TypeError, ValueError):
+            pass
     return 0
 
 
