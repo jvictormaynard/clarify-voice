@@ -22,6 +22,8 @@ Notable user-facing changes are documented here. This project follows
   deterministically owned and observable
 - Made each recording's terminal outcome immutable; cleanup failures no longer
   rewrite a published `completed` or `cancelled` state
+- Retained rapid stop requests issued before recorder startup publication and
+  bounded provider-worker shutdown joins without deleting an in-use WAV
 
 ## [0.1.2] - 2026-07-31
 

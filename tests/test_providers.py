@@ -1440,6 +1440,90 @@ class RewriteWorkflowTests(unittest.TestCase):
         recorder.stop.assert_called_once_with()
         harness._on_result.assert_called_once_with("Short phrase")
 
+    def test_rapid_stop_before_start_worker_runs_is_retained(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "recording.wav"
+            audio_path.write_bytes(b"0" * 1001)
+            recorder = SimpleNamespace(
+                start=Mock(), stop=Mock(), cancel=Mock())
+            session = app.RecordingSession(recorder=recorder, audio_path=audio_path)
+            callbacks = []
+            result_ready = threading.Event()
+
+            class DeferredThread:
+                ident = None
+
+                def __init__(self, target, daemon):
+                    self.target = target
+
+                def start(self):
+                    pass
+
+                def run(self):
+                    self.target()
+
+            real_thread = threading.Thread
+            thread_calls = []
+
+            def make_thread(*args, **kwargs):
+                if not thread_calls:
+                    thread_calls.append(True)
+                    return DeferredThread(*args, **kwargs)
+                return real_thread(*args, **kwargs)
+
+            harness = SimpleNamespace(
+                result_frame=SimpleNamespace(winfo_manager=lambda: False),
+                _update_focused_icon=Mock(),
+                winfo_viewable=lambda: True,
+                recorder=recorder,
+                mode="transcribe",
+                lang="en",
+                _t=lambda key: key,
+                _set_state=Mock(),
+                _on_result=Mock(side_effect=lambda _text: result_ready.set()),
+                _new_recording_session=lambda: session,
+                _recording_session=None,
+                _closing=False,
+                _session_is_current=lambda candidate: (
+                    harness._recording_session is candidate and not harness._closing),
+                after=lambda _delay, callback: callbacks.append(callback),
+            )
+            harness._stop_recording = (
+                lambda expected_session=None: app.App._stop_recording(
+                    harness, expected_session))
+
+            with patch.object(app, "_has_active_microphone", return_value=True), \
+                    patch.object(app, "_recording_usage_context", return_value={}), \
+                    patch.object(app.threading, "Thread", side_effect=make_thread), \
+                    patch.object(app.time, "sleep"), \
+                    patch.object(app, "call_transcription_provider",
+                                 return_value="Short phrase"):
+                app.App._start_recording(harness)
+                app.App._stop_recording(harness)
+
+                self.assertTrue(session.stop_requested.is_set())
+                self.assertEqual(session.state, "created")
+                recorder.stop.assert_not_called()
+
+                startup_worker = next(
+                    worker for worker in (session._active_workers())
+                    if isinstance(worker, DeferredThread))
+                startup_worker.run()
+                self.assertTrue(callbacks)
+                pending_stop = callbacks.pop(0)
+                pending_stop()
+
+                deadline = time.time() + 1
+                while not result_ready.is_set() and time.time() < deadline:
+                    for callback in list(callbacks):
+                        callbacks.remove(callback)
+                        callback()
+                    time.sleep(0.01)
+
+            self.assertEqual(session.state, "completed")
+            recorder.stop.assert_called_once_with()
+            self.assertTrue(result_ready.is_set())
+
     def test_missing_or_short_audio_preserves_no_audio_status_and_cleans_up(self):
         for payload in (None, b"0" * 999):
             with self.subTest(payload="missing" if payload is None else "short"), \

@@ -1967,6 +1967,7 @@ class MicrophoneUnavailableError(RecordingError):
 
 
 SESSION_SHUTDOWN_JOIN_SECONDS = 2.0
+SESSION_WORKER_JOIN_SECONDS = 5.0
 SESSION_CLEANUP_RETRY_ATTEMPTS = 3
 SESSION_CLEANUP_RETRY_DELAY_SECONDS = 0.25
 TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS = 60
@@ -2299,6 +2300,7 @@ class RecordingSession:
         self.recorder = recorder or Recorder()
         self.state = "created"
         self.state_history = ["created"]
+        self.stop_requested = threading.Event()
         self.error = None
         self.cleanup_error = None
         self.started_at = time.time()
@@ -2311,13 +2313,15 @@ class RecordingSession:
         self._cleanup_done = threading.Event()
         self.cleanup_retry_exhausted = False
         self.shutdown_complete = threading.Event()
+        self.shutdown_error = None
+        self.shutdown_timed_out = False
         # Signals the end of the bounded cleanup policy: either cleanup has
         # succeeded and shutdown is complete, or all automatic retries have
         # been exhausted and ownership must remain attached to this session.
         self.cleanup_terminal = threading.Event()
         self._shutdown_watcher_started = False
         self._shutdown_watcher = None
-        self._owner_release_observer_started = False
+        self._owner_release_callback = None
 
     @property
     def terminal(self):
@@ -2365,6 +2369,9 @@ class RecordingSession:
         with self._workers_lock:
             self._workers.discard(worker)
         self._complete_shutdown_if_ready()
+        if (self.terminal and not self._cleanup_done.is_set()
+                and not self._active_workers()):
+            self._ensure_shutdown_watcher()
 
     def _active_workers(self):
         with self._workers_lock:
@@ -2398,8 +2405,13 @@ class RecordingSession:
     def _complete_shutdown_if_ready(self):
         if (self.terminal and not self._active_workers()
                 and self._cleanup_done.is_set()):
-            self.shutdown_complete.set()
-            self.cleanup_terminal.set()
+            with self._lock:
+                self.shutdown_complete.set()
+                self.cleanup_terminal.set()
+                release_callback = self._owner_release_callback
+                self._owner_release_callback = None
+            if release_callback is not None:
+                release_callback()
 
     def _retry_cleanup(self):
         for attempt in range(SESSION_CLEANUP_RETRY_ATTEMPTS):
@@ -2407,14 +2419,35 @@ class RecordingSession:
                 return True
             if attempt + 1 < SESSION_CLEANUP_RETRY_ATTEMPTS:
                 time.sleep(SESSION_CLEANUP_RETRY_DELAY_SECONDS * (2 ** attempt))
-        self.cleanup_retry_exhausted = True
-        return False
+        # Recheck under the same lock used by _cleanup_once. Another
+        # cancellation/finalizer may have completed deletion after the last
+        # failed attempt but before this watcher publishes exhaustion.
+        with self._cleanup_lock:
+            if self._cleanup_done.is_set():
+                self.cleanup_retry_exhausted = False
+                return True
+            self.cleanup_retry_exhausted = True
+            return False
 
     def _finish_shutdown(self):
         try:
+            deadline = time.monotonic() + SESSION_WORKER_JOIN_SECONDS
             for worker in self._active_workers():
                 if worker.ident is not None:
-                    worker.join()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    worker.join(remaining)
+            if self._active_workers():
+                self.shutdown_error = RecordingError(
+                    "Provider worker did not finish before shutdown deadline")
+                if self.error is None:
+                    self.error = self.shutdown_error
+                self.shutdown_timed_out = True
+                self.cleanup_retry_exhausted = True
+                return
+            self.shutdown_error = None
+            self.shutdown_timed_out = False
             self._retry_cleanup()
             self._complete_shutdown_if_ready()
         finally:
@@ -2429,6 +2462,13 @@ class RecordingSession:
         with self._workers_lock:
             if self._shutdown_watcher_started:
                 return
+            if (self.shutdown_timed_out and not self._cleanup_done.is_set()):
+                # A worker that exceeded the join deadline may later detach;
+                # permit one fresh bounded cleanup attempt without allowing
+                # the previous terminal signal to claim success.
+                self.shutdown_timed_out = False
+                self.cleanup_retry_exhausted = False
+                self.cleanup_terminal.clear()
             self._shutdown_watcher_started = True
         # This thread must keep the interpreter alive after Tk is destroyed:
         # it joins the provider worker, then retries deletion after its file
@@ -5007,6 +5047,11 @@ class App(ctk.CTk):
             try:
                 try:
                     session.start()
+                    if session.stop_requested.is_set() and is_current(session):
+                        self.after(
+                            0,
+                            lambda session=session: self._stop_recording(session),
+                        )
                 except MicrophoneUnavailableError as error:
                     session.finalize("failed", error)
                     if is_current(session):
@@ -5061,15 +5106,7 @@ class App(ctk.CTk):
             observer(session)
 
     def _observe_recording_session_release(self, session):
-        """Release UI ownership only after the session's finite policy ends.
-
-        The shutdown watcher performs a bounded join/retry sequence. This
-        observer waits on its terminal event rather than the shorter UI
-        timeout, then schedules the ownership change on Tk's event loop. A
-        persistent cleanup failure sets the terminal event without
-        ``shutdown_complete``, so the observer exits while ownership/path
-        remain intentionally attached to the failed session.
-        """
+        """Register safe UI ownership release for successful terminal cleanup."""
         is_current = getattr(
             self, "_session_is_current",
             lambda candidate: (getattr(self, "_recording_session", None) is candidate
@@ -5077,21 +5114,12 @@ class App(ctk.CTk):
         )
         if not is_current(session):
             return
-        with session._lock:
-            if session._owner_release_observer_started:
-                return
-            session._owner_release_observer_started = True
+        def release_on_tk_loop():
+            if (session.shutdown_complete.is_set()
+                    and is_current(session)):
+                self._recording_session = None
 
-        def release_after_cleanup():
-            session.wait_for_cleanup_terminal()
-            if not session.shutdown_complete.is_set():
-                return
-
-            def release_on_tk_loop():
-                if (session.shutdown_complete.is_set()
-                        and is_current(session)):
-                    self._recording_session = None
-
+        def schedule_release():
             try:
                 self.after(0, release_on_tk_loop)
             except Exception:
@@ -5099,13 +5127,16 @@ class App(ctk.CTk):
                 # prevents a stale session from clearing a newer one.
                 release_on_tk_loop()
 
-        threading.Thread(
-            target=release_after_cleanup,
-            name="ClarifyVoiceCleanupRelease",
-            daemon=True).start()
+        with session._lock:
+            session._owner_release_callback = schedule_release
+            already_complete = session.shutdown_complete.is_set()
+        if already_complete:
+            schedule_release()
 
-    def _stop_recording(self):
+    def _stop_recording(self, expected_session=None):
         session = getattr(self, "_recording_session", None)
+        if expected_session is not None and session is not expected_session:
+            return
         if session is None:
             # Compatibility path for lightweight callers that used the old
             # App helper directly; normal UI calls always have a session.
@@ -5139,6 +5170,11 @@ class App(ctk.CTk):
             threading.Thread(target=legacy_run, daemon=True).start()
             return
         if not session.begin_processing():
+            # The startup worker has not published ``recording`` yet. Retain
+            # the user's stop request and let that worker schedule processing
+            # once startup completes, instead of silently dropping the stop.
+            if session.state == "created":
+                session.stop_requested.set()
             return
         elapsed = time.time() - self._rec_start
         self._set_state("processing")

@@ -265,6 +265,91 @@ class RecordingSessionTests(unittest.TestCase):
             harness.after.assert_not_called()
             self.assertTrue(path.exists())
 
+    def test_provider_worker_join_deadline_keeps_file_owned(self):
+        release_provider = threading.Event()
+        provider_started = threading.Event()
+        recorder = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recording.wav"
+            path.write_bytes(b"audio")
+            session = app.RecordingSession(recorder=recorder, audio_path=path)
+            session.state = "processing"
+
+            def provider_worker():
+                provider_started.set()
+                release_provider.wait(2)
+                session.detach_worker(threading.current_thread())
+
+            worker = threading.Thread(target=provider_worker, daemon=True)
+            session.attach_worker(worker)
+            worker.start()
+            self.assertTrue(provider_started.wait(1))
+
+            with patch.object(app, "SESSION_WORKER_JOIN_SECONDS", 0.01), \
+                    patch.object(app.Recorder, "_safe_delete") as delete:
+                session.finalize("completed")
+                self.assertTrue(session.cleanup_terminal.wait(1))
+                self.assertFalse(session.shutdown_complete.is_set())
+                self.assertIsNotNone(session.shutdown_error)
+                self.assertTrue(session.cleanup_retry_exhausted)
+                delete.assert_not_called()
+                self.assertTrue(path.exists())
+                self.assertFalse(session._shutdown_watcher.is_alive())
+
+            release_provider.set()
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+            self.assertTrue(session.wait_for_shutdown(1))
+            self.assertFalse(path.exists())
+
+    def test_cleanup_exhaustion_rechecks_concurrent_late_success(self):
+        failure_returned = threading.Event()
+        allow_exhaustion = threading.Event()
+        original_cleanup_once = None
+        watcher_call = [True]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recording.wav"
+            path.write_bytes(b"audio")
+            session = app.RecordingSession(recorder=Mock(), audio_path=path)
+            session.state = "completed"
+
+            def delete(path_to_remove, *, strict=False):
+                if path_to_remove.exists():
+                    if not failure_returned.is_set():
+                        raise app.RecordingCleanupError("locked")
+                    path_to_remove.unlink()
+
+            def wrapped_cleanup_once():
+                result = original_cleanup_once()
+                if watcher_call[0] and not result:
+                    watcher_call[0] = False
+                    failure_returned.set()
+                    self.assertTrue(allow_exhaustion.wait(1))
+                return result
+
+            with patch.object(app, "SESSION_CLEANUP_RETRY_ATTEMPTS", 1), \
+                    patch.object(app.Recorder, "_safe_delete", side_effect=delete):
+                original_cleanup_once = session._cleanup_once
+                with patch.object(
+                        session, "_cleanup_once", side_effect=wrapped_cleanup_once):
+                    session._ensure_shutdown_watcher()
+                    self.assertTrue(failure_returned.wait(1))
+
+                    competitor = threading.Thread(
+                        target=original_cleanup_once, daemon=True)
+                    competitor.start()
+                    competitor.join(1)
+                    self.assertFalse(competitor.is_alive())
+                    allow_exhaustion.set()
+
+                    self.assertTrue(session.cleanup_terminal.wait(1))
+
+            self.assertTrue(session._cleanup_done.is_set())
+            self.assertTrue(session.shutdown_complete.is_set())
+            self.assertFalse(session.cleanup_retry_exhausted)
+            self.assertIsNone(session.cleanup_error)
+            self.assertFalse(path.exists())
+
     def test_stale_process_cleanup_targets_session_path(self):
         command_runner = Mock()
         session_path = Path("C:/Users/test/AppData/Local/ClarifyVoice/recording-42.wav")
