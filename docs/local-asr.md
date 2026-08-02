@@ -1,9 +1,10 @@
 # Local ASR sidecar groundwork
 
 This document describes the isolated groundwork for issue #23. It is not yet a
-user-facing provider. Final application integration must wait for the provider
-registry (#16), shared recording/process lifecycle (#18), and download/update
-conventions (#22) to land on the default branch.
+user-facing provider. The typed provider registry from #16 is now integrated by
+an explicit adapter, while default registration and application integration
+still wait for the shared recording/process lifecycle (#18) and download/update
+conventions (#22).
 
 ## Pinned implementation
 
@@ -58,8 +59,11 @@ installer-owned asset root, including receipts and process metadata. A custom
 non-empty directory without the ownership marker is refused during installation
 and is never recursively deleted.
 
-The future product adapter should use the narrow `LocalTranscriptionBackend`
-protocol instead of coupling registry or UI types to the sidecar manager.
+`LocalASRProviderAdapter` implements the merged typed registry contract around
+the narrow `LocalTranscriptionBackend` protocol. It is deliberately not added
+to the default registry yet: the current provider UI assumes credentials and
+model discovery, while local installation/progress and shared cancellation need
+the contracts from #18 and #22.
 
 ## Runtime and privacy design
 
@@ -108,7 +112,7 @@ py scripts\local_asr_harness.py --root "$env:TEMP\clarify-local-asr" benchmark `
 ```
 
 No Windows benchmark or product acceptance result is claimed by this groundwork
-PR. The following remains pending after #16, #18, and #22 merge:
+PR. The following remains pending after #18 and #22 merge:
 
 | Check | Required evidence | Current state |
 | --- | --- | --- |
@@ -120,7 +124,7 @@ PR. The following remains pending after #16, #18, and #22 merge:
 | Exit cleanup | Quit during inference; no owned process or temporary WAV remains | Pending integration |
 | Crash recovery | Kill sidecar during inference and observe one bounded restart | Unit covered; Windows pending |
 | Removal | Asset root absent after removal | Unit covered; Windows pending |
-| Cloud regression | Existing provider contract suite unchanged | Pending registry integration |
+| Cloud regression | Existing provider contract suite unchanged | Typed adapter unit covered; default registration pending |
 
 Do not mark issue #23 closed until those results and the final UI/provider and
 shared-lifecycle integration are in a reviewed follow-up.

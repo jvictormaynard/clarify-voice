@@ -12,6 +12,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import local_asr
+from provider_registry import ProviderRegistry, build_provider_registry
+from provider_types import (
+    ProviderCapability,
+    ProviderConfigurationError,
+    ProviderConnection,
+    ProviderResponseError,
+    TranscriptionRequest,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -912,6 +920,85 @@ class LocalASRRecordedProcessTests(unittest.TestCase):
                     local_asr.cleanup_recorded_sidecar(record_path, executable)
 
             self.assertTrue(record_path.exists())
+
+
+class LocalASRProviderAdapterTests(unittest.TestCase):
+    def test_adapter_registers_with_typed_audio_only_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "input.wav"
+            audio.write_bytes(b"RIFF-audio")
+            backend = Mock()
+            backend.transcribe.return_value = "typed local transcript"
+            registry = ProviderRegistry()
+            registry.register(local_asr.LocalASRProviderAdapter(backend))
+
+            result = registry.transcribe(
+                local_asr.PROVIDER_ID,
+                TranscriptionRequest(
+                    audio, local_asr.MODEL_ID, "pt", "unused", "unused", 0.0),
+                ProviderConnection("", ""),
+            )
+
+            self.assertEqual(result.text, "typed local transcript")
+            self.assertEqual(result.provider_id, local_asr.PROVIDER_ID)
+            self.assertEqual(result.model, local_asr.MODEL_ID)
+            self.assertTrue(registry.supports(
+                local_asr.PROVIDER_ID,
+                ProviderCapability.AUDIO_TRANSCRIPTION,
+            ))
+            self.assertFalse(registry.supports(
+                local_asr.PROVIDER_ID,
+                ProviderCapability.TEXT_GENERATION,
+            ))
+            backend.transcribe.assert_called_once_with(audio, "pt")
+            registry.adapter(local_asr.PROVIDER_ID).cancel()
+            registry.adapter(local_asr.PROVIDER_ID).shutdown()
+            backend.cancel.assert_called_once_with()
+            backend.shutdown.assert_called_once_with()
+
+    def test_adapter_maps_install_and_runtime_failures_to_provider_errors(self):
+        request = TranscriptionRequest(
+            Path("input.wav"), local_asr.MODEL_ID, "en", "", "", 0.0)
+        connection = ProviderConnection("", "")
+        cases = (
+            (
+                local_asr.LocalASRInstallRequiredError("Install Local ASR"),
+                ProviderConfigurationError,
+            ),
+            (
+                local_asr.LocalASRIntegrityError("Reinstall Local ASR"),
+                ProviderConfigurationError,
+            ),
+            (
+                local_asr.LocalASRSidecarError("Sidecar unavailable"),
+                ProviderResponseError,
+            ),
+        )
+
+        for local_error, provider_error in cases:
+            with self.subTest(error=type(local_error).__name__):
+                backend = Mock()
+                backend.transcribe.side_effect = local_error
+                adapter = local_asr.LocalASRProviderAdapter(backend)
+
+                with self.assertRaises(provider_error) as raised:
+                    adapter.transcribe(request, connection)
+
+                self.assertEqual(raised.exception.provider_id, local_asr.PROVIDER_ID)
+                self.assertEqual(
+                    raised.exception.capability,
+                    ProviderCapability.AUDIO_TRANSCRIPTION,
+                )
+
+    def test_adapter_rejects_unpinned_model_and_is_not_registered_by_default(self):
+        adapter = local_asr.LocalASRProviderAdapter(Mock())
+        request = TranscriptionRequest(
+            Path("input.wav"), "another-model", "en", "", "", 0.0)
+
+        with self.assertRaises(ProviderConfigurationError):
+            adapter.transcribe(request, ProviderConnection("", ""))
+
+        self.assertNotIn(local_asr.PROVIDER_ID, build_provider_registry().provider_ids)
 
 
 if __name__ == "__main__":

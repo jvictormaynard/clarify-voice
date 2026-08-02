@@ -27,17 +27,38 @@ from typing import Callable, Mapping, Protocol, runtime_checkable
 
 import requests
 
+from provider_adapters import ProviderAdapter
+from provider_types import (
+    ProviderCapability,
+    ProviderConfigurationError,
+    ProviderConnection,
+    ProviderMetadata,
+    ProviderResponseError,
+    TranscriptionRequest,
+    TranscriptionResult,
+)
+
 
 PROVIDER_ID = "local_asr"
 MODEL_ID = "ggml-small"
 MANIFEST_FILENAME = "local_asr_manifest.json"
 ROOT_MARKER = ".clarifyvoice-local-asr-root"
 ProgressCallback = Callable[[str, int, int], None]
+LOCAL_ASR_METADATA = ProviderMetadata(
+    provider_id=PROVIDER_ID,
+    display_name="Local Whisper",
+    capabilities=frozenset({ProviderCapability.AUDIO_TRANSCRIPTION}),
+    default_base_url="",
+    audio_model_key="local_asr_model",
+    text_model_key="local_asr_text_model",
+    default_audio_model=MODEL_ID,
+    default_text_model="",
+)
 
 
 @runtime_checkable
 class LocalTranscriptionBackend(Protocol):
-    """Narrow boundary for the future provider-registry/lifecycle adapters."""
+    """Narrow sidecar boundary for provider and future lifecycle adapters."""
 
     def transcribe(
         self,
@@ -981,3 +1002,44 @@ class _CancellationView:
 
     def is_set(self) -> bool:
         return any(event.is_set() for event in self._events)
+
+
+class LocalASRProviderAdapter(ProviderAdapter):
+    """Typed registry adapter around the isolated local sidecar backend."""
+
+    def __init__(self, backend: LocalTranscriptionBackend | None = None):
+        super().__init__(LOCAL_ASR_METADATA, requests)
+        self.backend = backend or LocalASRSidecarManager()
+
+    def transcribe(self, request: TranscriptionRequest,
+            connection: ProviderConnection) -> TranscriptionResult:
+        del connection
+        self.require(ProviderCapability.AUDIO_TRANSCRIPTION)
+        model = str(request.model or "").strip() or MODEL_ID
+        if model != MODEL_ID:
+            raise ProviderConfigurationError(
+                PROVIDER_ID,
+                f"Local Whisper supports only the pinned {MODEL_ID} model",
+                ProviderCapability.AUDIO_TRANSCRIPTION,
+            )
+        try:
+            text = self.backend.transcribe(request.audio_path, request.language)
+        except (LocalASRInstallRequiredError, LocalASRIntegrityError) as error:
+            raise ProviderConfigurationError(
+                PROVIDER_ID, str(error),
+                ProviderCapability.AUDIO_TRANSCRIPTION,
+            ) from error
+        except LocalASRCancelledError:
+            raise
+        except LocalASRError as error:
+            raise ProviderResponseError(
+                PROVIDER_ID, str(error),
+                ProviderCapability.AUDIO_TRANSCRIPTION,
+            ) from error
+        return TranscriptionResult(text, PROVIDER_ID, model)
+
+    def cancel(self) -> None:
+        self.backend.cancel()
+
+    def shutdown(self) -> None:
+        self.backend.shutdown()

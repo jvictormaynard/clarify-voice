@@ -197,6 +197,7 @@ app.py                         Main UI and desktop workflows
 provider_types.py              Typed provider requests, results, and capabilities
 provider_adapters.py           Gemini and OpenAI-compatible adapters
 provider_registry.py           Provider metadata and request routing registry
+local_asr.py                    Optional local-ASR adapter, installer, and sidecar
 repositories.py                Versioned configuration and statistics storage
 update_security.py             Authenticated manifest and atomic update checks
 version.py                     Packaged application version

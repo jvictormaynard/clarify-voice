@@ -235,6 +235,12 @@ WiX MSI, signs that MSI and a release-manifest CAB, verifies the pinned
 publisher, emits checksums, and creates GitHub provenance attestations. Public
 enablement remains gated as documented in
 [Windows distribution security](windows-distribution.md). `scripts/deploy.ps1` is a maintainer tool for
+The local-ASR runtime and model are deliberately excluded from this one-file
+application. The groundwork manifest and maintainer harness remain source-only
+until the remaining lifecycle and download conventions land.
+
+The GitHub release workflow builds on a Windows runner and publishes the
+executable plus a SHA-256 checksum. `scripts/deploy.ps1` is a maintainer tool for
 updating an existing local installation from WSL; contributors normally use
 `scripts/build.ps1`.
 
