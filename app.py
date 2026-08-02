@@ -405,6 +405,47 @@ def _save_app_config(repositories=None):
     _storage_repositories(repositories).config.save(APP_CONFIG)
 
 
+def _provider_key_candidate(provider, entered=""):
+    """Use a newly entered key or preserve the already loaded credential."""
+    value = str(entered or "").strip()
+    if value:
+        return value
+    return str(APP_CONFIG.get(f"{provider}_api_key", "")).strip()
+
+
+def _deactivate_provider_transaction(provider, default_base, repositories=None):
+    """Delete a provider credential without leaving compatibility state stale."""
+    previous_config = APP_CONFIG.copy()
+    try:
+        APP_CONFIG[f"{provider}_api_key"] = ""
+        APP_CONFIG[f"{provider}_base_url"] = default_base
+        _save_app_config(repositories)
+    except OSError:
+        APP_CONFIG.clear()
+        APP_CONFIG.update(previous_config)
+        raise
+
+
+def _deactivate_provider_for_ui(
+        provider, default_base, provider_state, error_message, repositories=None):
+    """Commit deactivation before presenting it as successful in the UI."""
+    previous_state = dict(provider_state)
+    try:
+        _deactivate_provider_transaction(provider, default_base, repositories)
+    except OSError:
+        provider_state.clear()
+        provider_state.update(previous_state)
+        provider_state["feedback"] = error_message
+        return False
+
+    provider_state["generation"] = previous_state.get("generation", 0) + 1
+    provider_state.update(
+        status="not_configured", models=[], error="", feedback="")
+    if "text_models" in provider_state:
+        provider_state["text_models"] = []
+    return True
+
+
 def _activate_repositories(repositories):
     """Load injected config into the legacy compatibility state.
 
@@ -1512,8 +1553,9 @@ STRINGS = {
         "validation_failed": "Validation failed: {error}",
         "validate_save": "Validate & save", "back": "Back",
         "deactivate": "Deactivate provider", "credentials_valid": "Credentials validated",
+        "credential_update_failed": "Could not update credentials. Try again.",
         "no_active_models": "No active providers. Add one to choose a model.",
-        "api_key": "API key", "api_key_placeholder": "Paste the provider API key",
+        "api_key": "API key", "api_key_placeholder": "Leave blank to keep the saved key",
         "base_url": "Custom URL", "custom_endpoint": "Custom endpoint", "model": "Model",
         "refresh_models": "Refresh models", "loading_models": "Loading models…",
         "models_found": "{count} audio model(s) available",
@@ -1559,8 +1601,9 @@ STRINGS = {
         "validation_failed": "Falha na valida\u00e7\u00e3o: {error}",
         "validate_save": "Validar e salvar", "back": "Voltar",
         "deactivate": "Desativar provedor", "credentials_valid": "Credenciais validadas",
+        "credential_update_failed": "Não foi possível atualizar as credenciais. Tente novamente.",
         "no_active_models": "Nenhum provedor ativo. Adicione um para escolher um modelo.",
-        "api_key": "Chave de API", "api_key_placeholder": "Cole a chave do provedor",
+        "api_key": "Chave de API", "api_key_placeholder": "Deixe em branco para manter a chave salva",
         "base_url": "URL personalizada", "custom_endpoint": "Endpoint personalizado",
         "model": "Modelo",
         "refresh_models": "Atualizar modelos", "loading_models": "Carregando modelos…",
@@ -1607,8 +1650,9 @@ STRINGS = {
         "validation_failed": "Error de validación: {error}",
         "validate_save": "Validar y guardar", "back": "Volver",
         "deactivate": "Desactivar proveedor", "credentials_valid": "Credenciales validadas",
+        "credential_update_failed": "No se pudieron actualizar las credenciales. Inténtalo de nuevo.",
         "no_active_models": "No hay proveedores activos. Añade uno para elegir un modelo.",
-        "api_key": "Clave de API", "api_key_placeholder": "Pega la clave de API del proveedor",
+        "api_key": "Clave de API", "api_key_placeholder": "Déjalo en blanco para conservar la clave guardada",
         "base_url": "URL personalizada", "custom_endpoint": "Endpoint personalizado",
         "model": "Modelo",
         "refresh_models": "Actualizar modelos", "loading_models": "Cargando modelos…",
@@ -1655,8 +1699,9 @@ STRINGS = {
         "validation_failed": "Validierung fehlgeschlagen: {error}",
         "validate_save": "Prüfen und speichern", "back": "Zurück",
         "deactivate": "Anbieter deaktivieren", "credentials_valid": "Zugangsdaten validiert",
+        "credential_update_failed": "Zugangsdaten konnten nicht aktualisiert werden. Versuchen Sie es erneut.",
         "no_active_models": "Keine aktiven Anbieter. Fügen Sie einen hinzu, um ein Modell auszuwählen.",
-        "api_key": "API-Schlüssel", "api_key_placeholder": "API-Schlüssel des Anbieters einfügen",
+        "api_key": "API-Schlüssel", "api_key_placeholder": "Leer lassen, um den gespeicherten Schlüssel zu behalten",
         "base_url": "Benutzerdefinierte URL", "custom_endpoint": "Benutzerdefinierter Endpunkt",
         "model": "Modell",
         "refresh_models": "Modelle aktualisieren", "loading_models": "Modelle werden geladen…",
@@ -1703,8 +1748,9 @@ STRINGS = {
         "validation_failed": "Ошибка проверки: {error}",
         "validate_save": "Проверить и сохранить", "back": "Назад",
         "deactivate": "Отключить провайдера", "credentials_valid": "Учётные данные проверены",
+        "credential_update_failed": "Не удалось обновить учётные данные. Повторите попытку.",
         "no_active_models": "Нет активных провайдеров. Добавьте провайдера, чтобы выбрать модель.",
-        "api_key": "Ключ API", "api_key_placeholder": "Вставьте ключ API провайдера",
+        "api_key": "Ключ API", "api_key_placeholder": "Оставьте пустым, чтобы сохранить текущий ключ",
         "base_url": "Пользовательский URL", "custom_endpoint": "Пользовательский endpoint",
         "model": "Модель",
         "refresh_models": "Обновить модели", "loading_models": "Загрузка моделей…",
@@ -5377,19 +5423,19 @@ class App(ctk.CTk):
 
         drafts = {
             "gemini": {
-                "key": str(APP_CONFIG.get("gemini_api_key", "")),
+                "key": "",
                 "base": str(APP_CONFIG.get("gemini_base_url", "")),
                 "audio_model": str(APP_CONFIG.get("gemini_model", "gemini-2.5-flash")),
                 "text_model": "",
             },
             "openai": {
-                "key": str(APP_CONFIG.get("openai_api_key", "")),
+                "key": "",
                 "base": str(APP_CONFIG.get("openai_base_url", "")),
                 "audio_model": str(APP_CONFIG.get("openai_audio_model", "whisper-1")),
                 "text_model": str(APP_CONFIG.get("openai_text_model", "gpt-4o-mini")),
             },
             "groq": {
-                "key": str(APP_CONFIG.get("groq_api_key", "")),
+                "key": "",
                 "base": str(APP_CONFIG.get("groq_base_url", "")),
                 "audio_model": str(APP_CONFIG.get(
                     "groq_audio_model", "whisper-large-v3-turbo")),
@@ -5521,7 +5567,7 @@ class App(ctk.CTk):
             if not win.winfo_exists():
                 return
             provider = current_provider["id"]
-            key = key_entry.get().strip()
+            key = _provider_key_candidate(provider, key_entry.get())
             base = (base_entry.get().strip() if endpoint_switch.get()
                     else official_bases[provider])
             selected = model_menu.get().strip()
@@ -5618,18 +5664,21 @@ class App(ctk.CTk):
             store_visible_fields()
             APP_CONFIG.update({
                 "transcription_provider": current_provider["id"],
-                "gemini_api_key": drafts["gemini"]["key"],
+                "gemini_api_key": _provider_key_candidate(
+                    "gemini", drafts["gemini"]["key"]),
                 "gemini_base_url": (drafts["gemini"]["base"]
                     if drafts["gemini"]["custom_endpoint"] and drafts["gemini"]["base"]
                     else official_bases["gemini"]),
                 "gemini_model": drafts["gemini"]["audio_model"] or "gemini-2.5-flash",
-                "openai_api_key": drafts["openai"]["key"],
+                "openai_api_key": _provider_key_candidate(
+                    "openai", drafts["openai"]["key"]),
                 "openai_base_url": (drafts["openai"]["base"]
                     if drafts["openai"]["custom_endpoint"] and drafts["openai"]["base"]
                     else official_bases["openai"]),
                 "openai_audio_model": drafts["openai"]["audio_model"] or "whisper-1",
                 "openai_text_model": drafts["openai"]["text_model"] or "gpt-4o-mini",
-                "groq_api_key": drafts["groq"]["key"],
+                "groq_api_key": _provider_key_candidate(
+                    "groq", drafts["groq"]["key"]),
                 "groq_base_url": (drafts["groq"]["base"]
                     if drafts["groq"]["custom_endpoint"] and drafts["groq"]["base"]
                     else official_bases["groq"]),
@@ -5726,7 +5775,7 @@ class App(ctk.CTk):
         }
         provider_state = {
             provider: {
-                "status": "not_configured", "models": [], "error": "",
+                "status": "not_configured", "models": [], "error": "", "feedback": "",
                 "generation": 0,
             } for provider in provider_ids
         }
@@ -5939,7 +5988,7 @@ class App(ctk.CTk):
             state = provider_state[provider]
             state["generation"] += 1
             generation = state["generation"]
-            state.update(status="validating", error="")
+            state.update(status="validating", error="", feedback="")
             if view["page"] in ("providers", "provider_detail"):
                 show_page(view["page"], view["provider"])
 
@@ -5960,9 +6009,11 @@ class App(ctk.CTk):
                     if not win.winfo_exists() or generation != state["generation"]:
                         return
                     if error:
-                        state.update(status="not_configured", models=[], error=error)
+                        state.update(
+                            status="not_configured", models=[], error=error, feedback="")
                     else:
-                        state.update(status="active", models=models, error="")
+                        state.update(
+                            status="active", models=models, error="", feedback="")
                     ensure_valid_selection()
                     if on_done:
                         on_done(not error)
@@ -5995,9 +6046,9 @@ class App(ctk.CTk):
                 font=ctk.CTkFont(size=11), anchor="w").pack(fill="x", padx=2, pady=(0, 4))
             key_entry = ctk.CTkEntry(inner, height=32, corner_radius=10,
                 fg_color="#050505", text_color=TEXT, border_color=BORDER,
-                border_width=1, show="\u2022", font=ctk.CTkFont(size=12))
+                border_width=1, show="\u2022", font=ctk.CTkFont(size=12),
+                placeholder_text=self._t("api_key_placeholder"))
             key_entry.pack(fill="x", pady=(0, 10))
-            key_entry.insert(0, str(APP_CONFIG.get(f"{provider}_api_key", "")))
 
             saved_base = str(APP_CONFIG.get(f"{provider}_base_url", default_bases[provider]))
             custom = saved_base.rstrip("/").lower() != default_bases[provider].rstrip("/").lower()
@@ -6030,7 +6081,9 @@ class App(ctk.CTk):
             message = ctk.CTkLabel(inner, text="", text_color="#d17878",
                 font=ctk.CTkFont(size=10), anchor="w", justify="left", wraplength=430)
             message.pack(fill="x", padx=2, pady=(8, 4))
-            if provider_state[provider]["error"]:
+            if provider_state[provider]["feedback"]:
+                message.configure(text=provider_state[provider]["feedback"])
+            elif provider_state[provider]["error"]:
                 message.configure(text=self._t("validation_failed").format(
                     error=provider_state[provider]["error"]))
 
@@ -6058,7 +6111,7 @@ class App(ctk.CTk):
                 show_page("provider_detail", provider)
 
             def validate_and_save():
-                key = key_entry.get().strip()
+                key = _provider_key_candidate(provider, key_entry.get())
                 base = (base_entry.get().strip() if endpoint_switch.get()
                         else default_bases[provider])
                 if not key:
@@ -6073,15 +6126,12 @@ class App(ctk.CTk):
             validate_button.configure(command=validate_and_save)
 
             def deactivate():
-                APP_CONFIG[f"{provider}_api_key"] = ""
-                APP_CONFIG[f"{provider}_base_url"] = default_bases[provider]
-                provider_state[provider].update(
-                    status="not_configured", models=[], error="",
-                    generation=provider_state[provider]["generation"] + 1)
-                try:
-                    _save_app_config(self.repositories)
-                except OSError:
-                    pass
+                if not _deactivate_provider_for_ui(
+                        provider, default_bases[provider], provider_state[provider],
+                        self._t("credential_update_failed"), self.repositories):
+                    message.configure(
+                        text=provider_state[provider]["feedback"])
+                    return
                 ensure_valid_selection()
                 show_page("providers")
 
@@ -6218,7 +6268,7 @@ class App(ctk.CTk):
         }
         state = {
             provider: {"status": "not_configured", "models": [], "text_models": [],
-                       "error": "", "generation": 0}
+                       "error": "", "feedback": "", "generation": 0}
             for provider in provider_ids
         }
         selected = {
@@ -6789,8 +6839,10 @@ class App(ctk.CTk):
             if provider in detail_status_labels:
                 detail_status_labels[provider].configure(text=status, text_color=color)
                 error = state[provider]["error"]
+                feedback = state[provider]["feedback"]
                 detail_messages[provider].configure(
-                    text=(self._t("validation_failed").format(error=error) if error else ""))
+                    text=(feedback or (self._t("validation_failed").format(
+                        error=error) if error else "")))
                 validating = state[provider]["status"] == "validating"
                 validate_buttons[provider].configure(
                     state="disabled" if validating else "normal")
@@ -6803,7 +6855,7 @@ class App(ctk.CTk):
             provider_state = state[provider]
             provider_state["generation"] += 1
             generation = provider_state["generation"]
-            provider_state.update(status="validating", error="")
+            provider_state.update(status="validating", error="", feedback="")
             refresh_provider_ui(provider)
 
             def run():
@@ -6824,11 +6876,12 @@ class App(ctk.CTk):
                         return
                     if error:
                         provider_state.update(
-                            status="not_configured", models=[], text_models=[], error=error)
+                            status="not_configured", models=[], text_models=[],
+                            error=error, feedback="")
                     else:
                         provider_state.update(
                             status="active", models=models,
-                            text_models=text_models, error="")
+                            text_models=text_models, error="", feedback="")
                         if persist:
                             APP_CONFIG[f"{provider}_api_key"] = api_key
                             APP_CONFIG[f"{provider}_base_url"] = base_url
@@ -6871,9 +6924,9 @@ class App(ctk.CTk):
                 font=font_label, anchor="w").pack(fill="x", padx=2, pady=(0, 4))
             key_entry = ctk.CTkEntry(inner, height=32, corner_radius=10,
                 fg_color="#050505", text_color=TEXT, border_color=BORDER,
-                border_width=1, show="\u2022", font=font_body)
+                border_width=1, show="\u2022", font=font_body,
+                placeholder_text=self._t("api_key_placeholder"))
             key_entry.pack(fill="x", pady=(0, 10))
-            key_entry.insert(0, str(APP_CONFIG.get(f"{provider}_api_key", "")))
             saved_base = str(APP_CONFIG.get(f"{provider}_base_url", default_bases[provider]))
             allows_custom_endpoint = PROVIDER_REGISTRY.supports(
                 provider, ProviderCapability.CUSTOM_BASE_URL)
@@ -6922,7 +6975,8 @@ class App(ctk.CTk):
 
             def validate_from_page(provider_id=provider):
                 inputs = detail_inputs[provider_id]
-                key = inputs["key"].get().strip()
+                key = _provider_key_candidate(
+                    provider_id, inputs["key"].get())
                 base = (inputs["base"].get().strip() if inputs["switch"].get()
                         else default_bases[provider_id])
                 if not key:
@@ -6934,15 +6988,11 @@ class App(ctk.CTk):
             validate_button.configure(command=validate_from_page)
 
             def deactivate(provider_id=provider):
-                state[provider_id]["generation"] += 1
-                state[provider_id].update(
-                    status="not_configured", models=[], text_models=[], error="")
-                APP_CONFIG[f"{provider_id}_api_key"] = ""
-                APP_CONFIG[f"{provider_id}_base_url"] = default_bases[provider_id]
-                try:
-                    _save_app_config(self.repositories)
-                except OSError:
-                    pass
+                if not _deactivate_provider_for_ui(
+                        provider_id, default_bases[provider_id], state[provider_id],
+                        self._t("credential_update_failed"), self.repositories):
+                    refresh_provider_ui(provider_id)
+                    return
                 refresh_provider_ui(provider_id)
                 refresh_model_ui()
                 show_page("providers")

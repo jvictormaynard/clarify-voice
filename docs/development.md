@@ -57,7 +57,14 @@ both Windows locks before building or generating the SBOM.
 
 Environment variables are optional because provider settings can be entered in
 the UI. For local automation, copy `.env.example` to `.env` and fill only the
-values you need. Never commit `.env`.
+values you need. API-key environment variables override stored credentials for
+that process and are never persisted. Never commit `.env`.
+
+Windows uses current-user DPAPI for provider keys. Linux and macOS source runs
+use the explicit plaintext `~/.clarifyvoice/secrets.json` fallback because
+those platforms remain experimental; the file is written with owner-only
+permissions where supported. Tests inject an in-memory store or use temporary
+directories and never access the developer's credential store.
 
 ## Checks
 
@@ -65,19 +72,21 @@ Run the same core checks used in CI:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q app.py repositories.py desktop_state.py windows_hotkeys.py tests
+.\.venv\Scripts\python.exe -m compileall -q app.py repositories.py secret_store.py desktop_state.py windows_hotkeys.py windows_clipboard.py tests
 ```
 
 From Linux or WSL with the dependencies installed:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q app.py repositories.py desktop_state.py windows_hotkeys.py tests
+python3 -m compileall -q app.py repositories.py secret_store.py desktop_state.py windows_hotkeys.py windows_clipboard.py tests
 ```
 
 Repository-specific tests live in `tests/test_repositories.py` and are split
 into configuration, migration, and usage-statistics cases. They cover legacy
-file loading, future/unknown fields, idempotent migrations, and atomic writes.
+file loading, future/unknown fields, idempotent migrations, atomic writes, and
+rollback when a secret backend cannot be verified. The backend contract and
+corrupted-entry handling are covered in `tests/test_secret_store.py`.
 
 ## Build
 

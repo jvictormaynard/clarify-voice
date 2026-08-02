@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,29 @@ from repositories import (
     UnsupportedSchemaVersionError,
     migrate_config_payload,
 )
+from secret_store import (
+    MemorySecretStore,
+    SecretStore,
+    SecretStoreCorruptedError,
+    SecretStoreUnavailableError,
+)
+
+
+_TEST_HOME = tempfile.TemporaryDirectory(prefix="clarifyvoice-repository-tests-")
+os.environ["HOME"] = _TEST_HOME.name
+os.environ["APPDATA"] = _TEST_HOME.name
+
+
+class DeleteUnavailableStore(MemorySecretStore):
+    def delete(self, _provider):
+        raise SecretStoreUnavailableError(
+            "The credential store could not be updated")
+
+
+class DeleteReadbackStore(MemorySecretStore):
+    def delete(self, _provider):
+        # Simulate a backend that reports success without removing the entry.
+        return None
 
 
 class ConfigurationRepositoryTests(unittest.TestCase):
@@ -64,6 +88,203 @@ class ConfigurationRepositoryTests(unittest.TestCase):
         self.assertEqual(loaded.selection.transcription_provider, "asr-only")
         self.assertEqual(loaded.selection.refinement_provider, "openai")
         self.assertEqual(loaded.selection.refinement_model, "gpt-4o-mini")
+
+    def test_blank_provider_input_preserves_loaded_credential(self):
+        import app
+
+        original = app.APP_CONFIG.copy()
+        try:
+            app.APP_CONFIG["openai_api_key"] = "stored-test-credential"
+            self.assertEqual(
+                app._provider_key_candidate("openai", ""),
+                "stored-test-credential",
+            )
+            self.assertEqual(
+                app._provider_key_candidate(
+                    "openai", "replacement-test-credential"),
+                "replacement-test-credential",
+            )
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original)
+
+    def test_new_api_key_is_stored_outside_config_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            secrets = MemorySecretStore()
+            repository = LocalConfigRepository(path, secret_store=secrets)
+
+            repository.save({
+                "openai_api_key": "test-openai-credential",
+                "ui_language": "pt",
+            })
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertNotIn("openai_api_key", payload)
+            self.assertEqual(
+                secrets.get("openai"), "test-openai-credential")
+            self.assertEqual(
+                repository.load().openai.api_key, "test-openai-credential")
+
+    def test_submitted_environment_key_is_not_persisted_after_override_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            secrets = MemorySecretStore({
+                "openai": "stored-test-credential",
+            })
+            repository = LocalConfigRepository(
+                path,
+                environment={"OPENAI_API_KEY": "environment-test-credential"},
+                secret_store=secrets,
+            )
+
+            loaded = repository.load()
+            repository.save(loaded)
+            restarted = LocalConfigRepository(
+                path, environment={}, secret_store=secrets).load()
+
+            self.assertEqual(
+                loaded.openai.api_key, "environment-test-credential")
+            self.assertEqual(
+                secrets.get("openai"), "stored-test-credential")
+            self.assertEqual(
+                restarted.openai.api_key, "stored-test-credential")
+            self.assertNotIn(
+                "openai_api_key",
+                json.loads(path.read_text(encoding="utf-8")),
+            )
+
+    def test_explicit_key_different_from_environment_persists_for_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            secrets = MemorySecretStore({
+                "openai": "stored-test-credential",
+            })
+            repository = LocalConfigRepository(
+                path,
+                environment={"OPENAI_API_KEY": "environment-test-credential"},
+                secret_store=secrets,
+            )
+            submitted = repository.load().to_legacy_mapping()
+            submitted["openai_api_key"] = "explicit-test-credential"
+
+            repository.save(submitted)
+            while_environment_is_present = repository.load()
+            after_environment_removal = LocalConfigRepository(
+                path, environment={}, secret_store=secrets).load()
+
+            self.assertEqual(
+                secrets.get("openai"), "explicit-test-credential")
+            self.assertEqual(
+                while_environment_is_present.openai.api_key,
+                "environment-test-credential",
+            )
+            self.assertEqual(
+                after_environment_removal.openai.api_key,
+                "explicit-test-credential",
+            )
+            self.assertNotIn(
+                "openai_api_key",
+                json.loads(path.read_text(encoding="utf-8")),
+            )
+
+    def test_deactivate_rolls_back_on_delete_unavailable_or_failed_readback(self):
+        import app
+        from repositories import ApplicationRepositories
+
+        for store_type in (DeleteUnavailableStore, DeleteReadbackStore):
+            with self.subTest(store=store_type.__name__), \
+                    tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                secrets = store_type({"openai": "stored-test-credential"})
+                repository = LocalConfigRepository(
+                    path, environment={}, secret_store=secrets)
+                bundle = ApplicationRepositories(
+                    config=repository,
+                    usage_stats=LocalUsageStatsRepository(
+                        Path(directory) / "stats.json"),
+                )
+                original = app.APP_CONFIG.copy()
+                try:
+                    app._activate_repositories(bundle)
+                    before = app.APP_CONFIG.copy()
+
+                    provider_state = {
+                        "status": "active",
+                        "models": ["whisper-1"],
+                        "text_models": ["gpt-4o-mini"],
+                        "error": "",
+                        "feedback": "",
+                        "generation": 4,
+                    }
+                    before_state = provider_state.copy()
+                    feedback = "Could not update credentials. Try again."
+
+                    succeeded = app._deactivate_provider_for_ui(
+                        "openai", "https://api.openai.com/v1",
+                        provider_state, feedback, bundle)
+
+                    self.assertFalse(succeeded)
+                    self.assertEqual(app.APP_CONFIG, before)
+                    self.assertEqual(
+                        {key: value for key, value in provider_state.items()
+                         if key != "feedback"},
+                        {key: value for key, value in before_state.items()
+                         if key != "feedback"},
+                    )
+                    self.assertEqual(provider_state["feedback"], feedback)
+                    self.assertEqual(
+                        secrets.get("openai"), "stored-test-credential")
+                    self.assertEqual(
+                        LocalConfigRepository(
+                            path, environment={}, secret_store=secrets,
+                        ).load().openai.api_key,
+                        "stored-test-credential",
+                    )
+                finally:
+                    app.APP_CONFIG.clear()
+                    app.APP_CONFIG.update(original)
+
+    def test_failed_config_write_restores_previous_secret(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            secrets = MemorySecretStore({
+                "groq": "original-test-credential",
+            })
+            repository = LocalConfigRepository(path, secret_store=secrets)
+
+            with patch(
+                "repositories._atomic_write_json",
+                side_effect=OSError("simulated config write failure"),
+            ):
+                with self.assertRaises(OSError):
+                    repository.save({
+                        "groq_api_key": "replacement-test-credential",
+                    })
+
+            self.assertEqual(
+                secrets.get("groq"), "original-test-credential")
+            self.assertFalse(path.exists())
+
+    def test_blank_mapping_value_clears_secure_and_legacy_storage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "schema_version": CONFIG_SCHEMA_VERSION,
+                "openai_api_key": "legacy-test-credential",
+            }), encoding="utf-8")
+            secrets = MemorySecretStore({
+                "openai": "stored-test-credential",
+            })
+            repository = LocalConfigRepository(path, secret_store=secrets)
+
+            repository.save({"openai_api_key": ""})
+
+            self.assertIsNone(secrets.get("openai"))
+            self.assertNotIn(
+                "openai_api_key",
+                json.loads(path.read_text(encoding="utf-8")),
+            )
 
     def test_legacy_flat_config_loads_and_unknown_fields_are_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -311,6 +532,147 @@ class ConfigurationRepositoryTests(unittest.TestCase):
 
 
 class ConfigurationMigrationTests(unittest.TestCase):
+    def test_plaintext_keys_migrate_after_verified_readback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "gemini_api_key": "test-gemini-credential",
+                "openai_api_key": "test-openai-credential",
+                "groq_api_key": "test-groq-credential",
+                "ui_language": "de",
+            }), encoding="utf-8")
+            secrets = MemorySecretStore()
+            repository = LocalConfigRepository(path, secret_store=secrets)
+
+            loaded = repository.load()
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                loaded.gemini.api_key, "test-gemini-credential")
+            self.assertEqual(
+                loaded.openai.api_key, "test-openai-credential")
+            self.assertEqual(loaded.groq.api_key, "test-groq-credential")
+            self.assertFalse({
+                "gemini_api_key", "openai_api_key", "groq_api_key",
+            } & payload.keys())
+
+    def test_failed_migration_leaves_plaintext_recoverable(self):
+        class UnavailableStore(SecretStore):
+            def get(self, _provider):
+                raise SecretStoreUnavailableError(
+                    "The credential store is unavailable")
+
+            def set(self, _provider, _secret):
+                raise SecretStoreUnavailableError(
+                    "The credential store is unavailable")
+
+            def delete(self, _provider):
+                raise SecretStoreUnavailableError(
+                    "The credential store is unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            original = {
+                "openai_api_key": "recoverable-test-credential",
+                "ui_language": "es",
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            repository = LocalConfigRepository(
+                path, secret_store=UnavailableStore())
+
+            loaded = repository.load()
+
+            self.assertEqual(
+                loaded.openai.api_key, "recoverable-test-credential")
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")), original)
+
+            repository.save({"ui_language": "de"})
+            after_partial_save = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                after_partial_save["openai_api_key"],
+                "recoverable-test-credential",
+            )
+            self.assertEqual(after_partial_save["ui_language"], "de")
+            with self.assertRaises(SecretStoreUnavailableError):
+                repository.save({
+                    "openai_api_key": "replacement-test-credential",
+                })
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                after_partial_save,
+            )
+
+    def test_mismatched_readback_does_not_remove_legacy_key(self):
+        class MismatchedStore(MemorySecretStore):
+            def get(self, provider):
+                value = super().get(provider)
+                return f"{value}-mismatch" if value else None
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "groq_api_key": "recoverable-test-credential",
+            }), encoding="utf-8")
+            repository = LocalConfigRepository(
+                path, secret_store=MismatchedStore())
+
+            loaded = repository.load()
+
+            self.assertEqual(
+                loaded.groq.api_key, "recoverable-test-credential")
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["groq_api_key"],
+                "recoverable-test-credential",
+            )
+
+    def test_failed_cleanup_write_keeps_legacy_key_recoverable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            original = {
+                "openai_api_key": "recoverable-test-credential",
+                "ui_language": "pt",
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            secrets = MemorySecretStore()
+            repository = LocalConfigRepository(path, secret_store=secrets)
+
+            with patch(
+                "repositories._atomic_write_json",
+                side_effect=OSError("simulated cleanup failure"),
+            ):
+                loaded = repository.load()
+
+            self.assertEqual(
+                loaded.openai.api_key, "recoverable-test-credential")
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")), original)
+            self.assertEqual(
+                secrets.get("openai"), "recoverable-test-credential")
+
+    def test_corrupted_store_preserves_legacy_key(self):
+        class CorruptedStore(MemorySecretStore):
+            def get(self, _provider):
+                raise SecretStoreCorruptedError(
+                    "A credential-store entry is invalid")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "gemini_api_key": "recoverable-test-credential",
+            }), encoding="utf-8")
+            repository = LocalConfigRepository(
+                path, secret_store=CorruptedStore())
+
+            loaded = repository.load()
+
+            self.assertEqual(
+                loaded.gemini.api_key, "recoverable-test-credential")
+            self.assertIn(
+                "gemini_api_key",
+                json.loads(path.read_text(encoding="utf-8")),
+            )
+
     def test_legacy_migration_is_ordered_and_idempotent(self):
         legacy = {"ui_language": "de"}
         migrated = migrate_config_payload(legacy)

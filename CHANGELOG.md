@@ -27,6 +27,12 @@ Notable user-facing changes are documented here. This project follows
 - Snapshotted recording bytes before long provider uploads so cleanup no longer
   depends on a Requests read timeout or an in-flight provider file handle
 
+### Security
+
+- Moved Windows provider API keys out of `config.json` into a current-user
+  DPAPI-backed secret store with verified legacy migration and explicit
+  non-Windows source fallback behavior
+
 ## [0.1.2] - 2026-07-31
 
 ### Fixed

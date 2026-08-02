@@ -9,7 +9,7 @@
 ## Validation
 
 - [ ] `python -m unittest discover -s tests -v`
-- [ ] `python -m compileall -q app.py desktop_state.py windows_hotkeys.py tests`
+- [ ] `python -m compileall -q app.py repositories.py secret_store.py desktop_state.py windows_hotkeys.py windows_clipboard.py tests`
 - [ ] Built `ClarifyVoice.exe` when packaging or Windows integration changed
 - [ ] Tested the real Windows UI when visuals, focus, hotkeys, audio, or tray behavior changed
 - [ ] Added screenshots or a short recording for visual changes
