@@ -139,21 +139,46 @@ def _window_class_name(user32, hwnd) -> str | None:
     return buffer.value if length else None
 
 
-def _control_state(user32, hwnd):
+def _send_message_timeout(user32, hwnd, message, wparam, lparam, timeout_ms):
+    """Send a control query with the same bounded timeout as WM_PASTE."""
+    result = ctypes.c_size_t()
+    user32.SendMessageTimeoutW.argtypes = [
+        wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+        wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+    user32.SendMessageTimeoutW.restype = wintypes.BOOL
+    try:
+        delivered = user32.SendMessageTimeoutW(
+            hwnd, message, wparam, lparam,
+            SMTO_BLOCK | SMTO_ABORTIFHUNG, int(timeout_ms),
+            ctypes.byref(result))
+    except (AttributeError, OSError, TypeError):
+        return None
+    return result.value if delivered else None
+
+
+def _control_state(user32, hwnd, timeout_ms):
     """Read plain text and selection bounds from a standard text control."""
-    user32.SendMessageW.restype = wintypes.LPARAM
-    length = int(user32.SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0))
+    length_result = _send_message_timeout(
+        user32, hwnd, WM_GETTEXTLENGTH, 0, 0, timeout_ms)
+    if length_result is None:
+        return None
+    length = int(length_result)
     if length < 0 or length > _MAX_CONFIRMABLE_CONTROL_TEXT:
         return None
     buffer = ctypes.create_unicode_buffer(length + 1)
-    copied = int(user32.SendMessageW(hwnd, WM_GETTEXT, length + 1, buffer))
-    if copied < 0:
+    copied = _send_message_timeout(
+        user32, hwnd, WM_GETTEXT, length + 1,
+        ctypes.addressof(buffer), timeout_ms)
+    if copied is None or copied < 0:
         return None
 
     start = ctypes.c_int()
     end = ctypes.c_int()
-    user32.SendMessageW(
-        hwnd, EM_GETSEL, ctypes.byref(start), ctypes.byref(end))
+    selection_result = _send_message_timeout(
+        user32, hwnd, EM_GETSEL,
+        ctypes.addressof(start), ctypes.addressof(end), timeout_ms)
+    if selection_result is None:
+        return None
     if start.value < 0 or end.value < start.value or end.value > length:
         return None
     return buffer.value, start.value, end.value
@@ -200,26 +225,19 @@ def paste_focused_control(expected_text: str | None = None,
         class_name = _window_class_name(user32, focused) if focused else None
         if (expected_text is not None and focused is not None
                 and class_name in _CONFIRMABLE_PASTE_CLASSES):
-            before = _control_state(user32, focused)
+            before = _control_state(user32, focused, timeout_ms)
             if before is None:
                 return send_ctrl_key("v")
-            result = ctypes.c_size_t()
-            user32.SendMessageTimeoutW.argtypes = [
-                wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
-                wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
-            user32.SendMessageTimeoutW.restype = wintypes.BOOL
             try:
-                delivered = user32.SendMessageTimeoutW(
-                    focused, WM_PASTE, 0, 0,
-                    SMTO_BLOCK | SMTO_ABORTIFHUNG, int(timeout_ms),
-                    ctypes.byref(result))
+                delivered = _send_message_timeout(
+                    user32, focused, WM_PASTE, 0, 0, timeout_ms)
             except (AttributeError, OSError, TypeError):
                 # The message may have crossed the process boundary before
                 # the API reported an error; never inject a second paste.
                 return None
-            if delivered:
+            if delivered is not None:
                 try:
-                    after = _control_state(user32, focused)
+                    after = _control_state(user32, focused, timeout_ms)
                 except (AttributeError, OSError, TypeError):
                     return None
                 if _paste_result_matches(before, after, expected_text):

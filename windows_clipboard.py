@@ -125,26 +125,27 @@ class WindowsClipboardAdapter:
         supported = self._supported_formats()
         self._open()
         formats = []
-        restorable = True
+        saw_format = False
         try:
             format_id = 0
             while True:
                 format_id = int(user32.EnumClipboardFormats(format_id))
                 if not format_id:
                     break
+                saw_format = True
                 if format_id not in supported:
                     # We cannot safely recreate arbitrary clipboard objects.
-                    restorable = False
                     continue
                 data = self._read_global_memory(user32.GetClipboardData(format_id))
                 if data is not None:
                     formats.append(ClipboardFormat(format_id, data))
-                else:
-                    # A supported format that cannot be copied (for example,
-                    # an oversized DIB) makes the snapshot incomplete.
-                    restorable = False
         finally:
             user32.CloseClipboard()
+        # Auxiliary formats are intentionally ignored. A snapshot is still
+        # restorable whenever at least one supported format was captured;
+        # only an empty clipboard or a clipboard with no capturable supported
+        # formats needs special handling.
+        restorable = bool(formats) or not saw_format
         return ClipboardSnapshot(tuple(formats), self.sequence(), restorable)
 
     def text(self) -> str | None:
@@ -173,49 +174,14 @@ class WindowsClipboardAdapter:
             kernel32.GlobalUnlock(handle)
         return handle
 
-    def _restore_open_clipboard(self, snapshot: ClipboardSnapshot, user32) -> bool:
-        """Restore a snapshot while ``user32.OpenClipboard`` is held."""
-        if not snapshot.restorable:
-            return False
+    def _write_open_clipboard_text(self, text: str, user32) -> bool:
+        """Write text while ``user32.OpenClipboard`` is held."""
         user32.EmptyClipboard.restype = ctypes.c_int
         user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
         user32.SetClipboardData.restype = ctypes.c_void_p
-        entries = []
-        try:
-            for item in snapshot.formats:
-                entries.append([
-                    item.format_id, self._allocate_global_memory(item.data)])
-        except Exception:
-            for _format_id, handle in entries:
-                self._kernel32().GlobalFree(handle)
-            raise
-
-        try:
-            if not user32.EmptyClipboard():
-                raise OSError("could not clear clipboard")
-            for entry in entries:
-                format_id, handle = entry
-                if not user32.SetClipboardData(format_id, handle):
-                    raise OSError("could not restore clipboard format")
-                # Ownership transfers to the clipboard after success.
-                entry[1] = None
-            return True
-        finally:
-            for _format_id, handle in entries:
-                if handle is not None:
-                    self._kernel32().GlobalFree(handle)
-
-    def write_text(self, text: str) -> bool:
-        if not self.is_windows:
-            return False
         data = (str(text) + "\x00").encode("utf-16-le")
         handle = self._allocate_global_memory(data)
-        user32 = self._user32()
-        user32.EmptyClipboard.restype = ctypes.c_int
-        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
-        user32.SetClipboardData.restype = ctypes.c_void_p
         transferred = False
-        self._open()
         try:
             if not user32.EmptyClipboard():
                 raise OSError("could not clear clipboard")
@@ -224,9 +190,64 @@ class WindowsClipboardAdapter:
             transferred = True
             return True
         finally:
-            user32.CloseClipboard()
             if not transferred:
                 self._kernel32().GlobalFree(handle)
+
+    def _restore_open_clipboard(self, snapshot: ClipboardSnapshot, user32,
+            fallback_text: str | None = None) -> bool:
+        """Restore a snapshot while ``user32.OpenClipboard`` is held."""
+        if not snapshot.restorable:
+            return False
+        user32.EmptyClipboard.restype = ctypes.c_int
+        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        user32.SetClipboardData.restype = ctypes.c_void_p
+        entries = []
+        try:
+            # Prepare every allocation before clearing the generated result.
+            for item in snapshot.formats:
+                entries.append([
+                    item.format_id, self._allocate_global_memory(item.data)])
+        except Exception:
+            for _format_id, handle in entries:
+                self._kernel32().GlobalFree(handle)
+            raise
+
+        cleared = False
+        try:
+            if not user32.EmptyClipboard():
+                raise OSError("could not clear clipboard")
+            cleared = True
+            for entry in entries:
+                format_id, handle = entry
+                if not user32.SetClipboardData(format_id, handle):
+                    raise OSError("could not restore clipboard format")
+                # Ownership transfers to the clipboard after success.
+                entry[1] = None
+            return True
+        except Exception:
+            # A format can fail after EmptyClipboard. Re-publish the known
+            # owner text before releasing the clipboard lock, so a user write
+            # cannot race with a later best-effort repair.
+            if cleared and fallback_text is not None:
+                try:
+                    self._write_open_clipboard_text(fallback_text, user32)
+                except Exception:
+                    pass
+            raise
+        finally:
+            for _format_id, handle in entries:
+                if handle is not None:
+                    self._kernel32().GlobalFree(handle)
+
+    def write_text(self, text: str) -> bool:
+        if not self.is_windows:
+            return False
+        user32 = self._user32()
+        self._open()
+        try:
+            return self._write_open_clipboard_text(text, user32)
+        finally:
+            user32.CloseClipboard()
 
     def restore(self, snapshot: ClipboardSnapshot | None) -> bool:
         if (not self.is_windows or snapshot is None
@@ -264,6 +285,7 @@ class WindowsClipboardAdapter:
                     (ClipboardFormat(format_id, data),), 0).text
                 if current_text != expected_text:
                     return False
-            return self._restore_open_clipboard(snapshot, user32)
+            return self._restore_open_clipboard(
+                snapshot, user32, fallback_text=expected_text)
         finally:
             user32.CloseClipboard()

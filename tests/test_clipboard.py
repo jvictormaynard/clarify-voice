@@ -220,6 +220,14 @@ class ClipboardSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot.formats, ())
         self.assertFalse(snapshot.restorable)
 
+    def test_supported_format_survives_auxiliary_clipboard_format(self):
+        adapter = _EnumeratingAdapter(
+            [CF_DIB, 9001], {CF_DIB: b"dib-bytes"})
+        snapshot = adapter.snapshot()
+        self.assertEqual(
+            snapshot.formats, (ClipboardFormat(CF_DIB, b"dib-bytes"),))
+        self.assertTrue(snapshot.restorable)
+
     def test_oversized_supported_format_is_not_restorable(self):
         adapter = _EnumeratingAdapter([CF_DIB], {CF_DIB: None})
         snapshot = adapter.snapshot()
@@ -237,6 +245,18 @@ class ClipboardSnapshotTests(unittest.TestCase):
             adapter.restore(snapshot)
 
         self.assertEqual(adapter.user32.empty_calls, 0)
+
+    def test_set_data_failure_repairs_generated_text_before_close(self):
+        adapter = _RestoreAdapter(set_failure_at=1)
+        snapshot = ClipboardSnapshot(
+            (ClipboardFormat(CF_UNICODETEXT, b"old"),), 1)
+
+        with self.assertRaises(OSError):
+            adapter._restore_open_clipboard(
+                snapshot, adapter.user32, fallback_text="generated")
+
+        self.assertEqual(len(adapter.user32.set_calls), 2)
+        self.assertEqual(adapter.user32.empty_calls, 2)
 
 
 class _FakeFunction:
@@ -266,6 +286,7 @@ class _RestoreUser32:
         self.set_failure_at = set_failure_at
         self.empty_calls = 0
         self.set_calls = []
+        self.failure_triggered = False
         self.EmptyClipboard = _FakeFunction(self._empty)
         self.SetClipboardData = _FakeFunction(self._set)
         self.CloseClipboard = _FakeFunction(lambda: None)
@@ -276,7 +297,12 @@ class _RestoreUser32:
 
     def _set(self, format_id, handle):
         self.set_calls.append((format_id, handle))
-        return len(self.set_calls) != self.set_failure_at
+        if (self.set_failure_at is not None
+                and not self.failure_triggered
+                and len(self.set_calls) == self.set_failure_at):
+            self.failure_triggered = True
+            return False
+        return True
 
 
 class _RestoreAdapter(WindowsClipboardAdapter):
