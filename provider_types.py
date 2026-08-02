@@ -81,6 +81,8 @@ class TranscriptionRequest:
     instruction: str
     prompt: str
     temperature: float
+    # Optional in-memory snapshot used to decouple cleanup from long uploads.
+    audio_bytes: bytes | None = None
 
 
 @dataclass(frozen=True)

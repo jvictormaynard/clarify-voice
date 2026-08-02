@@ -135,7 +135,7 @@ on-disk keys remain unchanged.
 | --- | --- | --- |
 | Settings | `%APPDATA%\ClarifyVoice\config.json` | Provider keys, endpoints, models, and UI preferences |
 | Usage stats | `%APPDATA%\ClarifyVoice\usage_stats.json` | Counts, durations, model identifiers, and estimates; no transcript text |
-| Working audio | `%APPDATA%\ClarifyVoice\temp_recording.wav` | Temporary audio used during processing |
+| Working audio | `%APPDATA%\ClarifyVoice\clarifyvoice-recording-*.wav` | One unique session-owned file, deleted after the provider no longer needs it |
 
 On non-Windows source runs, the equivalent data directory is
 `~/.clarifyvoice`.
@@ -145,6 +145,37 @@ documented environment variables (`*_API_KEY`, `*_BASE_URL`, `*_MODEL`, and
 refinement variables), then built-in defaults. Environment variables therefore
 provide reliable first-run/headless defaults without overwriting a user's saved
 UI choices on later launches.
+
+Each recording reserves a unique temporary WAV owned by its
+`RecordingSession`. The provider reads it only during that session; cleanup
+then removes it on success, provider or encoding failure, cancellation, or
+application exit. SoX is stopped before cleanup, and Windows processes are
+attached to a Job Object so force-closing the app cannot orphan the recorder.
+Each session publishes exactly one immutable terminal state (`completed`,
+`failed`, or `cancelled`); cleanup errors and retry exhaustion are tracked
+separately and never rewrite that published outcome.
+Stale SoX discovery runs during recorder initialization, before a hotkey can
+start fresh capture. On Windows, where `SingleInstanceGuard` owns the data
+directory exclusively, the same recovery removes only the legacy
+`temp_recording.wav` and session-pattern WAVs there. Unix source runs skip
+orphan deletion because they do not have equivalent inter-process ownership;
+cleanup failures never block startup. Recorder cancellation is serialized
+through process and microphone-stream setup. If shutdown happens during an
+upload, the worker snapshots the WAV into memory before entering provider
+network I/O. Adapters upload that snapshot, so the filesystem handle is closed
+before a request whose read timeout might be extended indefinitely; bounded
+cleanup can therefore delete the WAV without waiting for the provider. The
+non-daemon shutdown watcher still performs bounded retries and joins workers
+for a finite initial/grace policy, retaining ownership and diagnostics when a
+provider has not yet released. Shutdown is not marked complete until deletion
+succeeds. A
+persistent cleanup failure remains observable and retains session ownership so
+the path cannot be overwritten by a later recording. UI ownership observers
+wait for the watcher's explicit terminal signal rather than the shorter
+two-second UI timeout; a late successful retry is released on Tk's event loop,
+while exhausted cleanup remains owned and visible. Escape cancellation
+likewise retains ownership until recorder shutdown completes, preventing
+immediate restart from reusing the recorder concurrently.
 
 ## Packaging
 

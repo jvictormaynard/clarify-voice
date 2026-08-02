@@ -5,6 +5,28 @@ Notable user-facing changes are documented here. This project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Gave each recording an explicit session owner with unique temporary audio,
+  bounded SoX shutdown, cancellation, stale-worker protection, and cleanup on
+  success, failure, cancellation, and application exit
+- Moved stale SoX discovery out of the first-audio hot path and coordinated
+  shutdown with active provider uploads before the final cleanup retry
+- Removed legacy and session-pattern WAVs left behind by an interrupted
+  startup on Windows, while keeping cleanup limited to the exclusively owned
+  app data directory
+- Kept failed-cleanup sessions owned until a bounded retry succeeds, preventing
+  a later recording from overwriting an unremoved temporary WAV
+- Kept UI ownership observers alive through the bounded cleanup policy so a
+  late successful retry releases the session, while exhausted cleanup remains
+  deterministically owned and observable
+- Made each recording's terminal outcome immutable; cleanup failures no longer
+  rewrite a published `completed` or `cancelled` state
+- Retained rapid stop requests issued before recorder startup publication and
+  bounded provider-worker shutdown joins without deleting an in-use WAV
+- Snapshotted recording bytes before long provider uploads so cleanup no longer
+  depends on a Requests read timeout or an in-flight provider file handle
+
 ## [0.1.2] - 2026-07-31
 
 ### Fixed
