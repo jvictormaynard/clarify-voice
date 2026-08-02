@@ -333,13 +333,98 @@ def _powershell_executable() -> str:
     return "powershell.exe" if platform.system() == "Windows" else "powershell"
 
 
+def _signtool_executable() -> str:
+    """Return the Windows SDK verifier used for independent timestamp checks."""
+
+    return "signtool.exe"
+
+
+_SIGNTOOL_TIMESTAMP_HEADER = re.compile(
+    r"(?im)^\s*Index\s+Algorithm\s+Timestamp\s*$")
+_SIGNTOOL_TIMESTAMP_ROW = re.compile(
+    r"(?im)^\s*(?P<index>\d+)\s+\S+\s+(?P<timestamp>\S+)\s*$")
+
+
+def _parse_signtool_timestamp_status(output: str) -> str:
+    """Parse the primary timestamp protocol from verbose SignTool output.
+
+    SignTool's verbose verification table labels RFC 3161 tokens explicitly.
+    Requiring the table header and a single primary (index zero) row avoids
+    treating a generic timestamp certificate or arbitrary diagnostic text as
+    proof of an RFC 3161 token.  Unknown output is intentionally invalid.
+    """
+
+    header = _SIGNTOOL_TIMESTAMP_HEADER.search(output)
+    if not header:
+        return "Invalid"
+    rows = [
+        match
+        for match in _SIGNTOOL_TIMESTAMP_ROW.finditer(output, header.end())
+        if int(match.group("index")) == 0
+    ]
+    if len(rows) != 1:
+        return "Invalid"
+    return (
+        "Valid"
+        if rows[0].group("timestamp").upper() == "RFC3161"
+        else "Invalid"
+    )
+
+
+def _verify_rfc3161_timestamp(
+        path: Path,
+        *,
+        runner: Callable[..., subprocess.CompletedProcess[str]],
+        signtool: str | None = None) -> None:
+    """Verify the timestamp token and TSA chain with Windows SignTool.
+
+    ``Get-AuthenticodeSignature`` exposes the timestamp certificate but does
+    not establish that the embedded token is RFC 3161 or that its TSA chain
+    validates independently.  SignTool performs that Windows trust check; its
+    explicit verbose protocol row is parsed separately and is required to be
+    RFC3161.  Any missing tool, non-zero result, or unfamiliar output fails
+    closed.
+    """
+
+    executable = signtool or _signtool_executable()
+    try:
+        result = runner(
+            [
+                executable,
+                "verify",
+                "/pa",
+                "/all",
+                "/tw",
+                "/v",
+                str(path.resolve()),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise SignatureError(
+            "RFC3161 timestamp verifier is unavailable") from error
+    output = "\n".join(
+        str(part or "") for part in (result.stdout, result.stderr))
+    if result.returncode:
+        detail = output.strip().splitlines()
+        suffix = f": {detail[-1][:240]}" if detail else ""
+        raise SignatureError(
+            "RFC3161 timestamp or TSA chain verification failed" + suffix)
+    if _parse_signtool_timestamp_status(output) != "Valid":
+        raise SignatureError(
+            "SignTool did not confirm a valid RFC3161 timestamp token")
+
+
 def verify_authenticode(
         path: Path,
         expected_common_name: str,
         *,
         require_timestamp: bool = True,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-        powershell: str | None = None) -> SignatureIdentity:
+        powershell: str | None = None,
+        signtool: str | None = None) -> SignatureIdentity:
     """Require a trusted signature, pinned publisher, and valid timestamp."""
 
     if not path.is_file():
@@ -352,9 +437,7 @@ def verify_authenticode(
         "$certificate=$signature.SignerCertificate;"
         "$timestampCertificate=$signature.TimeStamperCertificate;"
         "$timestampStatus=if(-not $timestampCertificate){'Missing'}"
-        "elseif(([string]$signature.Status -ne 'Valid') -or "
-        "[string]::IsNullOrWhiteSpace([string]$timestampCertificate.Thumbprint))"
-        "{'Invalid'}else{'Valid'};"
+        "else{'Present'};"
         "$result=[ordered]@{Status=[string]$signature.Status;"
         "StatusMessage=[string]$signature.StatusMessage;"
         "CommonName=if($certificate){$certificate.GetNameInfo("
@@ -402,13 +485,15 @@ def verify_authenticode(
     timestamp_thumbprint = str(
         payload.get("TimestampThumbprint", "")).replace(" ", "").upper()
     if require_timestamp:
-        if timestamp_status != "Valid":
+        if timestamp_status != "Present":
             raise SignatureError(
                 "RFC3161 timestamp is missing or invalid: " + timestamp_status)
         if not timestamp_common_name:
             raise SignatureError("RFC3161 timestamp signer is missing")
         if not re.fullmatch(r"[0-9A-F]{40,128}", timestamp_thumbprint):
             raise SignatureError("RFC3161 timestamp certificate is missing")
+        _verify_rfc3161_timestamp(
+            path, runner=runner, signtool=signtool)
     return SignatureIdentity(
         common_name=common_name,
         thumbprint=thumbprint,

@@ -89,7 +89,13 @@ MSI installation and cannot launch `msiexec` through this flow.
 5. Refuse an older version and treat the installed version as no update.
 6. Download the MSI atomically. Interruption, excess bytes, size mismatch, or
    checksum mismatch removes the `.part` file and leaves no runnable update.
-7. Require a valid Authenticode signature from the same pinned publisher.
+7. Require a valid Authenticode signature from the same pinned publisher. The
+   PowerShell inspection reports the primary signer and the timestamp signer,
+   thumbprint, and certificate presence; certificate presence alone is not
+   accepted as timestamp proof. The updater separately runs Windows SignTool
+   with `verify /pa /all /tw /v`, requires its primary timestamp row to say
+   `RFC3161`, and fails closed for a missing tool, legacy Authenticode
+   countersignature, an untrusted/invalid TSA chain, or unfamiliar output.
 8. Offer the verified version to the user. Nothing executes without an
    explicit confirmation.
 9. Recheck size, checksum, signature, and publisher immediately before calling
@@ -134,8 +140,8 @@ The tag release workflow must fail unless it can:
 3. sign and verify the EXE before embedding it in the MSI;
 4. sign and verify the MSI before hashing it into the manifest;
 5. sign and verify the manifest CAB;
-6. match every signer to `distribution/update-policy.json` and require an RFC
-   3161 timestamp;
+6. match every signer to `distribution/update-policy.json` and independently
+   verify an RFC 3161 token and trusted TSA chain with Windows SignTool;
 7. generate separate SHA-256 files without modifying signed bytes;
 8. create GitHub build-provenance attestations for EXE, MSI, CAB, and ZIP;
 9. publish portable and installer assets from that same workflow run.

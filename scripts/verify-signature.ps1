@@ -36,10 +36,47 @@ foreach ($candidate in $Path) {
     if ($commonName -cne $expectedPublisher) {
         throw "Publisher mismatch for ${resolved}: expected '$expectedPublisher', got '$commonName'."
     }
-    if (-not $signature.TimeStamperCertificate) {
-        throw "RFC3161 timestamp is missing for $resolved."
+
+    # Get-AuthenticodeSignature exposes a timestamp certificate, but that
+    # property alone does not distinguish RFC3161 from a legacy Authenticode
+    # countersignature or validate the TSA chain.  SignTool performs the
+    # independent Windows trust check and prints the timestamp protocol.
+    $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if (-not $signtool) {
+        throw "signtool.exe is required for independent RFC3161 verification."
     }
+    $signtoolOutput = @(& $signtool.Source verify /pa /all /tw /v $resolved 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "SignTool rejected the signature or TSA chain for $resolved."
+    }
+    $timestampProtocols = @()
+    $inTimestampTable = $false
+    foreach ($line in $signtoolOutput) {
+        $text = [string]$line
+        if ($text -match '^\s*Index\s+Algorithm\s+Timestamp\s*$') {
+            $inTimestampTable = $true
+            continue
+        }
+        if ($inTimestampTable -and
+            ($text -match '^\s*0\s+\S+\s+(?<protocol>\S+)\s*$')) {
+            $timestampProtocols += [string]$Matches.protocol
+        }
+    }
+    if ($timestampProtocols.Count -ne 1 -or
+        $timestampProtocols[0] -cne "RFC3161") {
+        throw "A valid RFC3161 timestamp token was not reported for $resolved."
+    }
+    $timestampCertificate = $signature.TimeStamperCertificate
+    if (-not $timestampCertificate) {
+        throw "RFC3161 timestamp signer certificate is missing for $resolved."
+    }
+    $timestampCommonName = $timestampCertificate.GetNameInfo(
+        [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+        $false)
     Write-Host "Verified $resolved"
     Write-Host "Publisher: $commonName"
     Write-Host "Thumbprint: $($signature.SignerCertificate.Thumbprint)"
+    Write-Host "Timestamp status: RFC3161"
+    Write-Host "Timestamp signer: $timestampCommonName"
+    Write-Host "Timestamp thumbprint: $($timestampCertificate.Thumbprint)"
 }

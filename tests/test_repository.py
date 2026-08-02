@@ -103,6 +103,22 @@ class RepositorySafetyTests(unittest.TestCase):
             r"uses:\s+azure/(?:login|artifact-signing-action)@v\d+",
         )
 
+    def test_signature_verification_requires_independent_rfc3161_check(self):
+        content = (ROOT / "scripts" / "verify-signature.ps1").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "Get-AuthenticodeSignature",
+            "signtool.exe",
+            "verify /pa /all /tw /v",
+            "Timestamp status: RFC3161",
+            "Timestamp signer:",
+            "Timestamp thumbprint:",
+            "legacy Authenticode",
+        ):
+            self.assertIn(required, content)
+        self.assertIn("$timestampProtocols.Count -ne 1", content)
+
     def test_ci_exercises_installer_lifecycle_without_signing_secrets(self):
         content = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"

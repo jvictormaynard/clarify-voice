@@ -141,20 +141,34 @@ class AtomicDownloadTests(unittest.TestCase):
 
 
 class SignatureValidationTests(unittest.TestCase):
-    def _verify(self, artifact, payload):
-        runner = Mock(return_value=SimpleNamespace(
+    _VALID_SIGNTOOL_OUTPUT = """
+Index  Algorithm  Timestamp
+========================================
+0      sha256     RFC3161
+"""
+
+    def _verify(self, artifact, payload, *, signtool_result=None):
+        powershell_result = SimpleNamespace(
             returncode=0,
             stdout=json.dumps(payload),
             stderr="",
-        ))
+        )
+        if signtool_result is None:
+            signtool_result = SimpleNamespace(
+                returncode=0,
+                stdout=self._VALID_SIGNTOOL_OUTPUT,
+                stderr="",
+            )
+        runner = Mock(side_effect=[powershell_result, signtool_result])
         identity = verify_authenticode(
             artifact,
             POLICY.publisher_common_name,
             require_timestamp=POLICY.require_rfc3161_timestamp,
             runner=runner,
             powershell="powershell.exe",
+            signtool="signtool.exe",
         )
-        powershell_script = runner.call_args.args[0][-1]
+        powershell_script = runner.call_args_list[0].args[0][-1]
         for field in (
             "TimeStamperCertificate",
             "TimestampStatus",
@@ -162,6 +176,19 @@ class SignatureValidationTests(unittest.TestCase):
             "TimestampThumbprint",
         ):
             self.assertIn(field, powershell_script)
+        signtool_command = runner.call_args_list[1].args[0]
+        self.assertEqual(
+            signtool_command,
+            [
+                "signtool.exe",
+                "verify",
+                "/pa",
+                "/all",
+                "/tw",
+                "/v",
+                str(artifact.resolve()),
+            ],
+        )
         return identity
 
     def _valid_payload(self, **overrides):
@@ -170,7 +197,9 @@ class SignatureValidationTests(unittest.TestCase):
             "StatusMessage": "Signature verified.",
             "CommonName": POLICY.publisher_common_name,
             "Thumbprint": "AB" * 20,
-            "TimestampStatus": "Valid",
+            # PowerShell reports only that a timestamp certificate is present.
+            # RFC3161 validity is established by the independent SignTool call.
+            "TimestampStatus": "Present",
             "TimestampCommonName": "Trusted RFC3161 TSA",
             "TimestampThumbprint": "CD" * 20,
         }
@@ -205,6 +234,52 @@ class SignatureValidationTests(unittest.TestCase):
                 self._verify(artifact, self._valid_payload(
                     TimestampStatus="Invalid",
                 ))
+
+    def test_rejects_legacy_authenticode_countersignature(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"signed-with-legacy-timestamp")
+            legacy = SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "Index  Algorithm  Timestamp\n"
+                    "========================================\n"
+                    "0      sha256     Authenticode\n"
+                ),
+                stderr="",
+            )
+            with self.assertRaises(SignatureError):
+                self._verify(artifact, self._valid_payload(),
+                             signtool_result=legacy)
+
+    def test_rejects_untrusted_or_invalid_timestamp_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"signed-with-untrusted-tsa")
+            invalid_tsa = SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "SignTool Error: A certificate chain processed, but "
+                    "terminated in an untrusted root."
+                ),
+            )
+            with self.assertRaises(SignatureError):
+                self._verify(artifact, self._valid_payload(),
+                             signtool_result=invalid_tsa)
+
+    def test_rejects_unparseable_sign_tool_timestamp_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"signed-with-ambiguous-timestamp")
+            malformed = SimpleNamespace(
+                returncode=0,
+                stdout="Successfully verified: artifact.msi",
+                stderr="",
+            )
+            with self.assertRaises(SignatureError):
+                self._verify(artifact, self._valid_payload(),
+                             signtool_result=malformed)
 
     def test_rejects_invalid_timestamp_certificate(self):
         with tempfile.TemporaryDirectory() as directory:
