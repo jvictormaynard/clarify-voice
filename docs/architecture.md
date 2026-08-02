@@ -88,10 +88,44 @@ Dictation, rewrite, translation, and model-picker workflows require no new
 provider-specific branch. A protocol that is not OpenAI-compatible should use a
 new adapter implementing the same typed operations, then be registered once.
 
+### `workflows.py`
+
+Defines the staged, UI-independent application-service boundary for dictation,
+rewrite, and translation. The service accepts explicit command dataclasses and
+publishes immutable workflow states. It owns overlap prevention and assigns a
+monotonic operation ID to every session; workers check that ID before provider
+results can change the clipboard, statistics, or current state.
+
+```text
+Tk command dispatcher                 Tk state renderer
+          |                                  ^
+          v                                  |
+   WorkflowService ---- immutable WorkflowState
+          |
+          +---- ProviderGateway (typed registry facade)
+          +---- AudioGateway
+          +---- ClipboardGateway
+          +---- WorkflowConfig
+          +---- StatisticsGateway
+          +---- Scheduler / Clock
+```
+
+The gateway protocols describe ownership boundaries; they do not reimplement
+provider routing, HTTP policy, recording lifecycle, clipboard transactions, or
+configuration persistence. `ProviderGateway` is the workflow-facing facade for
+the typed requests and results routed by `ProviderRegistry`; workflows never
+branch on provider IDs or call adapter HTTP directly. The remaining runtime
+adapters will be wired after their focused components land. Until then, `app.py`
+remains the active orchestration path and `workflows.py` is covered headlessly
+as integration scaffolding for issue #20. Keeping this stage disconnected
+avoids a temporary second implementation of the reliability work in issues #17
+through #19.
+
 ### `desktop_state.py`
 
-Contains the small `WorkflowController` that prevents rewrite and translation
-flows from overlapping.
+Contains the legacy `WorkflowController` used by the current Tk path to prevent
+rewrite and translation from overlapping. It remains until `app.py` dispatches
+the explicit commands from `workflows.py`.
 
 ### `provider_http.py`
 
@@ -140,6 +174,8 @@ launch. It does not own UI confirmation and never runs an installer by itself.
 
 The unit suite tests provider routing, URL construction, configuration,
 clipboard safety, workflow state, usage statistics, and geometry calculations.
+`tests/test_workflows.py` is deliberately separate from the provider suite and
+runs the core application services without importing or constructing Tk.
 Windows UI acceptance still requires a real installed build because mocked
 tests cannot reveal transparency, focus, DPI, or hotkey integration defects.
 
