@@ -218,6 +218,11 @@ The current application is Python. The Electron prototype is kept only for
 historical context and is excluded from builds. See
 [Architecture](docs/architecture.md) before making structural changes.
 
+Optional local-transcription groundwork is being developed separately from the
+current product runtime. It does not add a user-facing provider or bundle a
+model. Maintainers can review the checksummed sidecar design, privacy trade-offs,
+and pending Windows acceptance work in [Local ASR](docs/local-asr.md).
+
 ## Contributing
 
 Bug reports, documentation improvements, translations, provider integrations,

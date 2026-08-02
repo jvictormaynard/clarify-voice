@@ -32,6 +32,27 @@ The upstream Windows README names the codec and runtime projects used in that
 distribution and is preserved at `extra/sox-14.4.2/README.win32.txt` and inside
 the portable package.
 
+## Optional local-ASR assets (not bundled)
+
+The local-ASR groundwork can explicitly download the following assets through
+the maintainer harness. They are not imported, downloaded, installed, or
+included in the default ClarifyVoice runtime or release artifact.
+
+| Component | Purpose | Version/model | License |
+| --- | --- | --- | --- |
+| [whisper.cpp](https://github.com/ggml-org/whisper.cpp/tree/v1.9.1) | CPU-only local transcription sidecar | v1.9.1 Windows x64 | MIT, copyright the ggml authors |
+| [Whisper ggml small model](https://huggingface.co/ggerganov/whisper.cpp/blob/80da2d8bfee42b0e836fc3a9890373e5defc00a6/ggml-small.bin) | Multilingual local ASR weights converted for whisper.cpp | `ggml-small` | MIT per the upstream model card; derived from [OpenAI Whisper](https://github.com/openai/whisper) |
+
+Exact URLs, sizes, SHA-256 digests, and extracted runtime file hashes are in
+`local_asr_manifest.json`. These permissive licenses do not require a
+corresponding-source offer. Their copyright and license notices must remain in
+distributed ClarifyVoice documentation if the optional installer becomes a
+user-facing feature. The complete notices are preserved in
+`licenses/whisper.cpp-MIT.txt` and `licenses/openai-whisper-MIT.txt`; the
+maintainer harness copies them beside an isolated installation. The upstream
+warning not to run the example HTTP server with administrative privileges
+applies; ClarifyVoice binds it only to loopback.
+
 ## Provider marks
 
 The OpenAI, Gemini, and Groq marks under `assets/providers/` identify compatible

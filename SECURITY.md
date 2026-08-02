@@ -51,6 +51,11 @@ be coordinated after impact and remediation are understood.
   configure endpoints you trust.
 - The app intentionally does not bundle `.env`; a build that contains one must
   not be distributed.
+- The local-ASR groundwork is not integrated into the product yet. Its optional
+  assets must match the committed SHA-256 manifest before extraction or
+  execution. The sidecar binds only to loopback behind a random request path,
+  runs without elevated privileges, and is not a sandbox against another
+  malicious process running as the same Windows user.
 
 Accidental key exposure should be handled by revoking the key at the provider,
 creating a replacement, removing it from local files or logs, and checking the

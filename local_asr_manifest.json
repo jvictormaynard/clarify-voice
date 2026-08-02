@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "provider": "local_asr",
+  "engine": {
+    "name": "whisper.cpp",
+    "version": "v1.9.1",
+    "source_url": "https://github.com/ggml-org/whisper.cpp/tree/v1.9.1",
+    "license": "MIT"
+  },
+  "recommended_model": {
+    "id": "ggml-small",
+    "display_name": "Whisper small (multilingual)",
+    "source_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/80da2d8bfee42b0e836fc3a9890373e5defc00a6/ggml-small.bin",
+    "license": "MIT"
+  },
+  "requirements": {
+    "platform": "Windows 10 or newer, x64",
+    "compute": "CPU-only; x86-64 CPU with AVX support, 4 logical cores recommended",
+    "runtime": "Microsoft Visual C++ 2015-2022 Redistributable (x64)",
+    "memory_bytes": 852000000,
+    "disk_bytes": 510000000,
+    "download_bytes": 495584068
+  },
+  "license_files": [
+    "licenses/whisper.cpp-MIT.txt",
+    "licenses/openai-whisper-MIT.txt"
+  ],
+  "assets": {
+    "runtime": {
+      "filename": "whisper-bin-x64-v1.9.1.zip",
+      "url": "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip",
+      "size": 7982101,
+      "sha256": "7d8be46ecd31828e1eb7a2ecdd0d6b314feafd82163038ab6092594b0a063539",
+      "license": "MIT",
+      "source_url": "https://github.com/ggml-org/whisper.cpp/releases/tag/v1.9.1",
+      "archive": "zip"
+    },
+    "model": {
+      "filename": "ggml-small.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/80da2d8bfee42b0e836fc3a9890373e5defc00a6/ggml-small.bin?download=true",
+      "size": 487601967,
+      "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+      "license": "MIT",
+      "source_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/80da2d8bfee42b0e836fc3a9890373e5defc00a6/ggml-small.bin"
+    }
+  },
+  "extracted_files": [
+    {
+      "archive_path": "Release/whisper-server.exe",
+      "path": "runtime/whisper-server.exe",
+      "size": 725504,
+      "sha256": "2c1ef08694756eda280e79b8217da63ee2af33c87ac3d5f27d68f9f3f966fd32"
+    },
+    {
+      "archive_path": "Release/whisper.dll",
+      "path": "runtime/whisper.dll",
+      "size": 1366016,
+      "sha256": "b31690c12461517fe9774e61318ab63a69972b948151feed98b913be35f708b6"
+    },
+    {
+      "archive_path": "Release/ggml.dll",
+      "path": "runtime/ggml.dll",
+      "size": 67584,
+      "sha256": "db753141098018ab482796052a61e727ee0106cbc280f28397f6a111b5e667d7"
+    },
+    {
+      "archive_path": "Release/ggml-base.dll",
+      "path": "runtime/ggml-base.dll",
+      "size": 656384,
+      "sha256": "8be6f3e06388b3a9aac75d29bec86363e2e2f5b0cee86ce6438866bcac0bcf86"
+    },
+    {
+      "archive_path": "Release/ggml-cpu-alderlake.dll",
+      "path": "runtime/ggml-cpu-alderlake.dll",
+      "size": 790528,
+      "sha256": "323408503da53ccc67248b26d711f16d73d2d6239f7703a00a6a18b60ed5b8b8"
+    },
+    {
+      "archive_path": "Release/ggml-cpu-cannonlake.dll",
+      "path": "runtime/ggml-cpu-cannonlake.dll",
+      "size": 833536,
+      "sha256": "0f659d98b823bb871c7845787bba7485facd220099cf58aa773652b9b842ab2e"
+    },
+    {
+      "archive_path": "Release/ggml-cpu-cascadelake.dll",
+      "path": "runtime/ggml-cpu-cascadelake.dll",
+      "size": 830976,
+      "sha256": "8116b0e516134139de29400c536ecf06fe708ce1a078a96d30b562b30d524fbe"
+    },
+    {
+      "archive_path": "Release/ggml-cpu-haswell.dll",
+      "path": "runtime/ggml-cpu-haswell.dll",
+      "size": 791552,
+      "sha256": "e5925923a47672392f9e9c8c92e4b9b65ea473948bf4f568a0300a3a42485135"
+    },
+    {
+      "archive_path": "Release/ggml-cpu-icelake.dll",
+      "path": "runtime/ggml-cpu-icelake.dll",
+      "size": 830976,
+      "sha256": "b726d528bee0c811c6b2ad8775357379d651cabb487bbf800331697fe73da187"
+    },
+    {
+      "archive_path": "Release/ggml-cpu-sandybridge.dll",
+      "path": "runtime/ggml-cpu-sandybridge.dll",
+      "size": 783360,
+      "sha256": "1c49c64817233b2447ca305b41c66afa4bed31b058bc190a98af2a30cc703542"
+    },
+    {
+      "archive_path": "Release/ggml-cpu-skylakex.dll",
+      "path": "runtime/ggml-cpu-skylakex.dll",
+      "size": 833536,
+      "sha256": "06082dc62a09a82fbba4aab49b2c049b96db84c5fc561a446a8ddbfb9b20bf86"
+    },
+    {
+      "archive_path": "Release/ggml-cpu-sse42.dll",
+      "path": "runtime/ggml-cpu-sse42.dll",
+      "size": 772096,
+      "sha256": "9a8f55ff1dfad231aa6250ac52c330c5bfa5c4c37691c8b591a68b52090ce40c"
+    },
+    {
+      "archive_path": "Release/ggml-cpu-x64.dll",
+      "path": "runtime/ggml-cpu-x64.dll",
+      "size": 776704,
+      "sha256": "45ff644d301b8a1fffc7c5e3864205047360eb197814c7311f366d106bb5b19f"
+    }
+  ]
+}

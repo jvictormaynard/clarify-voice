@@ -112,6 +112,19 @@ Provides the Windows-only clipboard adapter. It snapshots and restores the
 supported global-memory formats (text, HTML, RTF, and DIB images) without
 attempting to read arbitrary clipboard formats.
 
+### `local_asr.py` (typed groundwork, not user-facing)
+
+Defines an isolated installer and lifecycle manager for a separately downloaded,
+checksummed `whisper.cpp` Windows sidecar and model. `LocalASRProviderAdapter`
+implements the typed provider-registry contract over the narrow
+`LocalTranscriptionBackend` lifecycle seam. It is not registered in the default
+registry because product installation/progress and final wiring are still
+pending #22. It consumes the #18 `TranscriptionRequest.audio_bytes` snapshot;
+`RecordingSession` remains the sole owner of the temporary WAV, while the local
+adapter owns only inference cancellation and sidecar shutdown. The current
+application therefore does not import this module, start the sidecar, or
+download assets.
+
 ### `update_security.py`
 
 Owns the manual update trust boundary. A Windows-trusted, publisher-pinned CAB
