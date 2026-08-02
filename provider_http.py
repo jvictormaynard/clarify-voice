@@ -304,6 +304,18 @@ def _response_error_code(response: requests.Response) -> str:
     return str(error.get("code") or error.get("type") or "")[:200].casefold()
 
 
+def _is_permanent_quota(classification: str) -> bool:
+    if "insufficient_quota" in classification:
+        return True
+    return bool(re.search(
+        r"(?:\b(?:billing|credit)[\s_-]+(?:hard[\s_-]+limit|"
+        r"limit[\s_-]+reached|exhausted)\b|"
+        r"\b(?:hard[\s_-]+limit|limit[\s_-]+reached)[\s_-]+"
+        r"(?:billing|credit)\b)",
+        classification,
+    ))
+
+
 def _http_error(response: requests.Response, provider: str,
                 operation: str, operation_id: str) -> ProviderError:
     status = int(response.status_code)
@@ -322,8 +334,7 @@ def _http_error(response: requests.Response, provider: str,
     if status in (401, 403):
         return AuthenticationError(**details)
     if status == 429:
-        if any(marker in classification for marker in (
-                "quota", "billing", "insufficient_quota", "resource_exhausted")):
+        if _is_permanent_quota(classification):
             return QuotaError(**details)
         return RateLimitError(**details)
     if status in (408,):

@@ -152,6 +152,75 @@ class ProviderHttpPolicyTests(unittest.TestCase):
 
         self.assertEqual(session.get.call_count, 1)
 
+    def test_transient_resource_exhausted_429_is_retried_for_safe_operations(self):
+        for operation in ("validation", "model_discovery"):
+            with self.subTest(operation=operation):
+                sleeps = []
+                first = FakeResponse(
+                    429, {"error": {"status": "RESOURCE_EXHAUSTED"}},
+                    headers={"Retry-After": "2"})
+                client, session = self.make_client(
+                    get=[first, FakeResponse(200)], sleeper=sleeps.append)
+
+                response = client.request(
+                    "GET", "https://api.example/models", provider="gemini",
+                    operation=operation)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(session.get.call_count, 2)
+                self.assertEqual(sleeps, [2.0])
+                self.assertTrue(first.closed)
+
+    def test_resource_exhausted_429_is_not_retried_for_unsafe_post(self):
+        first = FakeResponse(
+            429, {"error": {"status": "RESOURCE_EXHAUSTED"}})
+        client, session = self.make_client(
+            post=[first, FakeResponse(200)])
+
+        with self.assertRaises(RateLimitError):
+            client.request(
+                "POST", "https://api.example/generate", provider="gemini",
+                operation="text_generation")
+
+        self.assertEqual(session.post.call_count, 1)
+        self.assertTrue(first.closed)
+
+    def test_generic_quota_text_is_rate_limit_not_permanent_quota(self):
+        first = FakeResponse(
+            429, {"error": {"message": "quota temporarily exceeded; retry later"}})
+        client, session = self.make_client(
+            get=[first, FakeResponse(200)], sleeper=lambda _delay: None)
+
+        response = client.request(
+            "GET", "https://api.example/models", provider="gemini",
+            operation="validation")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(session.get.call_count, 2)
+
+    def test_billing_or_credit_hard_limit_is_permanent_quota(self):
+        cases = (
+            (
+                {"error": {"message": "billing hard limit reached"}},
+                "billing hard limit reached",
+            ),
+            (
+                {"error": {"message": "credit hard limit reached"}},
+                "credit hard limit reached",
+            ),
+        )
+        for payload, text in cases:
+            with self.subTest(payload=payload):
+                client, session = self.make_client(
+                    get=[FakeResponse(429, payload, text=text), FakeResponse(200)])
+
+                with self.assertRaises(QuotaError):
+                    client.request(
+                        "GET", "https://api.example/models", provider="openai",
+                        operation="validation")
+
+                self.assertEqual(session.get.call_count, 1)
+
     def test_unsafe_post_is_never_retried_for_transient_http_failure(self):
         client, session = self.make_client(
             post=[FakeResponse(503), FakeResponse(200)])
