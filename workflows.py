@@ -391,6 +391,12 @@ class WorkflowService:
             self._clock.sleep(0.01)
         return not self._clipboard.alt_pressed()
 
+    def _target_is_current(self, session: _Session) -> bool:
+        return (
+            session.target is not None
+            and self._clipboard.is_target_current(session.target)
+        )
+
     # Dictation
 
     def _start_dictation(self, command: StartDictation) -> bool:
@@ -580,15 +586,35 @@ class WorkflowService:
             with self._lock:
                 if not self._is_current_locked(session.operation_id):
                     return
-                if session.target is None:
+                target = session.target
+                if (
+                    target is None
+                    or not self._clipboard.is_target_current(target)
+                ):
+                    self._transition(
+                        session,
+                        WorkflowPhase.FAILED,
+                        status_key="no_selection",
+                    )
                     return
-                capture = self._clipboard.capture_selection(session.target)
+                capture = self._clipboard.capture_selection(target)
             if capture is None or not capture.text.strip():
                 self._restore_selection_if_current(session, capture)
                 self._transition(
                     session, WorkflowPhase.FAILED, status_key="no_selection"
                 )
                 return
+            with self._lock:
+                if not self._is_current_locked(session.operation_id):
+                    return
+                if not self._target_is_current(session):
+                    self._restore_selection_if_current(session, capture)
+                    self._transition(
+                        session,
+                        WorkflowPhase.FAILED,
+                        status_key="no_selection",
+                    )
+                    return
             rewritten = self._provider.rewrite(capture.text)
             if not self._is_current(session.operation_id):
                 return
@@ -603,6 +629,7 @@ class WorkflowService:
                 capture,
                 rewritten,
                 copied_status="rewrite_copied",
+                require_current_target=True,
                 statistic=lambda provider, model: self._statistics.record_rewrite(
                     provider, model, capture.text, rewritten
                 ),
@@ -743,22 +770,39 @@ class WorkflowService:
         result: str,
         *,
         copied_status: str,
+        require_current_target: bool = False,
         statistic: Callable[[str, str], None],
     ) -> None:
+        focus_changed = False
         with self._lock:
             if not self._is_current_locked(session.operation_id):
                 return
-            disposition = self._clipboard.apply_result(capture, result)
-            status_key = (
-                None
-                if disposition is SelectionDisposition.PASTED
-                else copied_status
+            if (
+                require_current_target
+                and not self._target_is_current(session)
+            ):
+                focus_changed = True
+                try:
+                    self._clipboard.restore(capture)
+                except Exception:
+                    pass
+            else:
+                disposition = self._clipboard.apply_result(capture, result)
+                status_key = (
+                    None
+                    if disposition is SelectionDisposition.PASTED
+                    else copied_status
+                )
+                provider, model = self._config.refinement_identity()
+                try:
+                    statistic(provider, model)
+                except OSError:
+                    pass
+        if focus_changed:
+            self._transition(
+                session, WorkflowPhase.FAILED, status_key="no_selection"
             )
-            provider, model = self._config.refinement_identity()
-            try:
-                statistic(provider, model)
-            except OSError:
-                pass
+            return
         self._transition(
             session,
             WorkflowPhase.COMPLETED,

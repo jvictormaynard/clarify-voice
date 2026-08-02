@@ -128,6 +128,7 @@ class FakeClipboard:
         self.auto_pastes = []
         self.activations = []
         self.restores = []
+        self.captures = []
 
     def capture_target(self):
         if self.window is None:
@@ -138,6 +139,7 @@ class FakeClipboard:
         return target.window == self.window
 
     def capture_selection(self, target):
+        self.captures.append(target)
         if not self.selected:
             return None
         return SelectionCapture(target, self.selected, self.text)
@@ -237,7 +239,7 @@ class WorkflowServiceTests(unittest.TestCase):
             [WorkflowPhase.REWRITING, WorkflowPhase.COMPLETED],
         )
 
-    def test_rewrite_focus_change_keeps_result_in_clipboard(self):
+    def test_rewrite_focus_change_during_provider_rejects_output(self):
         original_rewrite = self.provider.rewrite
 
         def change_focus(text):
@@ -249,9 +251,55 @@ class WorkflowServiceTests(unittest.TestCase):
 
         self.service.dispatch(StartRewrite())
 
-        self.assertEqual(self.service.state.status_key, "rewrite_copied")
-        self.assertEqual(self.clipboard.writes, ["Rewritten"])
-        self.assertEqual(len(self.clipboard.applied), 1)
+        self.assertEqual(self.service.state.phase, WorkflowPhase.FAILED)
+        self.assertEqual(self.service.state.status_key, "no_selection")
+        self.assertEqual(self.clipboard.writes, [])
+        self.assertEqual(self.clipboard.applied, [])
+        self.assertEqual(self.clipboard.restores, ["previous"])
+        self.assertEqual(self.statistics.rewrites, [])
+
+    def test_rewrite_focus_change_during_alt_wait_skips_capture_and_provider(self):
+        alt_checks = 0
+
+        def release_alt_after_focus_change():
+            nonlocal alt_checks
+            alt_checks += 1
+            if alt_checks == 1:
+                return True
+            self.clipboard.window = 88
+            return False
+
+        self.clipboard.alt_pressed = release_alt_after_focus_change
+
+        self.service.dispatch(StartRewrite())
+
+        self.assertEqual(self.service.state.phase, WorkflowPhase.FAILED)
+        self.assertEqual(self.service.state.status_key, "no_selection")
+        self.assertFalse(hasattr(self.provider, "rewrite_request"))
+        self.assertEqual(self.clipboard.captures, [])
+        self.assertEqual(self.clipboard.applied, [])
+        self.assertEqual(self.clipboard.restores, [])
+        self.assertEqual(self.statistics.rewrites, [])
+
+    def test_rewrite_focus_change_during_capture_restores_before_provider(self):
+        capture_selection = self.clipboard.capture_selection
+
+        def capture_then_change_focus(target):
+            capture = capture_selection(target)
+            self.clipboard.window = 88
+            return capture
+
+        self.clipboard.capture_selection = capture_then_change_focus
+
+        self.service.dispatch(StartRewrite())
+
+        self.assertEqual(self.service.state.phase, WorkflowPhase.FAILED)
+        self.assertEqual(self.service.state.status_key, "no_selection")
+        self.assertFalse(hasattr(self.provider, "rewrite_request"))
+        self.assertEqual(len(self.clipboard.captures), 1)
+        self.assertEqual(self.clipboard.applied, [])
+        self.assertEqual(self.clipboard.restores, ["previous"])
+        self.assertEqual(self.statistics.rewrites, [])
 
     def test_rewrite_provider_failure_restores_capture_without_statistics(self):
         self.provider.rewritten = ""
