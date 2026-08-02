@@ -1548,6 +1548,81 @@ class RewriteWorkflowTests(unittest.TestCase):
         self.assertTrue(session.provider_cancel_token.cancelled)
         self.assertEqual(session.state, "cancelled")
 
+    def test_escape_signals_cancel_before_blocked_cleanup_and_late_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "recording.wav"
+            audio_path.write_bytes(b"0" * 1001)
+            states = []
+            provider_entered = threading.Event()
+            allow_provider_return = threading.Event()
+            cleanup_entered = threading.Event()
+            release_cleanup = threading.Event()
+            recorder = SimpleNamespace(stop=Mock(), cancel=Mock())
+
+            def blocked_cancel():
+                cleanup_entered.set()
+                release_cleanup.wait(1)
+
+            recorder.cancel.side_effect = blocked_cancel
+            session = app.RecordingSession(
+                recorder=recorder, audio_path=audio_path)
+            session.state = "recording"
+            session.start_finished.set()
+            harness = SimpleNamespace(
+                app_state="recording",
+                _rec_start=time.time(),
+                _recording_session=session,
+                _recording_usage={},
+                recorder=recorder,
+                mode="transcribe",
+                lang="en",
+                _closing=False,
+                _on_result=Mock(),
+                after=lambda _delay, callback: callback(),
+            )
+            harness._session_is_current = lambda candidate: (
+                harness._recording_session is candidate and not harness._closing)
+
+            def set_state(state, *_args):
+                harness.app_state = state
+                states.append(state)
+
+            harness._set_state = set_state
+
+            def provider_returns_late(*_args, **_kwargs):
+                provider_entered.set()
+                allow_provider_return.wait(1)
+                return "late result"
+
+            with patch("app.call_transcription_provider",
+                       side_effect=provider_returns_late):
+                app.App._stop_recording(harness)
+                self.assertTrue(provider_entered.wait(1))
+
+                # Escape must publish both cancellation signals before the
+                # background recorder cleanup is allowed to block.
+                app.App._cancel(harness)
+                self.assertEqual(harness.app_state, "ready")
+                self.assertTrue(session.cancel_event.is_set())
+                self.assertTrue(session.provider_cancel_token.cancelled)
+                self.assertTrue(cleanup_entered.wait(1))
+
+                # Let the provider complete while recorder.cancel is still
+                # blocked. The worker must not finalize or publish this text.
+                allow_provider_return.set()
+                deadline = time.time() + 1
+                while session._active_workers() and time.time() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(session._active_workers())
+                self.assertEqual(session.state, "cancelled")
+                self.assertNotIn("completed", session.state_history)
+                harness._on_result.assert_not_called()
+
+                release_cleanup.set()
+                self.assertTrue(session.wait_for_shutdown(1))
+
+        self.assertEqual(states, ["processing", "ready"])
+
     def test_subsecond_stop_waits_for_recorder_startup(self):
         with tempfile.TemporaryDirectory() as directory:
             audio_path = Path(directory) / "recording.wav"

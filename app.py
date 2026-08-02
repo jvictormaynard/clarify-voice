@@ -2777,22 +2777,27 @@ class RecordingSession:
             raise RecordingCancelledError("Recording cancelled")
         self.recorder.stop()
 
-    def cancel(self):
+    def request_cancel(self):
+        """Publish cancellation without touching the potentially blocking recorder."""
         with self._lock:
             if self.terminal and self.shutdown_complete.is_set():
                 return False
             self.cancel_event.set()
             self.provider_cancel_token.cancel()
+            if not self.terminal:
+                self._set_state_locked("cancelled")
+            return True
+
+    def cancel(self):
+        if not self.request_cancel():
+            return False
         recorder_error = None
         try:
             self.recorder.cancel()
         except Exception as error:
             recorder_error = error
         with self._lock:
-            if not self.terminal:
-                self.error = recorder_error
-                self._set_state_locked("failed" if self.error else "cancelled")
-            elif recorder_error is not None and self.error is None:
+            if recorder_error is not None and self.error is None:
                 self.error = recorder_error
         if self._active_workers_except_current():
             self._ensure_shutdown_watcher()
@@ -2809,6 +2814,12 @@ class RecordingSession:
             raise RecordingError(f"Invalid terminal state {outcome}")
         with self._lock:
             already_terminal = self.terminal
+            if outcome == "completed" and self.state != "completed":
+                # A synchronous request_cancel() may race a provider response
+                # while recorder cleanup is blocked. Never claim completion or
+                # let that worker publish a result after Escape.
+                if self.cancel_event.is_set() or self.state == "cancelled":
+                    return False
             if already_terminal and self._cleanup_done.is_set():
                 return False
             if not already_terminal:
@@ -4746,6 +4757,8 @@ class App(ctk.CTk):
             self._set_state("ready")
             session = getattr(self, "_recording_session", None)
             if session is not None:
+                session.request_cancel()
+
                 def cancel_session():
                     session.cancel()
                     observer = getattr(
@@ -5486,7 +5499,8 @@ class App(ctk.CTk):
                         getattr(self, "repositories", None))
                 except OSError:
                     pass
-                session.finalize("completed")
+                if not session.finalize("completed"):
+                    return
                 if is_current(session):
                     finisher = getattr(self, "_finish_recording_session", None)
                     if finisher is not None:
