@@ -117,7 +117,7 @@ def _windows_working_set(pid: int | None) -> int | None:
         if not psapi.GetProcessMemoryInfo(
                 process, ctypes.byref(counters), counters.cb):
             return None
-        return int(counters.WorkingSetSize)
+        return int(counters.PeakWorkingSetSize)
     finally:
         kernel32.CloseHandle(process)
 

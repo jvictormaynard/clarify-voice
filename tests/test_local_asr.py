@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import local_asr
+from scripts import local_asr_harness
 from provider_registry import ProviderRegistry, build_provider_registry
 from provider_types import (
     ProviderCapability,
@@ -354,6 +355,44 @@ class LocalASRInstallerTests(unittest.TestCase):
 
             self.assertEqual(session.calls, [])
             self.assertEqual(unrelated.read_text(encoding="utf-8"), "user data")
+
+    def test_install_wraps_asset_root_creation_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            original_mkdir = Path.mkdir
+
+            def fail_root_mkdir(path, *args, **kwargs):
+                if Path(path) == fixture.root:
+                    raise PermissionError("private ACL detail")
+                return original_mkdir(path, *args, **kwargs)
+
+            with patch.object(Path, "mkdir", new=fail_root_mkdir):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.install()
+
+            self.assertEqual(session.calls, [])
+            self.assertIn("asset root", str(raised.exception))
+            self.assertNotIn("private ACL detail", str(raised.exception))
+
+    def test_install_wraps_asset_root_marker_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            original_write_text = Path.write_text
+
+            def fail_marker_write(path, *args, **kwargs):
+                if Path(path) == fixture.root / local_asr.ROOT_MARKER:
+                    raise OSError("private filesystem detail")
+                return original_write_text(path, *args, **kwargs)
+
+            with patch.object(Path, "write_text", new=fail_marker_write):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.install()
+
+            self.assertEqual(session.calls, [])
+            self.assertIn("ownership", str(raised.exception))
+            self.assertNotIn("private filesystem detail", str(raised.exception))
 
     def test_unowned_root_removal_preserves_unrelated_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1002,6 +1041,29 @@ class LocalASRSidecarTests(unittest.TestCase):
 
 
 class LocalASRRecordedProcessTests(unittest.TestCase):
+    def test_windows_working_set_reports_kernel_peak(self):
+        def populate_counters(_process, pointer, _size):
+            pointer._obj.PeakWorkingSetSize = 987654
+            pointer._obj.WorkingSetSize = 123456
+            return 1
+
+        kernel32 = SimpleNamespace(
+            OpenProcess=Mock(return_value=123),
+            CloseHandle=Mock(return_value=1),
+        )
+        psapi = SimpleNamespace(
+            GetProcessMemoryInfo=Mock(side_effect=populate_counters),
+        )
+        windll = SimpleNamespace(kernel32=kernel32, psapi=psapi)
+
+        with patch.object(
+                local_asr_harness.platform, "system", return_value="Windows"), \
+                patch.object(ctypes, "windll", windll, create=True):
+            peak = local_asr_harness._windows_working_set(4321)
+
+        self.assertEqual(peak, 987654)
+        kernel32.CloseHandle.assert_called_once_with(123)
+
     def test_windows_elevation_state_uses_admin_token_check(self):
         shell32 = SimpleNamespace(IsUserAnAdmin=Mock(return_value=1))
         windll = SimpleNamespace(shell32=shell32)

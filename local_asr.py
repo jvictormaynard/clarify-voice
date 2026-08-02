@@ -425,7 +425,11 @@ class LocalASRInstaller:
             if has_contents:
                 raise LocalASRError(
                     f"Refusing to use non-empty unowned asset root: {self.root}")
-        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise LocalASRError(
+                f"Cannot create local-ASR asset root: {self.root}") from error
         if marker.exists():
             try:
                 owner = marker.read_text(encoding="utf-8").strip()
@@ -434,7 +438,11 @@ class LocalASRInstaller:
             if owner != PROVIDER_ID:
                 raise LocalASRError(f"Asset root has an unknown owner: {self.root}")
         else:
-            marker.write_text(f"{PROVIDER_ID}\n", encoding="utf-8")
+            try:
+                marker.write_text(f"{PROVIDER_ID}\n", encoding="utf-8")
+            except OSError as error:
+                raise LocalASRError(
+                    "Cannot record local-ASR asset-root ownership") from error
 
     def _extract_runtime(self, archive_path: Path, staging: Path) -> None:
         expected = {
