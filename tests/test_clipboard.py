@@ -219,6 +219,59 @@ class ClipboardPasteTests(unittest.TestCase):
         self.assertEqual(self.clipboard.sequence(), 12)
         self.assertEqual(self.clipboard.text(), "selected")
 
+    def test_verification_restore_rejects_same_text_with_new_rich_write(self):
+        original = self.clipboard.snapshot()
+        self.clipboard.state = ClipboardSnapshot((
+            ClipboardFormat(CF_UNICODETEXT, "selected\x00".encode("utf-16-le")),
+            ClipboardFormat(49301, b"<html>selected</html>"),
+        ), 12)
+        self.clipboard.sequence_value = 12
+        capture = app.SelectionCapture(
+            app.SelectionTarget(77, "editor.exe"), "selected")
+
+        with patch.object(app, "_WINDOWS_CLIPBOARD", self.clipboard), \
+                patch.object(app.AppWorkflowClipboard, "is_target_current",
+                             return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=original), \
+                patch.object(app, "_copy_selected_text_with_sequence",
+                             return_value=("selected", 10, 11)), \
+                patch.object(app, "_paste_generated_text",
+                             return_value=False):
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        self.assertEqual(self.clipboard.sequence(), 12)
+        self.assertEqual(self.clipboard.text(), "selected")
+        self.assertEqual(
+            {item.format_id for item in self.clipboard.state.formats},
+            {CF_UNICODETEXT, 49301},
+        )
+
+    def test_verification_non_text_does_not_restore_previous_snapshot(self):
+        original = self.clipboard.snapshot()
+        foreign = ClipboardSnapshot((ClipboardFormat(CF_DIB, b"image"),), 11)
+        self.clipboard.state = foreign
+        self.clipboard.sequence_value = 11
+        capture = app.SelectionCapture(
+            app.SelectionTarget(77, "editor.exe"), "selected")
+
+        with patch.object(app, "_WINDOWS_CLIPBOARD", self.clipboard), \
+                patch.object(app.AppWorkflowClipboard, "is_target_current",
+                             return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=original), \
+                patch.object(app, "_copy_selected_text_with_sequence",
+                             return_value=(None, 10, 11)), \
+                patch.object(app, "_paste_generated_text",
+                             return_value=False):
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        self.assertIs(self.clipboard.state, foreign)
+
     def test_overlapping_operations_are_serialized(self):
         entered = threading.Event()
         release = threading.Event()

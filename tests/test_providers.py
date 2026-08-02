@@ -1205,10 +1205,8 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
                           side_effect=current), \
                 patch.object(app, "_snapshot_windows_clipboard",
                              side_effect=[previous, previous]), \
-                patch.object(app, "_copy_selected_text",
-                             return_value="selected"), \
-                patch.object(app, "_clipboard_sequence_number",
-                             side_effect=[11, 12]), \
+                patch.object(app, "_copy_selected_text_with_sequence",
+                             return_value=("selected", 10, 11)), \
                 patch.object(app, "_restore_clipboard_snapshot_if_owned"), \
                 patch.object(app, "_set_windows_clipboard_text",
                              side_effect=write_result), \
@@ -1337,6 +1335,104 @@ class WorkflowAppBridgeTests(unittest.TestCase):
         self.assertIsInstance(dispatches[0], app.StartDictation)
         self.assertIsInstance(dispatches[1], app.StopDictation)
         self.assertEqual(dispatches[0].target, target)
+
+    def test_hidden_non_windows_recording_reveals_once_and_rehides_on_ready(self):
+        visible = {"value": False}
+        reveals = []
+
+        def reveal():
+            reveals.append(True)
+            visible["value"] = True
+
+        def hide():
+            visible["value"] = False
+
+        harness = SimpleNamespace(
+            _workflow_dictation_target_window=None,
+            _was_hidden_before_recording=False,
+            winfo_viewable=lambda: visible["value"],
+            _show_without_activation=reveal,
+            _update_focused_icon=Mock(),
+            result_frame=SimpleNamespace(winfo_manager=lambda: False),
+            _tray_icon=None,
+            app_state="ready",
+            _microphone_alert_job=None,
+            _wave_running=False,
+            _timer_running=False,
+            _recording_overlay=None,
+            _saved_pos=None,
+            winfo_x=lambda: 10,
+            winfo_y=lambda: 20,
+            _primary_mon=(1920, 1080),
+            geometry=Mock(),
+            idle_card=SimpleNamespace(
+                pack_forget=Mock(), pack=Mock()),
+            rec_card=SimpleNamespace(
+                pack_forget=Mock(), pack=Mock()),
+            _idle_card_pad=0,
+            lbl=SimpleNamespace(configure=Mock()),
+            sub=SimpleNamespace(configure=Mock()),
+            attributes=Mock(),
+            _focused_icon_tick=Mock(),
+            _wave_tick=Mock(),
+            _sync_escape_hotkey=Mock(),
+            _t=lambda key: key,
+            withdraw=hide,
+        )
+        harness._reveal_workflow_pill_if_hidden = lambda: (
+            app.App._reveal_workflow_pill_if_hidden(harness))
+        harness._set_state = lambda *args, **kwargs: app.App._set_state(
+            harness, *args, **kwargs)
+
+        with patch.object(app, "IS_WIN", False):
+            app.App._on_workflow_state(
+                harness,
+                SimpleNamespace(
+                    phase=app.WorkflowPhase.RECORDING,
+                    target_executable="editor.exe",
+                ),
+            )
+
+            self.assertTrue(visible["value"])
+            self.assertEqual(len(reveals), 1)
+            self.assertTrue(harness._was_hidden_before_recording)
+            self.assertEqual(harness.app_state, "recording")
+
+            # Cancellation and normal completion both deliver READY through
+            # this same bridge path; the origin flag restores hidden state.
+            app.App._set_state(harness, "ready", _skip_pill_fade=True)
+
+        self.assertFalse(visible["value"])
+        self.assertFalse(harness._was_hidden_before_recording)
+
+    def test_hidden_non_windows_microphone_failure_reveals_pill(self):
+        visible = {"value": False}
+        reveal = Mock(side_effect=lambda: visible.__setitem__("value", True))
+        harness = SimpleNamespace(
+            _was_hidden_before_recording=False,
+            winfo_viewable=lambda: visible["value"],
+            _show_without_activation=reveal,
+            _set_state=Mock(),
+        )
+        harness._reveal_workflow_pill_if_hidden = lambda: (
+            app.App._reveal_workflow_pill_if_hidden(harness))
+
+        with patch.object(app, "IS_WIN", False):
+            app.App._on_workflow_state(
+                harness,
+                SimpleNamespace(
+                    phase=app.WorkflowPhase.MICROPHONE_UNAVAILABLE),
+            )
+            app.App._on_workflow_state(
+                harness,
+                SimpleNamespace(
+                    phase=app.WorkflowPhase.MICROPHONE_UNAVAILABLE),
+            )
+
+        reveal.assert_called_once_with()
+        self.assertTrue(visible["value"])
+        self.assertTrue(harness._was_hidden_before_recording)
+        harness._set_state.assert_called_with("microphone_unavailable")
 
 
 class RewriteWorkflowTests(unittest.TestCase):

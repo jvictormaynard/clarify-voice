@@ -3414,16 +3414,18 @@ class AppWorkflowClipboard:
         if not AppWorkflowClipboard.is_target_current(capture.target):
             _paste_generated_text(result, should_paste=False)
             return SelectionDisposition.COPIED
-        current = _copy_selected_text(
-            before_copy=lambda: AppWorkflowClipboard.is_target_current(
-                capture.target))
-        sequence = _clipboard_sequence_number()
+        current, _, copy_observed_sequence = (
+            _copy_selected_text_with_sequence(
+                before_copy=lambda: AppWorkflowClipboard.is_target_current(
+                    capture.target)))
         safe = (
             AppWorkflowClipboard.is_target_current(capture.target)
-            and current is not None
+            and isinstance(current, str)
             and _same_selected_text(current, capture.text)
         )
-        _restore_clipboard_snapshot_if_owned(before, sequence, current)
+        if isinstance(current, str):
+            _restore_clipboard_snapshot_if_owned(
+                before, copy_observed_sequence, current)
         if safe and AppWorkflowClipboard.is_target_current(capture.target):
             pasted = _paste_generated_text(
                 result,
@@ -4615,6 +4617,13 @@ class App(ctk.CTk):
                     0x0001 | 0x0002 | 0x0010 | 0x0040)  # NOSIZE|NOMOVE|NOACTIVATE|SHOWWINDOW
             except Exception:
                 pass
+
+    def _reveal_workflow_pill_if_hidden(self):
+        """Reveal the non-Windows pill while retaining its hidden origin."""
+        if IS_WIN or self.winfo_viewable():
+            return
+        self._was_hidden_before_recording = True
+        self._show_without_activation()
 
     def _show_with_fade(self):
         is_visible = self.winfo_viewable()
@@ -5923,6 +5932,10 @@ class App(ctk.CTk):
 
     def _on_workflow_state(self, state):
         """Render WorkflowService state on Tk and release terminal operations."""
+        if state.phase in (
+                WorkflowPhase.RECORDING,
+                WorkflowPhase.MICROPHONE_UNAVAILABLE):
+            self._reveal_workflow_pill_if_hidden()
         if state.phase is WorkflowPhase.READY:
             release_requested = self._workflow_release_requested
             self._workflow_release_requested = False
@@ -5963,7 +5976,6 @@ class App(ctk.CTk):
         if state.phase is WorkflowPhase.RECORDING:
             self._recording_target_window = getattr(
                 self, "_workflow_dictation_target_window", None)
-            self._was_hidden_before_recording = not self.winfo_viewable()
             if self.result_frame.winfo_manager():
                 self._hide_result()
             self._update_focused_icon(state.target_executable)
