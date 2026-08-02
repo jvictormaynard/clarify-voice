@@ -17,7 +17,7 @@ Provider client ------------> Gemini / OpenAI / Groq / custom endpoint
     v
 Focus and selection safety check
     |
-    +---- unchanged ----> paste result into the original application
+    +---- unchanged ----> snapshot, atomically paste, and conditionally restore
     |
     +---- changed ------> keep result in clipboard and show result panel
 ```
@@ -37,7 +37,7 @@ The application entry point currently owns:
   staged);
 - provider discovery, validation, transcription, rewriting, and translation;
 - audio capture and conversion;
-- clipboard and focus safety;
+- clipboard and focus safety, including serialized rich-format snapshots;
 - the CustomTkinter interface, tray, pill, and result surfaces;
 - the headless transcription commands.
 
@@ -55,6 +55,12 @@ flows from overlapping.
 
 Owns native Windows `RegisterHotKey` registration and Ctrl-key synthesis.
 Packaged Windows builds exclude the optional cross-platform `keyboard` module.
+
+### `windows_clipboard.py`
+
+Provides the Windows-only clipboard adapter. It snapshots and restores the
+supported global-memory formats (text, HTML, RTF, and DIB images) without
+attempting to read arbitrary clipboard formats.
 
 ### `tests/`
 

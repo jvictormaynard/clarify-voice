@@ -75,8 +75,12 @@ executable on Windows:
 3. Exercise every shortcut touched by the change.
 4. Confirm the original application keeps focus through recording or selection.
 5. Test the system tray, minimize, restore, and quit paths.
-6. Attach before and after screenshots to visual pull requests.
-7. Confirm that the executable contains no `.env` or personal key.
+6. For clipboard changes, verify plain text, HTML/RTF, image data, rapid
+   repeated hotkeys, a user clipboard write during the restore delay, failed
+   paste, and focus change. The generated result must remain available when
+   automatic paste is unsafe.
+7. Attach before and after screenshots to visual pull requests.
+8. Confirm that the executable contains no `.env` or personal key.
 
 ## Maintainer deploy from WSL
 

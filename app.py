@@ -25,10 +25,12 @@ from repositories import (
     LocalConfigRepository,
     LocalUsageStatsRepository,
 )
+from windows_clipboard import ClipboardSnapshot, WindowsClipboardAdapter
 from windows_hotkeys import (
     WM_HOTKEY,
     action_for_hotkey_id,
     is_alt_pressed,
+    paste_focused_control,
     register_escape_hotkey,
     register_global_hotkeys,
     send_ctrl_key,
@@ -2285,10 +2287,7 @@ def _activate_window(hwnd):
 
 
 def _clipboard_sequence_number():
-    if not IS_WIN:
-        return 0
-    import ctypes
-    return int(ctypes.windll.user32.GetClipboardSequenceNumber())
+    return _WINDOWS_CLIPBOARD.sequence()
 
 
 def _open_windows_clipboard(timeout=0.25):
@@ -2303,79 +2302,100 @@ def _open_windows_clipboard(timeout=0.25):
 
 
 def _get_windows_clipboard_text():
-    if not IS_WIN:
-        return None
-    import ctypes
-    from ctypes import wintypes
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-    user32.GetClipboardData.argtypes = [wintypes.UINT]
-    user32.GetClipboardData.restype = wintypes.HANDLE
-    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-    kernel32.GlobalLock.restype = ctypes.c_void_p
-    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-    _open_windows_clipboard()
-    try:
-        handle = user32.GetClipboardData(13)  # CF_UNICODETEXT
-        if not handle:
-            return None
-        pointer = kernel32.GlobalLock(handle)
-        if not pointer:
-            return None
-        try:
-            return ctypes.wstring_at(pointer)
-        finally:
-            kernel32.GlobalUnlock(handle)
-    finally:
-        user32.CloseClipboard()
+    return _WINDOWS_CLIPBOARD.text()
 
 
 def _set_windows_clipboard_text(text):
-    if not IS_WIN:
+    return _WINDOWS_CLIPBOARD.write_text(text)
+
+
+_WINDOWS_CLIPBOARD = WindowsClipboardAdapter(is_windows=IS_WIN)
+_CLIPBOARD_PASTE_LOCK = threading.Lock()
+CLIPBOARD_RESTORE_DELAY_SECONDS = 0.2
+
+
+def _snapshot_windows_clipboard():
+    return _WINDOWS_CLIPBOARD.snapshot()
+
+
+def _restore_windows_clipboard(snapshot):
+    return _WINDOWS_CLIPBOARD.restore(snapshot)
+
+
+def _restore_windows_clipboard_if_owned(snapshot, expected_sequence, expected_text):
+    return _WINDOWS_CLIPBOARD.restore_if_owned(
+        snapshot, expected_sequence, expected_text)
+
+
+def _restore_clipboard_snapshot_if_owned(snapshot, expected_sequence, expected_text):
+    """Restore only if our selection-copy still owns the clipboard."""
+    if snapshot is None:
         return False
-    import ctypes
-    from ctypes import wintypes
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-    encoded = (str(text) + "\0").encode("utf-16-le")
-    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
-    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-    kernel32.GlobalLock.restype = ctypes.c_void_p
-    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-    kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
-    kernel32.GlobalFree.restype = wintypes.HGLOBAL
-    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
-    user32.SetClipboardData.restype = wintypes.HANDLE
-    handle = kernel32.GlobalAlloc(0x0002, len(encoded))  # GMEM_MOVEABLE
-    if not handle:
-        raise OSError("could not allocate clipboard memory")
-    pointer = kernel32.GlobalLock(handle)
-    if not pointer:
-        kernel32.GlobalFree(handle)
-        raise OSError("could not lock clipboard memory")
-    ctypes.memmove(pointer, encoded, len(encoded))
-    kernel32.GlobalUnlock(handle)
-    _open_windows_clipboard()
-    transferred = False
     try:
-        if not user32.EmptyClipboard():
-            raise OSError("could not clear clipboard")
-        if not user32.SetClipboardData(13, handle):  # CF_UNICODETEXT
-            raise OSError("could not set clipboard text")
-        transferred = True
-        return True
-    finally:
-        user32.CloseClipboard()
-        if not transferred:
-            kernel32.GlobalFree(handle)
+        return bool(_restore_windows_clipboard_if_owned(
+            snapshot, expected_sequence, expected_text))
+    except OSError:
+        return False
 
 
-def _send_key_chord(chord):
+def _paste_generated_text(text, *, should_paste=True,
+        restore_delay=CLIPBOARD_RESTORE_DELAY_SECONDS):
+    """Write, optionally paste, and conditionally restore one result.
+
+    The lock covers the bounded restore window so a second ClarifyVoice
+    operation cannot restore an older snapshot over a newer result.
+    """
+    with _CLIPBOARD_PASTE_LOCK:
+        previous = None
+        try:
+            previous = _snapshot_windows_clipboard()
+        except OSError:
+            pass
+        try:
+            _set_windows_clipboard_text(text)
+        except Exception:
+            if previous is not None:
+                try:
+                    _restore_windows_clipboard(previous)
+                except OSError:
+                    pass
+            raise
+
+        written_sequence = _clipboard_sequence_number()
+
+        if not should_paste:
+            return False
+        try:
+            paste_result = _send_key_chord("ctrl+v", expected_text=str(text))
+        except Exception:
+            return False
+        # A native key-dispatch helper can report that it injected events,
+        # but cannot prove the target application consumed Ctrl+V. Only an
+        # explicit True from an integration/test with that evidence permits
+        # restoration; every other result keeps the generated text available.
+        if paste_result is not True:
+            return False
+
+        time.sleep(restore_delay)
+        try:
+            restored = _restore_windows_clipboard_if_owned(
+                previous, written_sequence, str(text))
+        except OSError:
+            restored = False
+        if not IS_WIN and previous is None:
+            # Selected-text flows are Windows-only; retain the historical
+            # test/fallback semantics for non-Windows callers.
+            return True
+        return bool(restored)
+
+
+def _send_key_chord(chord, *, expected_text=None):
     if IS_WIN and chord in ("ctrl+c", "ctrl+v"):
-        send_ctrl_key(chord[-1])
+        if chord == "ctrl+v":
+            return paste_focused_control(expected_text=expected_text)
+        return send_ctrl_key(chord[-1])
     else:
-        keyboard.send(chord)
+        return keyboard.send(chord)
 
 
 def _copy_selected_text(timeout=0.7):
@@ -2414,12 +2434,7 @@ def _result_window_height(header_height, result_height):
 
 def copy_and_paste(text):
     if IS_WIN:
-        import ctypes
-        subprocess.run("clip.exe", input=text.encode("utf-16-le"), check=False, creationflags=0x08000000)
-        time.sleep(0.2)
-        u = ctypes.windll.user32
-        u.keybd_event(0x11, 0, 0, 0); u.keybd_event(0x56, 0, 0, 0)
-        u.keybd_event(0x56, 0, 2, 0); u.keybd_event(0x11, 0, 2, 0)
+        return _paste_generated_text(text)
     elif IS_MAC:
         subprocess.run(["pbcopy"], input=text.encode(), check=False)
         subprocess.run(["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'], check=False)
@@ -4201,9 +4216,11 @@ class App(ctk.CTk):
         previous_clipboard = None
         try:
             try:
-                previous_clipboard = _get_windows_clipboard_text()
+                previous_clipboard = _snapshot_windows_clipboard()
             except OSError:
                 previous_clipboard = None
+            if previous_clipboard is None:
+                previous_clipboard = _get_windows_clipboard_text()
 
             release_deadline = time.monotonic() + 0.8
             while is_alt_pressed() and time.monotonic() < release_deadline:
@@ -4215,7 +4232,11 @@ class App(ctk.CTk):
                 return
 
             selected_text = _copy_selected_text()
-            self._restore_clipboard_text(previous_clipboard)
+            if isinstance(previous_clipboard, ClipboardSnapshot):
+                _restore_clipboard_snapshot_if_owned(
+                    previous_clipboard, _clipboard_sequence_number(), selected_text)
+            elif not selected_text:
+                self._restore_clipboard_text(previous_clipboard)
             if not selected_text or not selected_text.strip():
                 self.after(0, lambda: self._translation_preparation_failed(
                     "no_selection"))
@@ -4470,7 +4491,9 @@ class App(ctk.CTk):
         try:
             translated = translate_selected_text(selected_text, target_language)
             if not translated or translated.startswith("[Error"):
-                self._restore_clipboard_text(previous_clipboard)
+                if (previous_clipboard is not None
+                        and not isinstance(previous_clipboard, ClipboardSnapshot)):
+                    self._restore_clipboard_text(previous_clipboard)
                 self.after(0, lambda: self._finish_translation(
                     status_key="translation_failed"))
                 return
@@ -4486,21 +4509,31 @@ class App(ctk.CTk):
 
             selection_is_safe = _foreground_window_handle() == target_window
             if selection_is_safe:
+                try:
+                    before_selection_clipboard = _snapshot_windows_clipboard()
+                except OSError:
+                    before_selection_clipboard = None
                 current_selection = _copy_selected_text()
+                selection_sequence = _clipboard_sequence_number()
                 selection_is_safe = (
                     current_selection is not None
                     and _same_selected_text(current_selection, selected_text))
+                _restore_clipboard_snapshot_if_owned(
+                    before_selection_clipboard, selection_sequence, current_selection)
 
-            _set_windows_clipboard_text(translated)
             if selection_is_safe and _foreground_window_handle() == target_window:
-                time.sleep(0.04)
-                _send_key_chord("ctrl+v")
-                self.after(0, lambda: self._finish_translation(text=translated))
+                pasted = _paste_generated_text(translated)
+                self.after(0, lambda: self._finish_translation(
+                    text=translated,
+                    status_key=None if pasted else "translation_copied"))
             else:
+                _paste_generated_text(translated, should_paste=False)
                 self.after(0, lambda: self._finish_translation(
                     text=translated, status_key="translation_copied"))
         except Exception:
-            self._restore_clipboard_text(previous_clipboard)
+            if (previous_clipboard is not None
+                    and not isinstance(previous_clipboard, ClipboardSnapshot)):
+                self._restore_clipboard_text(previous_clipboard)
             self.after(0, lambda: self._finish_translation(
                 status_key="translation_failed"))
 
@@ -4549,7 +4582,10 @@ class App(ctk.CTk):
         if previous_text is None:
             return
         try:
-            _set_windows_clipboard_text(previous_text)
+            if isinstance(previous_text, ClipboardSnapshot):
+                _restore_windows_clipboard(previous_text)
+            else:
+                _set_windows_clipboard_text(previous_text)
         except OSError:
             pass
 
@@ -4557,9 +4593,11 @@ class App(ctk.CTk):
         previous_clipboard = None
         try:
             try:
-                previous_clipboard = _get_windows_clipboard_text()
+                previous_clipboard = _snapshot_windows_clipboard()
             except OSError:
                 previous_clipboard = None
+            if previous_clipboard is None:
+                previous_clipboard = _get_windows_clipboard_text()
 
             release_deadline = time.monotonic() + 0.8
             while is_alt_pressed() and time.monotonic() < release_deadline:
@@ -4569,14 +4607,20 @@ class App(ctk.CTk):
                 return
 
             selected_text = _copy_selected_text()
+            if isinstance(previous_clipboard, ClipboardSnapshot):
+                _restore_clipboard_snapshot_if_owned(
+                    previous_clipboard, _clipboard_sequence_number(), selected_text)
             if not selected_text or not selected_text.strip():
-                self._restore_clipboard_text(previous_clipboard)
+                if not isinstance(previous_clipboard, ClipboardSnapshot):
+                    self._restore_clipboard_text(previous_clipboard)
                 self.after(0, lambda: self._finish_rewrite(status_key="no_selection"))
                 return
 
             rewritten = rewrite_selected_text(selected_text)
             if not rewritten or rewritten.startswith("[Error"):
-                self._restore_clipboard_text(previous_clipboard)
+                if (previous_clipboard is not None
+                        and not isinstance(previous_clipboard, ClipboardSnapshot)):
+                    self._restore_clipboard_text(previous_clipboard)
                 self.after(0, lambda: self._finish_rewrite(status_key="rewrite_failed"))
                 return
 
@@ -4590,21 +4634,31 @@ class App(ctk.CTk):
 
             selection_is_safe = _foreground_window_handle() == target_window
             if selection_is_safe:
+                try:
+                    before_selection_clipboard = _snapshot_windows_clipboard()
+                except OSError:
+                    before_selection_clipboard = None
                 current_selection = _copy_selected_text()
+                selection_sequence = _clipboard_sequence_number()
                 selection_is_safe = (
                     current_selection is not None
                     and _same_selected_text(current_selection, selected_text))
+                _restore_clipboard_snapshot_if_owned(
+                    before_selection_clipboard, selection_sequence, current_selection)
 
-            _set_windows_clipboard_text(rewritten)
             if selection_is_safe and _foreground_window_handle() == target_window:
-                time.sleep(0.04)
-                _send_key_chord("ctrl+v")
-                self.after(0, lambda: self._finish_rewrite(text=rewritten))
+                pasted = _paste_generated_text(rewritten)
+                self.after(0, lambda: self._finish_rewrite(
+                    text=rewritten,
+                    status_key=None if pasted else "rewrite_copied"))
             else:
+                _paste_generated_text(rewritten, should_paste=False)
                 self.after(0, lambda: self._finish_rewrite(
                     text=rewritten, status_key="rewrite_copied"))
         except Exception:
-            self._restore_clipboard_text(previous_clipboard)
+            if (previous_clipboard is not None
+                    and not isinstance(previous_clipboard, ClipboardSnapshot)):
+                self._restore_clipboard_text(previous_clipboard)
             self.after(0, lambda: self._finish_rewrite(status_key="rewrite_failed"))
 
     # -- Recording --
@@ -4614,20 +4668,23 @@ class App(ctk.CTk):
             return
         # Capture the target synchronously, before Tk can take foreground focus.
         target = _foreground_executable() if self.app_state != "recording" else None
-        self.after(0, lambda: self.toggle_recording(target))
+        target_window = _foreground_window_handle() if self.app_state != "recording" else None
+        self.after(0, lambda: self.toggle_recording(target, target_window))
 
-    def toggle_recording(self, target_executable=None):
+    def toggle_recording(self, target_executable=None, target_window=None):
         if (self._rewrite_active
                 or getattr(self, "_translation_active", False)):
             return
         if self.app_state == "recording": self._stop_recording()
         elif self.app_state == "microphone_unavailable": self._set_state("ready")
-        elif self.app_state == "ready": self._start_recording(target_executable)
+        elif self.app_state == "ready":
+            self._start_recording(target_executable, target_window)
 
-    def _start_recording(self, target_executable=None):
+    def _start_recording(self, target_executable=None, target_window=None):
         if self.result_frame.winfo_manager(): self._hide_result()
         # Capture the target before showing ClarifyVoice can affect foreground focus.
         self._update_focused_icon(target_executable)
+        self._recording_target_window = target_window
         self._was_hidden_before_recording = not self.winfo_viewable()
         if self._was_hidden_before_recording and not IS_WIN:
             self._show_without_activation()
@@ -4681,7 +4738,16 @@ class App(ctk.CTk):
         threading.Thread(target=run, daemon=True).start()
 
     def _on_result(self, text):
-        threading.Thread(target=lambda: copy_and_paste(text), daemon=True).start()
+        target_window = getattr(self, "_recording_target_window", None)
+        should_paste = (
+            target_window is None
+            or _foreground_window_handle() == target_window)
+        paste = (
+            (lambda: _paste_generated_text(text, should_paste=should_paste))
+            if IS_WIN else (lambda: copy_and_paste(text)))
+        threading.Thread(
+            target=paste,
+            daemon=True).start()
         def finish():
             self._set_state(
                 "ready", after_ready=lambda: self._show_result(text))

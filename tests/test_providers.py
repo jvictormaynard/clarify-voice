@@ -20,6 +20,7 @@ for _provider_variable in (
 import app
 from desktop_state import WorkflowController
 import windows_hotkeys
+from windows_clipboard import CF_UNICODETEXT, ClipboardFormat, ClipboardSnapshot
 from PIL import Image as PILImage
 from PIL import ImageDraw as PILImageDraw
 
@@ -890,7 +891,8 @@ class RewriteWorkflowTests(unittest.TestCase):
 
     @patch("app.is_alt_pressed", new=lambda: False)
     @patch("app.time.sleep")
-    @patch("app._send_key_chord")
+    @patch("app._restore_windows_clipboard_if_owned", return_value=True)
+    @patch("app._send_key_chord", return_value=True)
     @patch("app._set_windows_clipboard_text")
     @patch("app.rewrite_selected_text", return_value="Texto revisado.")
     @patch("app._copy_selected_text", side_effect=["Texto original.", "Texto original."])
@@ -898,24 +900,68 @@ class RewriteWorkflowTests(unittest.TestCase):
     @patch("app._foreground_window_handle", side_effect=[77, 77])
     @patch("app._record_usage_event")
     def test_safe_selection_is_pasted_once(self, record_usage, _foreground, _clipboard, _copy,
-            _rewrite, set_clipboard, send_key, _sleep):
+            _rewrite, set_clipboard, send_key, _restore, _sleep):
         harness = self.Harness()
         app.App._rewrite_selection_worker(harness, 77)
 
         set_clipboard.assert_called_once_with("Texto revisado.")
-        send_key.assert_called_once_with("ctrl+v")
+        send_key.assert_called_once_with("ctrl+v", expected_text="Texto revisado.")
         record_usage.assert_called_once()
         self.assertEqual(harness.finished, [("Texto revisado.", None)])
 
+    def test_rewrite_restores_rich_snapshot_before_final_selection_check(self):
+        original = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "Original\x00".encode("utf-16-le")),), 10)
+        harness = self.Harness()
+        with patch.object(app, "is_alt_pressed", new=lambda: False), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             side_effect=[original, original]), \
+                patch.object(app, "_clipboard_sequence_number", return_value=10), \
+                patch.object(app, "_get_windows_clipboard_text", return_value="Original"), \
+                patch.object(app, "_restore_windows_clipboard_if_owned",
+                             return_value=True) as restore, \
+                patch.object(app, "_copy_selected_text",
+                             side_effect=["Original", "Original"]), \
+                patch.object(app, "rewrite_selected_text", return_value="Rewritten"), \
+                patch.object(app, "_foreground_window_handle", side_effect=[77, 77]), \
+                patch.object(app, "_paste_generated_text", return_value=True), \
+                patch.object(app, "_record_usage_event"):
+            app.App._rewrite_selection_worker(harness, 77)
+
+        self.assertGreaterEqual(restore.call_count, 2)
+        self.assertEqual(restore.call_args_list[0].args[0], original)
+        self.assertEqual(harness.finished, [("Rewritten", None)])
+
+    def test_rewrite_provider_failure_keeps_rich_snapshot_restored(self):
+        original = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "Original\x00".encode("utf-16-le")),), 10)
+        harness = self.Harness()
+        with patch.object(app, "is_alt_pressed", new=lambda: False), \
+                patch.object(app, "_snapshot_windows_clipboard", return_value=original), \
+                patch.object(app, "_clipboard_sequence_number", return_value=10), \
+                patch.object(app, "_get_windows_clipboard_text", return_value="Original"), \
+                patch.object(app, "_restore_windows_clipboard_if_owned",
+                             return_value=True) as restore, \
+                patch.object(app, "_copy_selected_text", return_value="Original"), \
+                patch.object(app, "rewrite_selected_text", return_value="[Error: failed]"), \
+                patch.object(app, "_set_windows_clipboard_text") as set_clipboard:
+            app.App._rewrite_selection_worker(harness, 77)
+
+        restore.assert_called_once()
+        self.assertEqual(restore.call_args.args[0], original)
+        set_clipboard.assert_not_called()
+        self.assertEqual(harness.finished, [(None, "rewrite_failed")])
+
     @patch("app.time.sleep")
-    @patch("app._send_key_chord")
+    @patch("app._restore_windows_clipboard_if_owned", return_value=True)
+    @patch("app._send_key_chord", return_value=True)
     @patch("app._set_windows_clipboard_text")
     @patch("app.translate_selected_text", return_value="Hallo Welt")
     @patch("app._copy_selected_text", return_value="Hello world")
     @patch("app._foreground_window_handle", side_effect=[77, 77])
     @patch("app._record_usage_event")
     def test_safe_translation_replaces_only_the_selected_text(self, record_usage,
-            _foreground, _copy, translate, set_clipboard, send_key, _sleep):
+            _foreground, _copy, translate, set_clipboard, send_key, _restore, _sleep):
         harness = self.Harness()
 
         app.App._translation_selection_worker(
@@ -923,7 +969,7 @@ class RewriteWorkflowTests(unittest.TestCase):
 
         translate.assert_called_once_with("Hello world", "de")
         set_clipboard.assert_called_once_with("Hallo Welt")
-        send_key.assert_called_once_with("ctrl+v")
+        send_key.assert_called_once_with("ctrl+v", expected_text="Hallo Welt")
         record_usage.assert_called_once()
         event = record_usage.call_args.args[0]
         self.assertEqual(event["type"], "translation")
@@ -987,9 +1033,10 @@ class RewriteWorkflowTests(unittest.TestCase):
     @patch("app._set_windows_clipboard_text")
     @patch("app.rewrite_selected_text", return_value="[Error: failed]")
     @patch("app._copy_selected_text", return_value="Original")
+    @patch("app._snapshot_windows_clipboard", return_value=None)
     @patch("app._get_windows_clipboard_text", return_value="previous")
-    def test_provider_failure_restores_text_clipboard(self, _clipboard, _copy,
-            _rewrite, set_clipboard):
+    def test_provider_failure_restores_text_clipboard(self, _clipboard, _snapshot,
+            _copy, _rewrite, set_clipboard):
         harness = self.Harness()
         app.App._rewrite_selection_worker(harness, 77)
 
@@ -999,8 +1046,9 @@ class RewriteWorkflowTests(unittest.TestCase):
     @patch("app.is_alt_pressed", new=lambda: False)
     @patch("app._set_windows_clipboard_text")
     @patch("app._copy_selected_text", return_value="  \r\n")
+    @patch("app._snapshot_windows_clipboard", return_value=None)
     @patch("app._get_windows_clipboard_text", return_value="previous")
-    def test_empty_selection_skips_ai_and_restores_clipboard(self, _clipboard,
+    def test_empty_selection_skips_ai_and_restores_clipboard(self, _clipboard, _snapshot,
             _copy, set_clipboard):
         harness = self.Harness()
         with patch("app.rewrite_selected_text") as rewrite:
