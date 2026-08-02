@@ -447,6 +447,76 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertNotIn("private sharing detail", str(raised.exception))
             self.assertFalse(installer.install_dir.exists())
 
+    def test_install_rolls_back_invalid_published_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            original_status = installer.status
+            status_calls = 0
+
+            def status_with_post_publish_tamper():
+                nonlocal status_calls
+                status_calls += 1
+                if status_calls == 2:
+                    installer.model_path.unlink()
+                return original_status()
+
+            with patch.object(installer, "status", new=status_with_post_publish_tamper):
+                with self.assertRaises(local_asr.LocalASRIntegrityError):
+                    installer.install()
+
+            self.assertEqual(status_calls, 2)
+            self.assertEqual(len(session.calls), 2)
+            self.assertFalse(installer.install_dir.exists())
+            self.assertFalse(installer.executable_path.exists())
+            self.assertFalse(list(fixture.root.glob(".install-*")))
+
+    def test_install_reports_typed_post_publish_rollback_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            original_status = installer.status
+            status_calls = 0
+
+            def status_with_post_publish_tamper():
+                nonlocal status_calls
+                status_calls += 1
+                if status_calls == 2:
+                    installer.model_path.unlink()
+                return original_status()
+
+            original_rmtree = local_asr.shutil.rmtree
+
+            def fail_published_cleanup(path, *args, **kwargs):
+                if Path(path) == installer.install_dir:
+                    raise OSError("private rollback detail")
+                return original_rmtree(path, *args, **kwargs)
+
+            with patch.object(installer, "status", new=status_with_post_publish_tamper), \
+                    patch.object(local_asr.shutil, "rmtree", new=fail_published_cleanup):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.install()
+
+            self.assertIn("could not be rolled back", str(raised.exception))
+            self.assertNotIn("private rollback detail", str(raised.exception))
+            self.assertTrue(installer.install_dir.exists())
+            self.assertTrue(installer.executable_path.exists())
+            self.assertEqual(len(session.calls), 2)
+
+    def test_rollback_does_not_skip_rmtree_when_exists_is_false(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer.install()
+            original_rmtree = local_asr.shutil.rmtree
+
+            with patch.object(Path, "exists", return_value=False), \
+                    patch.object(local_asr.shutil, "rmtree", wraps=original_rmtree) as rmtree:
+                installer._discard_published_installation()
+
+            rmtree.assert_called_once_with(installer.install_dir)
+            self.assertFalse(installer.install_dir.exists())
+
     def test_install_wraps_receipt_write_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)

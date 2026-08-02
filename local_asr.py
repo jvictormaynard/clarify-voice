@@ -708,6 +708,28 @@ class LocalASRInstaller:
                 raise LocalASRIntegrityError(
                     f"Cannot preserve license notice {relative}: {error}") from error
 
+    def _discard_published_installation(self) -> None:
+        destination = self.install_dir
+        try:
+            shutil.rmtree(destination)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise LocalASRError(
+                "Cannot roll back the invalid local-ASR installation; "
+                "retry removal.") from error
+        try:
+            os.lstat(destination)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise LocalASRError(
+                "Cannot verify rollback of the invalid local-ASR installation; "
+                "retry removal.") from error
+        raise LocalASRError(
+            "Cannot roll back the invalid local-ASR installation; "
+            "retry removal.")
+
     def install(self, callback: ProgressCallback | None = None) -> dict:
         # Validate manifest-derived paths before creating or claiming any root.
         self.install_dir
@@ -771,9 +793,18 @@ class LocalASRInstaller:
                     raise LocalASRError(
                         "Cannot publish local-ASR installation; "
                         "retry the install.") from error
-                result = self.status()
-                if result["state"] != "installed":
-                    raise LocalASRIntegrityError(result["detail"])
+                try:
+                    result = self.status()
+                    if result["state"] != "installed":
+                        raise LocalASRIntegrityError(result["detail"])
+                except LocalASRError as error:
+                    try:
+                        self._discard_published_installation()
+                    except LocalASRError as rollback_error:
+                        raise LocalASRError(
+                            "Published local-ASR installation failed verification and "
+                            "could not be rolled back; retry removal.") from rollback_error
+                    raise error
                 self._report(callback, "complete", 1, 1)
                 return result
             except BaseException:
