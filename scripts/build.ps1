@@ -22,6 +22,7 @@ $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $entryPoint = Join-Path $repoRoot "app.py"
 $repoExtra = Join-Path $repoRoot "extra"
 $assets = Join-Path $repoRoot "assets"
+$distribution = Join-Path $repoRoot "distribution"
 $icon = Join-Path $assets "branding\clarify.ico"
 $workDir = Join-Path $repoRoot "build\pyinstaller"
 $specDir = Join-Path $repoRoot "build\spec"
@@ -39,7 +40,9 @@ function ConvertTo-ProcessArgument {
     return '"' + $Value.Replace('"', '\"') + '"'
 }
 
-foreach ($requiredPath in @($entryPoint, $repoExtra, $assets, $icon, $soxManifestPath)) {
+foreach ($requiredPath in @(
+    $entryPoint, $repoExtra, $assets, $distribution, $icon, $soxManifestPath
+)) {
     if (-not (Test-Path $requiredPath)) {
         throw "Required build input is missing: $requiredPath"
     }
@@ -66,6 +69,7 @@ $pyInstallerArgs = @(
     "--paths", $repoRoot,
     "--add-data", "${extra};extra",
     "--add-data", "${assets};assets",
+    "--add-data", "${distribution};distribution",
     "--hidden-import", "sounddevice",
     "--hidden-import", "_sounddevice_data",
     "--exclude-module", "numpy",

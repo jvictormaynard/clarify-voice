@@ -45,6 +45,9 @@ Update `CHANGELOG.md`:
 - change the `Unreleased` comparison to start at the new tag;
 - add the comparison link from the previous tag to the new tag.
 
+Update `version.py` to exactly the release version. The tag, manifest, MSI,
+and in-app comparison all derive from this value.
+
 Audit documentation touched by the release contract:
 
 - update `README.md` and `docs/README.pt-BR.md` when installation, shortcuts,
@@ -85,8 +88,9 @@ Never treat unit tests or a successful PyInstaller build as visual acceptance.
 5. Mark ready only after local gates pass.
 6. Require all PR checks:
    - `Tests (ubuntu-latest)`;
-   - `Tests (windows-latest)`;
-   - `Package Windows executable`.
+  - `Tests (windows-latest)`;
+  - `Package Windows executable` (including MSI lifecycle and manifest smoke
+    tests).
 7. Merge without rewriting existing contributor history.
 8. Wait for the post-merge `master` CI, including Windows packaging.
 
@@ -102,8 +106,9 @@ git push origin vX.Y.Z
 ```
 
 Watch the tag-triggered `Release` workflow. It must run tests, build on Windows,
-create the checksum and ZIP, obtain the verified SoX source archive, and publish
-the GitHub release.
+sign and verify the EXE, MSI, and manifest CAB through the protected Azure OIDC
+environment, create checksums, ZIP, and provenance attestations, obtain the
+verified SoX source archive, and publish the GitHub release.
 
 Do not create a second manual release while the workflow is running.
 
@@ -116,6 +121,11 @@ Require all of the following:
 - release is the current latest release;
 - all required assets from the contract exist exactly once;
 - downloaded `ClarifyVoice.exe` matches `ClarifyVoice.exe.sha256`;
+- downloaded MSI and manifest CAB match their checksums, have valid RFC 3161
+  timestamped Authenticode signatures, and match the pinned publisher;
+- authenticated manifest version, tag, channel, asset name, URL, size, and MSI
+  checksum all match the release;
+- GitHub provenance attestations verify for the EXE, MSI, CAB, and ZIP;
 - ZIP contains the executable, `LICENSE`, and `THIRD_PARTY_NOTICES.md`;
 - SoX source digest matches the pinned release-workflow digest;
 - `/releases/latest` resolves to the new version.
@@ -133,6 +143,8 @@ Report:
 - exact published assets and checksum result;
 - documentation files updated;
 - any remaining signing or SmartScreen limitation.
+- manual installer acceptance evidence and any unmet rollout gate from
+  `docs/windows-distribution.md`.
 
 Keep the local checkout on clean, synchronized `master`. Prune merged temporary
 branches from remote-tracking refs.
@@ -146,6 +158,9 @@ Stop publication and explain the blocker if:
 - Windows interaction changes lack real executable acceptance;
 - the tag exists at another commit;
 - the release workflow or any required asset is missing;
+- signing configuration, timestamp, publisher identity, or provenance fails;
+- the installer/update rollout gates are incomplete for a release that intends
+  to enable that path;
 - checksum, ZIP contents, SoX source digest, or tag provenance does not match.
 
 Never force-move a published tag, rewrite contributor history, or silently

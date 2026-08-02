@@ -113,10 +113,43 @@ jobs:
         shell: pwsh
         run: .\scripts\build.ps1
 
+      - name: Build baseline and current installers
+        shell: pwsh
+        run: |
+          .\scripts\build-installer.ps1 `
+            -Version 0.1.1 `
+            -SourceExe dist\ClarifyVoice.exe `
+            -OutputPath dist\ClarifyVoice-windows-x64-baseline.msi
+          .\scripts\build-installer.ps1 `
+            -SourceExe dist\ClarifyVoice.exe `
+            -OutputPath dist\ClarifyVoice-windows-x64.msi
+
+      - name: Test install, upgrade, repair, rollback, and uninstall
+        shell: pwsh
+        run: |
+          .\scripts\test-installer.ps1 `
+            -BaselineInstaller dist\ClarifyVoice-windows-x64-baseline.msi `
+            -CurrentInstaller dist\ClarifyVoice-windows-x64.msi
+
+      - name: Validate release manifest contract
+        shell: pwsh
+        run: |
+          $version = python -c "from version import __version__; print(__version__)"
+          python .\scripts\create_release_manifest.py `
+            --version $version `
+            --installer dist\ClarifyVoice-windows-x64.msi `
+            --output dist\release-manifest.json
+          .\scripts\build-manifest-container.ps1 `
+            -Manifest dist\release-manifest.json `
+            -OutputPath dist\ClarifyVoice-release-manifest.cab
+
       - name: Upload smoke-test build
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ClarifyVoice-windows-${{ github.sha }}
-          path: dist/ClarifyVoice.exe
+          path: |
+            dist/ClarifyVoice.exe
+            dist/ClarifyVoice-windows-x64.msi
+            dist/ClarifyVoice-release-manifest.cab
           if-no-files-found: error
           retention-days: 7

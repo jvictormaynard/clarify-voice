@@ -100,6 +100,14 @@ Provides the Windows-only clipboard adapter. It snapshots and restores the
 supported global-memory formats (text, HTML, RTF, and DIB images) without
 attempting to read arbitrary clipboard formats.
 
+### `update_security.py`
+
+Owns the manual update trust boundary. A Windows-trusted, publisher-pinned CAB
+authenticates the strict release manifest. The module rejects unexpected
+channels, versions, names, origins, checksums, sizes, or publishers; downloads
+through a sibling `.part` file; and revalidates the MSI immediately before
+launch. It does not own UI confirmation and never runs an installer by itself.
+
 ### `tests/`
 
 The unit suite tests provider routing, URL construction, configuration,
@@ -193,11 +201,15 @@ immediate restart from reusing the recorder concurrently.
 ## Packaging
 
 PyInstaller creates a one-file Windows executable containing the Python runtime,
-application modules, visual assets, and the vendored SoX runtime. `.env` is
+application modules, visual assets, immutable distribution policy, and the
+vendored SoX runtime. `.env` is
 never bundled. End-user provider settings are read from the user data directory.
 
-The GitHub release workflow builds on a Windows runner and publishes the
-executable plus a SHA-256 checksum. `scripts/deploy.ps1` is a maintainer tool for
+The staged distribution workflow signs the executable, embeds it in a per-user
+WiX MSI, signs that MSI and a release-manifest CAB, verifies the pinned
+publisher, emits checksums, and creates GitHub provenance attestations. Public
+enablement remains gated as documented in
+[Windows distribution security](windows-distribution.md). `scripts/deploy.ps1` is a maintainer tool for
 updating an existing local installation from WSL; contributors normally use
 `scripts/build.ps1`.
 

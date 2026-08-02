@@ -5,6 +5,15 @@ Notable user-facing changes are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+
+- Added a staged per-user Windows MSI, authenticated release-manifest contract,
+  explicit in-app update check, atomic download verification, and rollback-safe
+  installer tests
+- Added managed signing, publisher verification, provenance attestation,
+  certificate rotation, and emergency revocation documentation and release
+  gates
+
 ### Fixed
 
 - Gave each recording an explicit session owner with unique temporary audio,

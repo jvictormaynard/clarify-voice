@@ -30,6 +30,7 @@ class RepositorySafetyTests(unittest.TestCase):
     def test_deploy_stages_all_python_modules(self):
         content = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
         self.assertIn('Join-Path $repoRoot "*.py"', content)
+        self.assertIn('${distribution};distribution', content)
         self.assertNotIn('Join-Path $soxDir "*.txt"', content)
         self.assertNotIn('Join-Path $soxDir "LICENSE.GPL.txt"', content)
 
@@ -63,12 +64,55 @@ class RepositorySafetyTests(unittest.TestCase):
             content,
         )
 
+    def test_release_requires_managed_signing_and_provenance(self):
+        content = (
+            ROOT / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "environment: release-signing",
+            "id-token: write",
+            "azure/login@v3",
+            "azure/artifact-signing-action@v2",
+            "scripts\\verify-signature.ps1",
+            "actions/attest-build-provenance@",
+            "ClarifyVoice-windows-x64.msi.sha256",
+            "ClarifyVoice-release-manifest.cab.sha256",
+        ):
+            self.assertIn(required, content)
+        self.assertNotIn("AZURE_CLIENT_SECRET", content)
+
+    def test_ci_exercises_installer_lifecycle_without_signing_secrets(self):
+        content = (
+            ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("scripts\\test-installer.ps1", content)
+        self.assertIn("ClarifyVoice-windows-x64-baseline.msi", content)
+        self.assertNotIn("AZURE_CLIENT_ID", content)
+
+    def test_installer_and_update_contract_files_exist(self):
+        required = [
+            "distribution/update-policy.json",
+            "installer/ClarifyVoice.wxs",
+            "scripts/build-installer.ps1",
+            "scripts/test-installer.ps1",
+            "scripts/create_release_manifest.py",
+            "scripts/build-manifest-container.ps1",
+            "scripts/verify-signature.ps1",
+            "update_security.py",
+            "version.py",
+        ]
+        for relative_path in required:
+            self.assertTrue((ROOT / relative_path).is_file(), relative_path)
+
+        build = (ROOT / "scripts" / "build.ps1").read_text(encoding="utf-8")
+        self.assertIn('${distribution};distribution', build)
+
     def test_package_scripts_are_documented_maintainer_aliases(self):
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertTrue(package["private"])
         self.assertEqual(
             set(package["scripts"]),
-            {"test", "check", "build", "setup", "deploy"},
+            {"test", "check", "build", "installer", "setup", "deploy"},
         )
 
     def test_open_source_community_files_exist(self):

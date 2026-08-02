@@ -31,6 +31,12 @@ The tag, release, and executable must all originate from the same green
 - `scripts/add_sbom_component.py`
 - `scripts/sox-runtime-manifest.json`
 - `scripts/build.ps1`
+- `scripts/build-installer.ps1`
+- `scripts/test-installer.ps1`
+- `scripts/create_release_manifest.py`
+- `scripts/verify-signature.ps1`
+- `distribution/update-policy.json`
+- `docs/windows-distribution.md`
 - `.github/workflows/ci.yml`
 - `.github/workflows/release.yml`
 
@@ -54,6 +60,8 @@ On the PR and after merge:
 - `Tests (ubuntu-latest)`
 - `Tests (windows-latest)`
 - `Package Windows executable`
+  - includes per-user MSI install, upgrade, repair, rollback, uninstall, and
+    signed-manifest contract smoke tests
 
 On the tag:
 
@@ -66,8 +74,12 @@ The GitHub release must contain exactly one of each:
 1. `ClarifyVoice.exe`
 2. `ClarifyVoice.exe.sha256`
 3. `ClarifyVoice.sbom.json`
-4. `ClarifyVoice-windows-x64.zip`
-5. `sox-14.4.2-source.tar.gz`
+4. `ClarifyVoice-windows-x64.msi`
+5. `ClarifyVoice-windows-x64.msi.sha256`
+6. `ClarifyVoice-release-manifest.cab`
+7. `ClarifyVoice-release-manifest.cab.sha256`
+8. `ClarifyVoice-windows-x64.zip`
+9. `sox-14.4.2-source.tar.gz`
 
 The ZIP must contain:
 
@@ -100,4 +112,9 @@ Portuguese installation instructions behaviorally equivalent.
 - Never force-update or reuse a published tag.
 - Never overwrite a published asset to conceal provenance drift; publish a new
   patch version instead.
-- Keep the unsigned portable-build and Windows SmartScreen limitation explicit.
+- Require valid, timestamped Authenticode signatures from the publisher pinned
+  in `distribution/update-policy.json` for EXE, MSI, and manifest CAB.
+- Require GitHub build-provenance attestations for EXE, MSI, CAB, and ZIP.
+- Keep the unsigned v0.1.2-and-earlier SmartScreen limitation explicit.
+- Follow `docs/windows-distribution.md` for signing ownership, cost, rotation,
+  revocation, rollout prerequisites, and manual acceptance.

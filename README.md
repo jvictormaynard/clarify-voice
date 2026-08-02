@@ -47,6 +47,17 @@ a separate editor.
 
 ## Installation
 
+### Windows installer (staged)
+
+The repository now contains the fail-closed MSI and authenticated-update
+contract, but it is not enabled for public use until managed signing,
+credential-storage, provenance, and manual acceptance gates are complete. When
+an MSI is attached to a future release, install only
+`ClarifyVoice-windows-x64.msi` whose Authenticode publisher and published
+SHA-256 match that release. See [Windows distribution and update
+security](docs/windows-distribution.md) for the exact install, upgrade, repair,
+rollback, uninstall, signing, and incident behavior.
+
 ### Portable Windows app
 
 The release workflow produces a self-contained `ClarifyVoice.exe`, so end users
@@ -58,7 +69,7 @@ do not need Python, Node.js, or SoX.
 4. Open **Models**, add an API key, validate the provider, and select the
    transcription and text-refinement models.
 
-The executable is not code-signed yet. Windows SmartScreen may therefore ask
+Published executables through v0.1.2 are not code-signed. Windows SmartScreen may therefore ask
 you to confirm the first launch. Verify the SHA-256 file published with the
 release if you want to check the download before running it.
 
@@ -169,6 +180,16 @@ The output is `dist\ClarifyVoice.exe`. The build deliberately does **not**
 bundle `.env` or any local API key. See [Development](docs/development.md) for
 the full setup, checks, release process, and WSL maintainer workflow.
 
+To build an unsigned local MSI for packaging tests after the executable:
+
+```powershell
+npm run installer
+```
+
+This installs the pinned WiX compiler into ignored `build\tools`, writes only
+inside the repository, and does not install or replace ClarifyVoice. Public
+MSIs must come from the protected signing workflow.
+
 ## Project structure
 
 ```text
@@ -177,11 +198,15 @@ provider_types.py              Typed provider requests, results, and capabilitie
 provider_adapters.py           Gemini and OpenAI-compatible adapters
 provider_registry.py           Provider metadata and request routing registry
 repositories.py                Versioned configuration and statistics storage
+update_security.py             Authenticated manifest and atomic update checks
+version.py                     Packaged application version
 desktop_state.py               Small workflow state controller
 windows_hotkeys.py             Native Windows hotkey helpers
 assets/                        Product branding and provider marks
 extra/sox-14.4.2/              Bundled Windows audio runtime and license
 scripts/                       Setup, build, and maintainer deploy scripts
+installer/                     WiX per-user MSI definition
+distribution/                  Immutable packaged update trust policy
 tests/                         Unit and repository-safety tests
 docs/                          Architecture and development documentation
 legacy/electron-prototype/     Archived first implementation, not built

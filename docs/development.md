@@ -185,6 +185,18 @@ The repository-local `$clarifyvoice-release` skill under
 It standardizes the release PR, CI gates, tag provenance, assets, checksums, and
 post-release verification.
 
+The signed installer/update contract, Azure OIDC configuration, manual
+acceptance matrix, rotation, and revocation procedure are documented in
+[Windows distribution and update security](windows-distribution.md). Do not
+publish an MSI or authenticated manifest until every rollout gate there is
+complete.
+
+For a local unsigned packaging check, run `npm run build` followed by
+`npm run installer`. This creates `dist\ClarifyVoice-windows-x64.msi`; it does
+not install it. The build requires a .NET SDK because
+`scripts/build-installer.ps1` installs pinned WiX 6.0.2 under ignored
+`build\tools`.
+
 1. Choose the next semantic version from the changes since the latest tag.
 2. Update `CHANGELOG.md` and any documentation whose behavior changed.
 3. Run the release preflight, replacing the example version:
@@ -198,12 +210,15 @@ post-release verification.
    Windows, and packaging checks pass.
 5. Create an annotated `vX.Y.Z` tag on the exact green `master` commit and push
    only that tag.
-6. The release workflow builds on Windows, creates the executable, CycloneDX
-   SBOM, ZIP, and SHA-256 checksum, verifies the official SoX source archive,
-   publishes artifact attestations, and uploads all five assets to the same
-   GitHub release.
-7. Download the published assets, verify the executable checksum and ZIP
-   contents, and confirm that `/releases/latest` resolves to the new version.
+6. The release workflow builds on Windows, requires Azure Artifact Signing,
+   verifies the EXE/MSI/manifest-CAB publisher and timestamps, generates the
+   runtime-lock CycloneDX SBOM, creates checksums and provenance attestations,
+   verifies the official SoX source archive, and publishes all required assets
+   to the same GitHub release.
+7. Download the published assets, verify signatures, checksums, manifest and
+   SBOM/ZIP contents, inspect attestations, and confirm that `/releases/latest`
+   resolves to the new version.
 
-The executable is currently unsigned. Code signing should be introduced before
-representing the app as a warning-free consumer installer.
+Releases through v0.1.2 remain unsigned. The staged workflow must not be run as
+a public release until its protected signing configuration and manual gates are
+complete.

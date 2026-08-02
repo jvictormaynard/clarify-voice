@@ -40,6 +40,12 @@ from repositories import (
     LocalUsageStatsRepository,
 )
 from windows_clipboard import ClipboardSnapshot, WindowsClipboardAdapter
+from update_security import (
+    UpdateSecurityError,
+    launch_prepared_update,
+    prepare_update,
+)
+from version import __version__
 from windows_hotkeys import (
     WM_HOTKEY,
     action_for_hotkey_id,
@@ -54,8 +60,10 @@ from windows_hotkeys import (
 
 try:
     import tkinter as tk
+    from tkinter import messagebox
 except Exception:
     tk = None
+    messagebox = None
 
 try:
     import customtkinter as ctk
@@ -1542,6 +1550,13 @@ STRINGS = {
         "cost_disclaimer": "Approximate public API pricing; unknown or custom models are excluded.",
         "autostart": "Start Clarify automatically",
         "autostart_subtitle": "Run in the background and start hidden when you sign in to Windows.",
+        "check_updates": "Check for updates",
+        "checking_updates": "Checking and verifying the latest release…",
+        "updates_current": "ClarifyVoice is up to date.",
+        "updates_windows_only": "Secure updates are available in the packaged Windows app.",
+        "update_ready": "Verified update {version} is ready.",
+        "update_confirm": "Install verified ClarifyVoice {version} now? The app will close.",
+        "update_failed": "Update blocked: {error}",
         "choose_model": "Models", "model_subtitle": "Configure transcription and text processing",
         "transcription_model": "Transcription",
         "text_refinement_model": "Text refinement",
@@ -1590,6 +1605,13 @@ STRINGS = {
         "cost_disclaimer": "Preços públicos aproximados; modelos desconhecidos ou personalizados são excluídos.",
         "autostart": "Iniciar o Clarify automaticamente",
         "autostart_subtitle": "Executar em segundo plano e iniciar oculto ao entrar no Windows.",
+        "check_updates": "Verificar atualizações",
+        "checking_updates": "Verificando e validando a versão mais recente…",
+        "updates_current": "O ClarifyVoice está atualizado.",
+        "updates_windows_only": "Atualizações seguras estão disponíveis no app Windows empacotado.",
+        "update_ready": "A atualização verificada {version} está pronta.",
+        "update_confirm": "Instalar agora o ClarifyVoice {version} verificado? O app será fechado.",
+        "update_failed": "Atualização bloqueada: {error}",
         "choose_model": "Modelos", "model_subtitle": "Configure a transcri\u00e7\u00e3o e o processamento do texto",
         "transcription_model": "Transcri\u00e7\u00e3o",
         "text_refinement_model": "Refinamento de texto",
@@ -1639,6 +1661,13 @@ STRINGS = {
         "cost_disclaimer": "Precios públicos aproximados de las API; se excluyen los modelos desconocidos o personalizados.",
         "autostart": "Iniciar Clarify automáticamente",
         "autostart_subtitle": "Ejecutar en segundo plano e iniciar oculto al entrar en Windows.",
+        "check_updates": "Buscar actualizaciones",
+        "checking_updates": "Buscando y verificando la versión más reciente…",
+        "updates_current": "ClarifyVoice está actualizado.",
+        "updates_windows_only": "Las actualizaciones seguras están disponibles en la aplicación de Windows.",
+        "update_ready": "La actualización verificada {version} está lista.",
+        "update_confirm": "¿Instalar ahora ClarifyVoice {version} verificado? La aplicación se cerrará.",
+        "update_failed": "Actualización bloqueada: {error}",
         "choose_model": "Modelos", "model_subtitle": "Configura la transcripción y el procesamiento de texto",
         "transcription_model": "Transcripción",
         "text_refinement_model": "Refinamiento de texto",
@@ -1688,6 +1717,13 @@ STRINGS = {
         "cost_disclaimer": "Ungefähre öffentliche API-Preise; unbekannte oder benutzerdefinierte Modelle sind ausgeschlossen.",
         "autostart": "Clarify automatisch starten",
         "autostart_subtitle": "Im Hintergrund und bei der Windows-Anmeldung ausgeblendet starten.",
+        "check_updates": "Nach Updates suchen",
+        "checking_updates": "Neueste Version wird gesucht und geprüft…",
+        "updates_current": "ClarifyVoice ist aktuell.",
+        "updates_windows_only": "Sichere Updates sind in der gepackten Windows-App verfügbar.",
+        "update_ready": "Das geprüfte Update {version} ist bereit.",
+        "update_confirm": "Geprüftes ClarifyVoice {version} jetzt installieren? Die App wird geschlossen.",
+        "update_failed": "Update blockiert: {error}",
         "choose_model": "Modelle", "model_subtitle": "Transkription und Textverarbeitung konfigurieren",
         "transcription_model": "Transkription",
         "text_refinement_model": "Textverfeinerung",
@@ -1737,6 +1773,13 @@ STRINGS = {
         "cost_disclaimer": "Приблизительные публичные цены API; неизвестные и пользовательские модели не учитываются.",
         "autostart": "Запускать Clarify автоматически",
         "autostart_subtitle": "Работать в фоне и запускаться скрытым при входе в Windows.",
+        "check_updates": "Проверить обновления",
+        "checking_updates": "Поиск и проверка последней версии…",
+        "updates_current": "Установлена последняя версия ClarifyVoice.",
+        "updates_windows_only": "Безопасные обновления доступны в сборке для Windows.",
+        "update_ready": "Проверенное обновление {version} готово.",
+        "update_confirm": "Установить проверенный ClarifyVoice {version}? Приложение закроется.",
+        "update_failed": "Обновление заблокировано: {error}",
         "choose_model": "Модели", "model_subtitle": "Настройка транскрипции и обработки текста",
         "transcription_model": "Транскрипция",
         "text_refinement_model": "Редактирование текста",
@@ -6518,7 +6561,8 @@ class App(ctk.CTk):
         refinement_menu_visible = {"value": False}
         refinement_signature = {"value": None}
 
-        # Settings intentionally contains only the Windows autostart flag.
+        # Settings contains local startup behavior and an explicit secure
+        # update action. Update checks never run in the background.
         preferences_inner = ctk.CTkFrame(
             pages["settings"], fg_color="transparent")
         preferences_inner.pack(fill="both", expand=True, padx=24, pady=22)
@@ -6534,6 +6578,84 @@ class App(ctk.CTk):
             preferences_inner, text=self._t("autostart_subtitle"),
             text_color=DIM, font=font_caption, anchor="w", justify="left",
             wraplength=430).pack(fill="x", padx=50, pady=(3, 0))
+
+        update_section = ctk.CTkFrame(
+            preferences_inner, fg_color="transparent")
+        update_section.pack(fill="x", pady=(28, 0))
+        ctk.CTkLabel(
+            update_section, text=f"ClarifyVoice {__version__}",
+            text_color=TEXT, font=font_body, anchor="w").pack(fill="x")
+        update_status = ctk.CTkLabel(
+            update_section, text="", text_color=DIM, font=font_caption,
+            anchor="w", justify="left", wraplength=430)
+        update_status.pack(fill="x", pady=(3, 7))
+        update_button = ctk.CTkButton(
+            update_section, text=self._t("check_updates"), width=150,
+            height=32, corner_radius=16, fg_color="#242424",
+            hover_color="#303030", text_color=TEXT, font=font_label)
+        update_button.pack(anchor="w")
+
+        def finish_update_check(prepared=None, error=None):
+            if not win.winfo_exists():
+                return
+            update_button.configure(state="normal")
+            if error is not None:
+                update_status.configure(
+                    text=self._t("update_failed").format(error=error),
+                    text_color="#d17878")
+                return
+            if prepared is None:
+                update_status.configure(
+                    text=self._t("updates_current"), text_color="#69c58a")
+                return
+            version = prepared.manifest.version
+            update_status.configure(
+                text=self._t("update_ready").format(version=version),
+                text_color="#69c58a")
+            if messagebox is None or not messagebox.askyesno(
+                    "ClarifyVoice",
+                    self._t("update_confirm").format(version=version),
+                    parent=win):
+                return
+            try:
+                # Revalidates size, checksum, signature, and publisher again
+                # immediately before invoking the visible MSI UI.
+                launch_prepared_update(prepared)
+            except UpdateSecurityError as update_error:
+                update_status.configure(
+                    text=self._t("update_failed").format(error=update_error),
+                    text_color="#d17878")
+                return
+            self._exit_application()
+
+        def check_for_updates():
+            if not IS_WIN or not getattr(sys, "frozen", False):
+                update_status.configure(
+                    text=self._t("updates_windows_only"), text_color=DIM)
+                return
+            update_button.configure(state="disabled")
+            update_status.configure(
+                text=self._t("checking_updates"), text_color=DIM)
+
+            def run():
+                try:
+                    prepared = prepare_update(
+                        __version__, DATA_DIR / "updates")
+                except (UpdateSecurityError, OSError, requests.RequestException) as error:
+                    try:
+                        win.after(0, lambda update_error=error:
+                            finish_update_check(error=update_error))
+                    except tk.TclError:
+                        pass
+                    return
+                try:
+                    win.after(0, lambda: finish_update_check(prepared=prepared))
+                except tk.TclError:
+                    pass
+
+            threading.Thread(target=run, daemon=True).start()
+
+        update_button.configure(command=check_for_updates)
 
         saved_settings = {
             "transcription": (selected["provider"], selected["model"]),

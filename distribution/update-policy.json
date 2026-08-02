@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "repository": "jvictormaynard/clarify-voice",
+  "channel": "stable",
+  "manifest_asset": "ClarifyVoice-release-manifest.cab",
+  "installer_asset": "ClarifyVoice-windows-x64.msi",
+  "publisher_common_name": "Joao Victor Maynard Mota",
+  "maximum_download_bytes": 268435456
+}
