@@ -1172,12 +1172,53 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
         send_key.assert_not_called()
         copy_result.assert_called_once_with("generated", should_paste=False)
 
+    def test_apply_result_without_snapshot_fails_closed_before_copy(self):
+        capture = app.SelectionCapture(self.target, "selected")
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=None), \
+                patch.object(app, "_copy_selected_text_with_sequence") as copy, \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_paste_generated_text",
+                             return_value=False) as copy_result:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        copy.assert_not_called()
+        send_key.assert_not_called()
+        copy_result.assert_called_once_with("generated", should_paste=False)
+
+    def test_apply_result_with_nonrestorable_snapshot_fails_closed_before_copy(
+            self):
+        capture = app.SelectionCapture(self.target, "selected")
+        before = ClipboardSnapshot(
+            (ClipboardFormat(9001, b"unsupported"),), 10, restorable=False)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=before), \
+                patch.object(app, "_copy_selected_text_with_sequence") as copy, \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_paste_generated_text",
+                             return_value=False) as copy_result:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        copy.assert_not_called()
+        send_key.assert_not_called()
+        copy_result.assert_called_once_with("generated", should_paste=False)
+
     def test_apply_result_rechecks_focus_after_clipboard_snapshot(self):
         capture = app.SelectionCapture(self.target, "selected")
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
         with patch.object(app.AppWorkflowClipboard, "is_target_current",
                           side_effect=[True, False]), \
                 patch.object(app, "_snapshot_windows_clipboard",
-                             return_value=None), \
+                             return_value=previous), \
                 patch.object(app, "_copy_selected_text") as copy, \
                 patch.object(app, "_send_key_chord") as send_key, \
                 patch.object(app, "_paste_generated_text", return_value=False) as copy_result:

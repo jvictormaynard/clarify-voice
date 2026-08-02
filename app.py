@@ -3409,6 +3409,13 @@ class AppWorkflowClipboard:
             before = _snapshot_windows_clipboard()
         except OSError:
             before = None
+        # Verification would replace the user's clipboard with the selected
+        # text.  Without an owned, restorable snapshot we cannot safely put it
+        # back, so fail closed before sending any Ctrl+C and keep only the
+        # generated result available.
+        if not isinstance(before, ClipboardSnapshot) or not before.restorable:
+            _paste_generated_text(result, should_paste=False)
+            return SelectionDisposition.COPIED
         # Snapshotting can briefly yield to another application; recheck at
         # the linearization point immediately before Ctrl+C as well.
         if not AppWorkflowClipboard.is_target_current(capture.target):
