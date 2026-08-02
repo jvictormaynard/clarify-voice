@@ -103,7 +103,9 @@ against the committed manifest. The manager then:
 - serializes inference calls through one sidecar; per-call cancellation affects
   only that call, while manager cancellation or shutdown also cancels queued
   calls;
-- records the owned PID and verifies its executable path before stale cleanup;
+- records the owned PID and absolute executable path, validates that path under
+  the app-owned asset root, and preserves the record if the live image differs
+  or cannot be verified;
 - on Windows, retains that record and blocks asset removal unless sidecar
   termination is confirmed;
 - restarts the sidecar once after a crash or broken request.

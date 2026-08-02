@@ -446,6 +446,47 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertNotIn("private sharing detail", str(raised.exception))
             self.assertFalse(installer.install_dir.exists())
 
+    def test_install_wraps_receipt_write_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            original_write_text = Path.write_text
+
+            def fail_receipt(path, *args, **kwargs):
+                if Path(path).name == "receipt.json":
+                    raise OSError("private filesystem detail")
+                return original_write_text(path, *args, **kwargs)
+
+            with patch.object(Path, "write_text", new=fail_receipt):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.install()
+
+            self.assertEqual(len(session.calls), 2)
+            self.assertIn("receipt", str(raised.exception))
+            self.assertNotIn("private filesystem detail", str(raised.exception))
+            self.assertFalse(installer.install_dir.exists())
+            self.assertFalse(list(fixture.root.glob(".install-*")))
+
+    def test_remove_wraps_partial_asset_root_deletion_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer.install()
+            original_rmtree = local_asr.shutil.rmtree
+
+            def fail_remove(path, *args, **kwargs):
+                if Path(path) == installer.root:
+                    raise OSError("private sharing detail")
+                return original_rmtree(path, *args, **kwargs)
+
+            with patch.object(local_asr.shutil, "rmtree", new=fail_remove):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.remove()
+
+            self.assertIn("remove local-ASR assets", str(raised.exception))
+            self.assertNotIn("private sharing detail", str(raised.exception))
+            self.assertTrue(installer.root.exists())
+
     def test_install_wraps_staging_creation_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)
@@ -1228,23 +1269,31 @@ class LocalASRRecordedProcessTests(unittest.TestCase):
 
     def test_cleanup_keeps_record_when_termination_is_not_confirmed(self):
         with tempfile.TemporaryDirectory() as directory:
-            record_path = Path(directory) / "sidecar-process.json"
-            executable = Path(directory) / "whisper-server.exe"
-            record_path.write_text(json.dumps({"pid": 4321}), encoding="utf-8")
+            root = Path(directory)
+            record_path = root / "sidecar-process.json"
+            executable = root / "installed" / "runtime" / "whisper-server.exe"
+            executable.parent.mkdir(parents=True)
+            record_path.write_text(json.dumps({
+                "pid": 4321, "executable": str(executable),
+            }), encoding="utf-8")
 
             with patch.object(
                     local_asr, "_process_image_path", return_value=executable), \
                     patch.object(local_asr, "_terminate_pid", return_value=False):
                 with self.assertRaises(local_asr.LocalASRSidecarError):
-                    local_asr.cleanup_recorded_sidecar(record_path, executable)
+                    local_asr.cleanup_recorded_sidecar(record_path, executable, root)
 
             self.assertTrue(record_path.exists())
 
     def test_cleanup_keeps_record_when_image_lookup_is_inconclusive(self):
         with tempfile.TemporaryDirectory() as directory:
-            record_path = Path(directory) / "sidecar-process.json"
-            executable = Path(directory) / "whisper-server.exe"
-            record_path.write_text(json.dumps({"pid": 4321}), encoding="utf-8")
+            root = Path(directory)
+            record_path = root / "sidecar-process.json"
+            executable = root / "installed" / "runtime" / "whisper-server.exe"
+            executable.parent.mkdir(parents=True)
+            record_path.write_text(json.dumps({
+                "pid": 4321, "executable": str(executable),
+            }), encoding="utf-8")
 
             for running in (True, None):
                 with self.subTest(running=running), \
@@ -1255,25 +1304,73 @@ class LocalASRRecordedProcessTests(unittest.TestCase):
                         ), patch.object(local_asr, "_terminate_pid") as terminate:
                     with self.assertRaises(local_asr.LocalASRSidecarError):
                         local_asr.cleanup_recorded_sidecar(
-                            record_path, executable)
+                            record_path, executable, root)
 
                 self.assertTrue(record_path.exists())
                 terminate.assert_not_called()
 
     def test_cleanup_discards_record_after_proving_pid_exited(self):
         with tempfile.TemporaryDirectory() as directory:
-            record_path = Path(directory) / "sidecar-process.json"
-            executable = Path(directory) / "whisper-server.exe"
-            record_path.write_text(json.dumps({"pid": 4321}), encoding="utf-8")
+            root = Path(directory)
+            record_path = root / "sidecar-process.json"
+            executable = root / "installed" / "runtime" / "whisper-server.exe"
+            executable.parent.mkdir(parents=True)
+            record_path.write_text(json.dumps({
+                "pid": 4321, "executable": str(executable),
+            }), encoding="utf-8")
 
             with patch.object(
                     local_asr, "_process_image_path", return_value=None), \
                     patch.object(
                         local_asr, "_pid_running_state", return_value=False,
                     ):
-                local_asr.cleanup_recorded_sidecar(record_path, executable)
+                local_asr.cleanup_recorded_sidecar(record_path, executable, root)
 
             self.assertFalse(record_path.exists())
+
+    def test_cleanup_terminates_recorded_old_executable_during_upgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record_path = root / "sidecar-process.json"
+            old_executable = root / "old-install" / "runtime" / "whisper-server.exe"
+            current_executable = root / "new-install" / "runtime" / "whisper-server.exe"
+            old_executable.parent.mkdir(parents=True)
+            current_executable.parent.mkdir(parents=True)
+            record_path.write_text(json.dumps({
+                "pid": 4321, "executable": str(old_executable),
+            }), encoding="utf-8")
+
+            with patch.object(
+                    local_asr, "_process_image_path", return_value=old_executable), \
+                    patch.object(
+                        local_asr, "_terminate_pid", return_value=True,
+                    ) as terminate:
+                local_asr.cleanup_recorded_sidecar(
+                    record_path, current_executable, root)
+
+            terminate.assert_called_once_with(4321)
+            self.assertFalse(record_path.exists())
+
+    def test_cleanup_preserves_record_for_executable_outside_asset_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record_path = root / "sidecar-process.json"
+            current_executable = root / "current" / "runtime" / "whisper-server.exe"
+            external_executable = root.parent / "external" / "runtime" / "whisper-server.exe"
+            current_executable.parent.mkdir(parents=True)
+            record_path.write_text(json.dumps({
+                "pid": 4321, "executable": str(external_executable),
+            }), encoding="utf-8")
+
+            with patch.object(
+                    local_asr, "_pid_running_state", return_value=True,
+            ), patch.object(local_asr, "_terminate_pid") as terminate:
+                with self.assertRaises(local_asr.LocalASRSidecarError):
+                    local_asr.cleanup_recorded_sidecar(
+                        record_path, current_executable, root)
+
+            terminate.assert_not_called()
+            self.assertTrue(record_path.exists())
 
 
 class LocalASRHarnessTests(unittest.TestCase):

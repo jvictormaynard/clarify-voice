@@ -519,14 +519,19 @@ class LocalASRInstaller:
                 "model": self.manifest["recommended_model"],
                 "installed_at": int(time.time()),
             }
-            (staging / "receipt.json").write_text(
-                json.dumps(receipt, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8")
+            try:
+                (staging / "receipt.json").write_text(
+                    json.dumps(receipt, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+            except OSError as error:
+                raise LocalASRError(
+                    "Cannot write local-ASR installation receipt; "
+                    "retry the install.") from error
 
             try:
                 if self.install_dir.exists():
                     cleanup_recorded_sidecar(
-                        self.process_record_path, self.executable_path)
+                        self.process_record_path, self.executable_path, self.root)
                     shutil.rmtree(self.install_dir)
                 os.replace(staging, self.install_dir)
             except OSError as error:
@@ -557,9 +562,15 @@ class LocalASRInstaller:
         if not owned:
             raise LocalASRError(
                 f"Refusing to remove unowned local-ASR asset root: {self.root}")
-        cleanup_recorded_sidecar(
-            self.process_record_path, self.executable_path)
-        shutil.rmtree(self.root)
+        try:
+            cleanup_recorded_sidecar(
+                self.process_record_path, self.executable_path, self.root)
+            shutil.rmtree(self.root)
+        except LocalASRError:
+            raise
+        except OSError as error:
+            raise LocalASRError(
+                "Cannot remove local-ASR assets completely; retry removal.") from error
         return True
 
 
@@ -689,14 +700,67 @@ def _terminate_pid(pid: int) -> bool:
         return False
 
 
-def cleanup_recorded_sidecar(record_path: Path, expected_executable: Path) -> None:
-    """Terminate only a recorded PID whose image still matches our sidecar."""
+def _owned_sidecar_executable(path: Path, asset_root: Path) -> Path | None:
+    """Resolve a record path only when it has the app's sidecar layout."""
+    try:
+        root = Path(asset_root).resolve()
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            return None
+        resolved = candidate.resolve()
+        relative = resolved.relative_to(root)
+        if not relative.parts or resolved.name != "whisper-server.exe":
+            return None
+        for component in relative.parts[:-1]:
+            _safe_path_component(component, "installation id")
+        return resolved
+    except (OSError, ValueError, LocalASRIntegrityError):
+        return None
+
+
+def cleanup_recorded_sidecar(
+        record_path: Path,
+        expected_executable: Path,
+        asset_root: Path | None = None,
+) -> None:
+    """Terminate only a recorded PID whose image still matches its record."""
     record_path = Path(record_path)
     try:
-        record = json.loads(record_path.read_text(encoding="utf-8"))
-        pid = int(record.get("pid", 0))
-    except (OSError, ValueError, TypeError, AttributeError):
-        pid = 0
+        payload = record_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise LocalASRSidecarError(
+            "Could not read the recorded local-ASR sidecar; "
+            "its process record was preserved") from error
+    try:
+        record = json.loads(payload)
+        pid = int(record["pid"])
+        recorded_executable = record["executable"]
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
+        raise LocalASRSidecarError(
+            "The recorded local-ASR sidecar ownership is invalid; "
+            "its process record was preserved") from error
+    if pid <= 0:
+        raise LocalASRSidecarError(
+            "The recorded local-ASR sidecar PID is invalid; "
+            "its process record was preserved")
+
+    root = Path(asset_root) if asset_root is not None else record_path.parent
+    expected = _owned_sidecar_executable(expected_executable, root)
+    recorded = _owned_sidecar_executable(Path(str(recorded_executable)), root)
+    if expected is None or recorded is None:
+        running = _pid_running_state(pid)
+        if running is False:
+            try:
+                record_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        raise LocalASRSidecarError(
+            "Could not validate the recorded local-ASR sidecar image; "
+            "its process record was preserved")
+
     actual = _process_image_path(pid)
     if actual is None:
         running = _pid_running_state(pid)
@@ -706,12 +770,16 @@ def cleanup_recorded_sidecar(record_path: Path, expected_executable: Path) -> No
                 "its process record was preserved")
     else:
         try:
-            matches = actual.resolve() == Path(expected_executable).resolve()
+            actual_resolved = Path(actual).resolve()
         except OSError as error:
             raise LocalASRSidecarError(
                 "Could not verify the recorded local-ASR sidecar image; "
                 "its process record was preserved") from error
-        if matches and not _terminate_pid(pid):
+        if actual_resolved != recorded:
+            raise LocalASRSidecarError(
+                "The recorded local-ASR sidecar image changed; "
+                "its process record was preserved")
+        if not _terminate_pid(pid):
             raise LocalASRSidecarError(
                 "Could not confirm that the recorded local-ASR sidecar terminated")
     try:
@@ -865,7 +933,10 @@ class LocalASRSidecarManager:
                 self._raise_if_cancelled(cancel_event)
                 _require_unelevated_windows_process(self._elevation_checker)
                 cleanup_recorded_sidecar(
-                    self.installer.process_record_path, self.installer.executable_path)
+                    self.installer.process_record_path,
+                    self.installer.executable_path,
+                    self.installer.root,
+                )
                 self._raise_if_cancelled(startup_cancel)
                 self._raise_if_cancelled(cancel_event)
 
