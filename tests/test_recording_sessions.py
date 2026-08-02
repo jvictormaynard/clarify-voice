@@ -139,6 +139,33 @@ class RecordingSessionTests(unittest.TestCase):
                     session.cleanup_error, app.RecordingCleanupError)
                 self.assertTrue(path.exists())
 
+    def test_finisher_retains_session_when_cleanup_is_still_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recording.wav"
+            path.write_bytes(b"audio")
+            session = app.RecordingSession(recorder=Mock(), audio_path=path)
+            session.state = "recording"
+            states = []
+            harness = SimpleNamespace(
+                _recording_session=session,
+                _closing=False,
+                _session_is_current=lambda candidate: (
+                    harness._recording_session is candidate and not harness._closing),
+                _set_state=lambda state, text="": states.append((state, text)),
+                _t=lambda key: key,
+            )
+
+            with patch.object(
+                    app.Recorder, "_safe_delete",
+                    side_effect=app.RecordingCleanupError("locked")):
+                session.cancel()
+                self.assertFalse(session.wait_for_shutdown(2))
+                app.App._finish_recording_session(
+                    harness, session, error=session.cleanup_error)
+                self.assertIs(harness._recording_session, session)
+                self.assertEqual(states, [("ready", "error")])
+                self.assertTrue(path.exists())
+
     def test_stale_process_cleanup_targets_session_path(self):
         command_runner = Mock()
         session_path = Path("C:/Users/test/AppData/Local/ClarifyVoice/recording-42.wav")

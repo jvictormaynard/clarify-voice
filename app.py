@@ -5022,11 +5022,22 @@ class App(ctk.CTk):
             self, session, text=None, error=None, status_key=None):
         if not self._session_is_current(session):
             return
-        self._recording_session = None
+        cleanup_pending = not session._cleanup_done.is_set()
+        if not cleanup_pending:
+            self._recording_session = None
         if text:
             self._on_result(text)
         else:
             self._set_state("ready", self._t(status_key or "error"))
+        if cleanup_pending:
+            def release_after_cleanup():
+                if (session.wait_for_shutdown(SESSION_SHUTDOWN_JOIN_SECONDS)
+                        and self._session_is_current(session)):
+                    self._recording_session = None
+            threading.Thread(
+                target=release_after_cleanup,
+                name="ClarifyVoiceCleanupRelease",
+                daemon=True).start()
 
     def _stop_recording(self):
         session = getattr(self, "_recording_session", None)
