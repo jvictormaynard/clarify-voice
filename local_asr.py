@@ -97,6 +97,126 @@ class LocalASRSidecarError(LocalASRError):
     """The verified sidecar could not start or complete inference."""
 
 
+class _AssetRootInstallLock:
+    """Crash-released, cross-process lock for install-root mutations."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._fd: int | None = None
+        self._windows_locked = False
+
+    @staticmethod
+    def _is_contention(error: OSError) -> bool:
+        import errno
+
+        return isinstance(error, BlockingIOError) or getattr(
+            error, "errno", None) in (errno.EACCES, errno.EAGAIN)
+
+    def acquire(self) -> "_AssetRootInstallLock":
+        if self._fd is not None:
+            return self
+        try:
+            if self.path.is_symlink():
+                raise LocalASRError(
+                    "Refusing symlinked or unverifiable local-ASR install lock")
+            if self.path.exists():
+                reparse = _reparse_state(self.path)
+                if reparse is not False:
+                    raise LocalASRError(
+                        "Refusing symlinked or unverifiable local-ASR install lock")
+        except OSError as error:
+            raise LocalASRError(
+                "Cannot inspect the local-ASR install lock; retry the operation.") from error
+        flags = os.O_RDWR | os.O_CREAT
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        flags |= no_follow
+        binary = getattr(os, "O_BINARY", 0)
+        flags |= binary
+        try:
+            fd = os.open(self.path, flags, 0o600)
+        except OSError as error:
+            raise LocalASRError(
+                "Cannot open the local-ASR install lock; retry the operation.") from error
+        try:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    if os.fstat(fd).st_size == 0:
+                        os.write(fd, b"\0")
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    try:
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    except OSError as error:
+                        if self._is_contention(error):
+                            raise LocalASRError(
+                                "Another local-ASR install is in progress; retry later."
+                            ) from error
+                        raise LocalASRError(
+                            "Cannot acquire the local-ASR install lock; retry the operation."
+                        ) from error
+                    self._windows_locked = True
+                else:
+                    import fcntl
+
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError as error:
+                        if self._is_contention(error):
+                            raise LocalASRError(
+                                "Another local-ASR install is in progress; retry later."
+                            ) from error
+                        raise LocalASRError(
+                            "Cannot acquire the local-ASR install lock; retry the operation."
+                        ) from error
+            except LocalASRError:
+                raise
+            except OSError as error:
+                raise LocalASRError(
+                    "Cannot acquire the local-ASR install lock; retry the operation."
+                ) from error
+            self._fd = fd
+            return self
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+
+    def release(self) -> None:
+        fd = self._fd
+        if fd is None:
+            return
+        self._fd = None
+        try:
+            if os.name == "nt" and self._windows_locked:
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            elif os.name != "nt":
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            self._windows_locked = False
+            os.close(fd)
+
+    def __enter__(self) -> "_AssetRootInstallLock":
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        try:
+            self.release()
+        except OSError as error:
+            if exc_type is None:
+                raise LocalASRError(
+                    "Cannot release the local-ASR install lock; retry the operation."
+                ) from error
+        return False
+
+
 @dataclass(frozen=True)
 class ManifestAsset:
     name: str
@@ -158,6 +278,40 @@ def _safe_path_component(value: object, field: str) -> str:
             or any(character not in allowed for character in value)):
         raise LocalASRIntegrityError(f"Manifest path component is unsafe: {field}")
     return value
+
+
+def _safe_staging_name(name: str) -> bool:
+    prefix = ".install-"
+    suffix = name[len(prefix):] if name.startswith(prefix) else ""
+    allowed = frozenset(string.ascii_letters + string.digits + "_-")
+    return (bool(suffix) and len(name) <= 128
+            and name.startswith(prefix)
+            and all(character in allowed for character in suffix))
+
+
+def _reparse_state(path: Path) -> bool | None:
+    """Return whether a path is a symlink/reparse point, or None if unknown."""
+    try:
+        if path.is_symlink():
+            return True
+    except OSError:
+        return None
+    if platform.system() != "Windows":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = _windows_kernel32_with_last_error(ctypes)
+        get_attributes = kernel32.GetFileAttributesW
+        get_attributes.argtypes = [wintypes.LPCWSTR]
+        get_attributes.restype = wintypes.DWORD
+        attributes = get_attributes(str(path))
+        if attributes == 0xFFFFFFFF:  # INVALID_FILE_ATTRIBUTES
+            return None
+        return bool(attributes & 0x00000400)  # FILE_ATTRIBUTE_REPARSE_POINT
+    except Exception:
+        return None
 
 
 def _valid_digest(value: object) -> bool:
@@ -444,6 +598,75 @@ class LocalASRInstaller:
                 raise LocalASRError(
                     "Cannot record local-ASR asset-root ownership") from error
 
+    def _acquire_install_lock(self) -> _AssetRootInstallLock:
+        try:
+            if self.root.is_symlink():
+                raise LocalASRError(f"Refusing symlinked asset root: {self.root}")
+            root = self.root.absolute()
+            root.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise LocalASRError(
+                "Cannot resolve the local-ASR asset root for locking; retry the operation."
+            ) from error
+        lock_path = root.parent / f".{root.name}.clarifyvoice-local-asr.lock"
+        return _AssetRootInstallLock(lock_path)
+
+    def _assert_owned_root(self) -> None:
+        if self.root.is_symlink():
+            raise LocalASRError(f"Refusing symlinked asset root: {self.root}")
+        marker = self.root / ROOT_MARKER
+        try:
+            if not self.root.is_dir() or marker.is_symlink() or not marker.is_file():
+                raise LocalASRError(
+                    f"Refusing to use unowned local-ASR asset root: {self.root}")
+            owner = marker.read_text(encoding="utf-8").strip()
+        except LocalASRError:
+            raise
+        except OSError as error:
+            raise LocalASRError(
+                "Cannot verify local-ASR asset-root ownership; retry the operation.") from error
+        if owner != PROVIDER_ID:
+            raise LocalASRError(f"Asset root has an unknown owner: {self.root}")
+
+    def _cleanup_orphaned_staging(self) -> None:
+        try:
+            root = self.root.resolve()
+            children = tuple(self.root.iterdir())
+        except OSError as error:
+            raise LocalASRError(
+                "Cannot inspect local-ASR staging directories; retry the install.") from error
+        for child in children:
+            if not child.name.startswith(".install-"):
+                continue
+            if not _safe_staging_name(child.name):
+                raise LocalASRError(
+                    "Refusing ambiguous local-ASR staging path; "
+                    "remove it manually after inspection.")
+            try:
+                if child.parent.resolve() != root:
+                    raise LocalASRError(
+                        "Refusing local-ASR staging path outside the asset root")
+                reparse = _reparse_state(child)
+                if reparse is not False:
+                    raise LocalASRError(
+                        "Refusing symlinked or unverifiable local-ASR staging path")
+                resolved = child.resolve()
+                if resolved.parent != root or not child.is_dir():
+                    raise LocalASRError(
+                        "Refusing ambiguous local-ASR staging path; "
+                        "remove it manually after inspection.")
+                shutil.rmtree(child)
+                if child.exists():
+                    raise LocalASRError(
+                        "Cannot clean abandoned local-ASR staging; "
+                        "retry the install.")
+            except LocalASRError:
+                raise
+            except OSError as error:
+                raise LocalASRError(
+                    "Cannot clean abandoned local-ASR staging; "
+                    "retry the install.") from error
+
     def _extract_runtime(self, archive_path: Path, staging: Path) -> None:
         expected = {
             str(entry["archive_path"]): entry
@@ -486,91 +709,90 @@ class LocalASRInstaller:
                     f"Cannot preserve license notice {relative}: {error}") from error
 
     def install(self, callback: ProgressCallback | None = None) -> dict:
-        existing = self.status()
-        if existing["state"] == "installed":
-            self._report(callback, "complete", 1, 1)
-            return existing
-
-        self._claim_root()
-        try:
-            staging = Path(tempfile.mkdtemp(prefix=".install-", dir=self.root))
-        except OSError as error:
-            raise LocalASRError(
-                "Cannot create local-ASR staging directory; "
-                "retry the install.") from error
-        runtime_archive = staging / self.asset("runtime").filename
-        try:
-            self._download(self.asset("runtime"), runtime_archive, callback)
-            self._report(callback, "extract:runtime", 0, 1)
-            self._extract_runtime(runtime_archive, staging)
-            runtime_archive.unlink(missing_ok=True)
-            self._report(callback, "extract:runtime", 1, 1)
-
-            model = self.asset("model")
-            model_path = staging / "models" / model.filename
-            model_path.parent.mkdir(parents=True, exist_ok=True)
-            self._download(model, model_path, callback)
-            self._copy_license_notices(staging)
-
-            receipt = {
-                "schema_version": 1,
-                "installation_id": self.installation_id,
-                "engine": self.manifest["engine"],
-                "model": self.manifest["recommended_model"],
-                "installed_at": int(time.time()),
-            }
+        # Validate manifest-derived paths before creating or claiming any root.
+        self.install_dir
+        lock = self._acquire_install_lock()
+        with lock:
+            self._claim_root()
+            self._assert_owned_root()
+            existing = self.status()
+            if existing["state"] == "installed":
+                self._report(callback, "complete", 1, 1)
+                return existing
+            self._cleanup_orphaned_staging()
             try:
-                (staging / "receipt.json").write_text(
-                    json.dumps(receipt, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8")
+                staging = Path(tempfile.mkdtemp(prefix=".install-", dir=self.root))
             except OSError as error:
                 raise LocalASRError(
-                    "Cannot write local-ASR installation receipt; "
+                    "Cannot create local-ASR staging directory; "
                     "retry the install.") from error
-
+            runtime_archive = staging / self.asset("runtime").filename
             try:
-                if self.install_dir.exists():
-                    cleanup_recorded_sidecar(
-                        self.process_record_path, self.executable_path, self.root)
-                    shutil.rmtree(self.install_dir)
-                os.replace(staging, self.install_dir)
-            except OSError as error:
-                raise LocalASRError(
-                    "Cannot publish local-ASR installation; "
-                    "retry the install.") from error
-            result = self.status()
-            if result["state"] != "installed":
-                raise LocalASRIntegrityError(result["detail"])
-            self._report(callback, "complete", 1, 1)
-            return result
-        except BaseException:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
+                self._download(self.asset("runtime"), runtime_archive, callback)
+                self._report(callback, "extract:runtime", 0, 1)
+                self._extract_runtime(runtime_archive, staging)
+                runtime_archive.unlink(missing_ok=True)
+                self._report(callback, "extract:runtime", 1, 1)
+
+                model = self.asset("model")
+                model_path = staging / "models" / model.filename
+                model_path.parent.mkdir(parents=True, exist_ok=True)
+                self._download(model, model_path, callback)
+                self._copy_license_notices(staging)
+
+                receipt = {
+                    "schema_version": 1,
+                    "installation_id": self.installation_id,
+                    "engine": self.manifest["engine"],
+                    "model": self.manifest["recommended_model"],
+                    "installed_at": int(time.time()),
+                }
+                try:
+                    (staging / "receipt.json").write_text(
+                        json.dumps(receipt, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8")
+                except OSError as error:
+                    raise LocalASRError(
+                        "Cannot write local-ASR installation receipt; "
+                        "retry the install.") from error
+
+                try:
+                    if self.install_dir.exists():
+                        cleanup_recorded_sidecar(
+                            self.process_record_path, self.executable_path, self.root)
+                        shutil.rmtree(self.install_dir)
+                    os.replace(staging, self.install_dir)
+                except OSError as error:
+                    raise LocalASRError(
+                        "Cannot publish local-ASR installation; "
+                        "retry the install.") from error
+                result = self.status()
+                if result["state"] != "installed":
+                    raise LocalASRIntegrityError(result["detail"])
+                self._report(callback, "complete", 1, 1)
+                return result
+            except BaseException:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
 
     def remove(self) -> bool:
-        existed = self.root.exists()
-        if not existed:
-            return False
-        if self.root.is_symlink():
-            raise LocalASRError(f"Refusing to remove symlinked asset root: {self.root}")
-        marker = self.root / ROOT_MARKER
-        owned = False
-        try:
-            owned = marker.read_text(encoding="utf-8").strip() == PROVIDER_ID
-        except OSError:
-            pass
-        if not owned:
-            raise LocalASRError(
-                f"Refusing to remove unowned local-ASR asset root: {self.root}")
-        try:
-            cleanup_recorded_sidecar(
-                self.process_record_path, self.executable_path, self.root)
-            shutil.rmtree(self.root)
-        except LocalASRError:
-            raise
-        except OSError as error:
-            raise LocalASRError(
-                "Cannot remove local-ASR assets completely; retry removal.") from error
+        lock = self._acquire_install_lock()
+        with lock:
+            if not self.root.exists():
+                return False
+            self._assert_owned_root()
+            try:
+                cleanup_recorded_sidecar(
+                    self.process_record_path, self.executable_path, self.root)
+                shutil.rmtree(self.root)
+                if self.root.exists():
+                    raise LocalASRError(
+                        "Cannot remove local-ASR assets completely; retry removal.")
+            except LocalASRError:
+                raise
+            except OSError as error:
+                raise LocalASRError(
+                    "Cannot remove local-ASR assets completely; retry removal.") from error
         return True
 
 
@@ -607,6 +829,33 @@ def _process_image_path(pid: int) -> Path | None:
         return None
 
 
+def _windows_kernel32_with_last_error(ctypes_module):
+    """Load kernel32 with a ctypes-owned last-error copy when available."""
+    windll = getattr(ctypes_module, "windll", None)
+    candidate = getattr(windll, "kernel32", None)
+    open_process = getattr(candidate, "OpenProcess", None)
+    if open_process is not None and type(open_process).__module__ != "_ctypes":
+        return candidate
+    try:
+        return ctypes_module.WinDLL("kernel32", use_last_error=True)
+    except (AttributeError, OSError):
+        return candidate
+
+
+def _windows_last_error(ctypes_module, kernel32) -> int:
+    getter = getattr(ctypes_module, "get_last_error", None)
+    error = int(getter()) if callable(getter) else 0
+    if error:
+        return error
+    native_getter = getattr(kernel32, "GetLastError", None)
+    if callable(native_getter):
+        try:
+            return int(native_getter())
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 def _pid_running_state(pid: int) -> bool | None:
     """Return True/False only when liveness can be established conclusively."""
     if pid <= 0:
@@ -625,19 +874,21 @@ def _pid_running_state(pid: int) -> bool | None:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = _windows_kernel32_with_last_error(ctypes)
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel32.OpenProcess.restype = wintypes.HANDLE
+        synchronize = 0x00100000
+        process = kernel32.OpenProcess(synchronize, False, pid)
+        if not process:
+            if _windows_last_error(ctypes, kernel32) == 87:  # ERROR_INVALID_PARAMETER
+                return False
+            return None
         kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         kernel32.WaitForSingleObject.restype = wintypes.DWORD
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
-        synchronize = 0x00100000
         wait_object_0 = 0
         wait_timeout = 0x00000102
-        process = kernel32.OpenProcess(synchronize, False, pid)
-        if not process:
-            return None
         try:
             result = kernel32.WaitForSingleObject(process, 0)
             if result == wait_object_0:

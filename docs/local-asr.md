@@ -54,10 +54,19 @@ acceptance run. Downloads stream into a staging directory. The runtime archive
 and model must match both the published size and SHA-256 before extraction or
 installation. Only allowlisted archive members are copied, and every extracted
 file is hashed again. A failed or interrupted install leaves no executable in
-the final installation directory. Manifest-derived engine, version, model, and
-asset filename components use a portable allowlist, relative paths reject both
-Windows and POSIX traversal, and the resolved install directory must remain
-below the owned asset root.
+the final installation directory. Install-root mutations use a nonblocking
+cross-process lock in a deterministic sibling file: it is acquired before
+claim/status and held through staging cleanup and final publication; the root
+ownership marker is validated again under that lock before any cleanup. Unix
+uses `flock`; Windows uses an OS byte-range lock, both of which are released by
+the operating system if the installer crashes. A second installer fails with
+a typed retryable error and cannot remove an active staging directory. Once the lock is released, the next owner removes only
+direct, conservatively named, non-reparse `.install-*` directories; ambiguous
+or cleanup-failing paths are preserved and reported as a typed error rather
+than accumulating another staging attempt. Manifest-derived engine, version,
+model, and asset filename components use a portable allowlist, relative paths
+reject both Windows and POSIX traversal, and the resolved install directory
+must remain below the owned asset root.
 
 `status` is read-only and performs no network access. It hashes every installed
 runtime file and the model. `remove` terminates only a recorded sidecar PID whose

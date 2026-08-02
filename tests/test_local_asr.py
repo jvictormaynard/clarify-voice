@@ -2,6 +2,7 @@ import ctypes
 import hashlib
 import io
 import json
+import os
 import struct
 import tempfile
 import threading
@@ -505,6 +506,178 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertEqual(session.calls, [])
             self.assertIn("staging", str(raised.exception))
             self.assertNotIn("private disk detail", str(raised.exception))
+
+    def test_install_removes_owned_orphaned_staging_before_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            fixture.root.mkdir()
+            (fixture.root / local_asr.ROOT_MARKER).write_text(
+                f"{local_asr.PROVIDER_ID}\n", encoding="utf-8")
+            orphan = fixture.root / ".install-crashed"
+            orphan.mkdir()
+            (orphan / "partial.bin").write_bytes(b"partial")
+
+            result = installer.install()
+
+            self.assertEqual(result["state"], "installed")
+            self.assertFalse(orphan.exists())
+            self.assertEqual(len(session.calls), 2)
+
+    def test_install_does_not_remove_active_staging_while_lock_is_held(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            owner, _owner_session = fixture.installer()
+            fixture.root.mkdir()
+            (fixture.root / local_asr.ROOT_MARKER).write_text(
+                f"{local_asr.PROVIDER_ID}\n", encoding="utf-8")
+            active = fixture.root / ".install-active"
+            active.mkdir()
+            (active / "partial.bin").write_bytes(b"still downloading")
+            contender, session = fixture.installer()
+            lock = owner._acquire_install_lock()
+            lock.acquire()
+            try:
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    contender.install()
+                self.assertIn("install is in progress", str(raised.exception))
+                self.assertTrue(active.exists())
+                self.assertEqual(session.calls, [])
+            finally:
+                lock.release()
+
+            result = contender.install()
+            self.assertEqual(result["state"], "installed")
+            self.assertFalse(active.exists())
+            self.assertEqual(len(session.calls), 2)
+
+    def test_install_does_not_return_installed_while_remove_holds_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer.install()
+            contender, _contender_session = fixture.installer()
+            lock = installer._acquire_install_lock()
+            lock.acquire()
+            try:
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    contender.install()
+                self.assertIn("install is in progress", str(raised.exception))
+                with self.assertRaises(local_asr.LocalASRError):
+                    contender.remove()
+                self.assertTrue(contender.install_dir.exists())
+            finally:
+                lock.release()
+
+    def test_install_lock_release_failure_is_typed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer._claim_root()
+            lock = installer._acquire_install_lock()
+            lock.acquire()
+            original_close = local_asr.os.close
+            lock_fd = lock._fd
+
+            def close_then_fail(fd):
+                original_close(fd)
+                if fd == lock_fd:
+                    raise OSError("private lock detail")
+
+            with patch.object(local_asr.os, "close", new=close_then_fail):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    with lock:
+                        pass
+
+            self.assertIn("release", str(raised.exception))
+            self.assertNotIn("private lock detail", str(raised.exception))
+
+    def test_install_lock_setup_failure_is_typed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer._claim_root()
+            lock = installer._acquire_install_lock()
+            if os.name == "nt":
+                failing_lock_step = patch.object(
+                    local_asr.os, "fstat", side_effect=OSError("private lock detail"))
+            else:
+                import fcntl
+
+                failing_lock_step = patch.object(
+                    fcntl, "flock", side_effect=OSError("private lock detail"))
+            with failing_lock_step:
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    lock.acquire()
+
+            self.assertIn("acquire", str(raised.exception))
+            self.assertNotIn("private lock detail", str(raised.exception))
+
+    def test_install_preserves_ambiguous_staging_name_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            fixture.root.mkdir()
+            (fixture.root / local_asr.ROOT_MARKER).write_text(
+                f"{local_asr.PROVIDER_ID}\n", encoding="utf-8")
+            ambiguous = fixture.root / ".install-unsafe!"
+            ambiguous.mkdir()
+
+            with self.assertRaises(local_asr.LocalASRError):
+                installer.install()
+
+            self.assertTrue(ambiguous.exists())
+            self.assertEqual(session.calls, [])
+
+    def test_install_preserves_staging_symlink_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            fixture.root.mkdir()
+            (fixture.root / local_asr.ROOT_MARKER).write_text(
+                f"{local_asr.PROVIDER_ID}\n", encoding="utf-8")
+            target = Path(directory) / "outside"
+            target.mkdir()
+            link = fixture.root / ".install-link"
+            try:
+                os.symlink(target, link, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symlink unavailable: {error}")
+
+            with self.assertRaises(local_asr.LocalASRError):
+                installer.install()
+
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(session.calls, [])
+
+    def test_install_wraps_orphaned_staging_cleanup_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            fixture.root.mkdir()
+            (fixture.root / local_asr.ROOT_MARKER).write_text(
+                f"{local_asr.PROVIDER_ID}\n", encoding="utf-8")
+            orphan = fixture.root / ".install-crashed"
+            orphan.mkdir()
+            original_rmtree = local_asr.shutil.rmtree
+
+            def fail_cleanup(path, *args, **kwargs):
+                if Path(path) == orphan:
+                    raise OSError("private sharing detail")
+                return original_rmtree(path, *args, **kwargs)
+
+            with patch.object(local_asr.shutil, "rmtree", new=fail_cleanup), \
+                    patch.object(
+                        local_asr.tempfile, "mkdtemp",
+                        side_effect=AssertionError("staging must not continue"),
+                    ):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.install()
+
+            self.assertIn("abandoned local-ASR staging", str(raised.exception))
+            self.assertNotIn("private sharing detail", str(raised.exception))
+            self.assertTrue(orphan.exists())
+            self.assertEqual(session.calls, [])
 
     def test_install_rejects_mutated_traversal_component_before_deleting(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1243,6 +1416,26 @@ class LocalASRRecordedProcessTests(unittest.TestCase):
         with patch.object(local_asr.platform, "system", return_value="Windows"), \
                 patch.object(ctypes, "windll", windll, create=True):
             self.assertFalse(local_asr._pid_running_state(4322))
+
+    def test_pid_running_state_reports_nonexistent_pid_from_last_error(self):
+        kernel32 = SimpleNamespace(OpenProcess=Mock(return_value=0))
+        windll = SimpleNamespace(kernel32=kernel32)
+
+        with patch.object(local_asr.platform, "system", return_value="Windows"), \
+                patch.object(ctypes, "windll", windll, create=True), \
+                patch.object(ctypes, "get_last_error", return_value=87, create=True):
+            self.assertFalse(local_asr._pid_running_state(4321))
+
+        kernel32.OpenProcess.assert_called_once_with(0x00100000, False, 4321)
+
+    def test_pid_running_state_preserves_access_denied_as_unknown(self):
+        kernel32 = SimpleNamespace(OpenProcess=Mock(return_value=0))
+        windll = SimpleNamespace(kernel32=kernel32)
+
+        with patch.object(local_asr.platform, "system", return_value="Windows"), \
+                patch.object(ctypes, "windll", windll, create=True), \
+                patch.object(ctypes, "get_last_error", return_value=5, create=True):
+            self.assertIsNone(local_asr._pid_running_state(4321))
 
     def test_terminate_pid_requests_synchronize_and_confirms_wait(self):
         kernel32 = SimpleNamespace(
