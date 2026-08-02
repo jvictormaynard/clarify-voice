@@ -110,6 +110,11 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertTrue(checker.is_file())
         self.assertTrue((ROOT / "scripts" / "check_runtime_lock.py").is_file())
         self.assertTrue((ROOT / "scripts" / "add_sbom_component.py").is_file())
+        self.assertTrue((ROOT / "scripts" / "sox-runtime-manifest.json").is_file())
+        self.assertIn(
+            "sox-runtime-manifest.json",
+            (ROOT / "scripts" / "build.ps1").read_text(encoding="utf-8"),
+        )
         checker_content = checker.read_text(encoding="utf-8")
         self.assertNotIn("--check", checker_content)
         self.assertIn("shutil.copyfile(lockfile, generated)", checker_content)
@@ -210,6 +215,8 @@ class RepositorySafetyTests(unittest.TestCase):
             "cyclonedx-py requirements requirements-lock-windows.txt", workflow
         )
         self.assertIn("scripts/add_sbom_component.py", workflow)
+        self.assertIn("--runtime-root extra\\sox-14.4.2", workflow)
+        self.assertIn("--manifest scripts\\sox-runtime-manifest.json", workflow)
         self.assertIn(
             "b45f598643ffbd8e363ff24d61166ccec4836fea6d3888881b8df53e3bb55f6c",
             workflow,

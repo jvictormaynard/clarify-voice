@@ -1,0 +1,6 @@
+{
+  "runtime_glob": "*.dll",
+  "runtime_files": [
+    "sox.exe"
+  ]
+}

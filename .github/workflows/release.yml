@@ -68,7 +68,7 @@ jobs:
         run: cyclonedx-py requirements requirements-lock-runtime-windows.txt --of JSON -o dist\ClarifyVoice.sbom.json
 
       - name: Add bundled SoX to SBOM
-        run: python scripts/add_sbom_component.py --bom-file dist\ClarifyVoice.sbom.json
+        run: python scripts/add_sbom_component.py --bom-file dist\ClarifyVoice.sbom.json --runtime-root extra\sox-14.4.2 --manifest scripts\sox-runtime-manifest.json
 
       - name: Create release assets
         shell: pwsh
