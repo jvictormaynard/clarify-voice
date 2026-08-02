@@ -71,8 +71,8 @@ class RepositorySafetyTests(unittest.TestCase):
         for required in (
             "environment: release-signing",
             "id-token: write",
-            "azure/login@v3",
-            "azure/artifact-signing-action@v2",
+            "azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3",
+            "azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2",
             "scripts\\verify-signature.ps1",
             "actions/attest-build-provenance@",
             "ClarifyVoice-windows-x64.msi.sha256",
@@ -84,6 +84,24 @@ class RepositorySafetyTests(unittest.TestCase):
         )
         self.assertIn('"require_rfc3161_timestamp": true', policy)
         self.assertNotIn("AZURE_CLIENT_SECRET", content)
+        azure_refs = re.findall(
+            r"uses:\s+(azure/(?:login|artifact-signing-action))@([^\s#]+)",
+            content,
+        )
+        self.assertEqual(len(azure_refs), 4)
+        self.assertEqual(
+            [action for action, _ref in azure_refs].count(
+                "azure/artifact-signing-action"
+            ),
+            3,
+        )
+        for action, action_ref in azure_refs:
+            with self.subTest(action=action):
+                self.assertRegex(action_ref, r"^[0-9a-f]{40}$")
+        self.assertNotRegex(
+            content,
+            r"uses:\s+azure/(?:login|artifact-signing-action)@v\d+",
+        )
 
     def test_ci_exercises_installer_lifecycle_without_signing_secrets(self):
         content = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
@@ -91,6 +109,11 @@ class RepositorySafetyTests(unittest.TestCase):
         )
         self.assertIn("scripts\\test-installer.ps1", content)
         self.assertIn("ClarifyVoice-windows-x64-baseline.msi", content)
+        self.assertIn("-PayloadIdentity baseline-msi-0.1.1", content)
+        self.assertIn("-SourceExe dist\\baseline\\ClarifyVoice.exe", content)
+        self.assertIn("-BaselinePayloadSha256", content)
+        self.assertIn("-CurrentPayloadSha256", content)
+        self.assertIn("payloads must be byte-distinct", content)
         self.assertIn("Install manifest dependencies", content)
         self.assertIn("scripts/create_release_manifest.py tests", content)
         self.assertNotIn("AZURE_CLIENT_ID", content)
@@ -115,6 +138,16 @@ class RepositorySafetyTests(unittest.TestCase):
             "no longer the smoke-test sentinel",
         ):
             self.assertIn(required, content)
+
+        for operation, expected_hash in (
+            ("clean install", "$baselinePayloadHash"),
+            ("upgrade", "$currentPayloadHash"),
+            ("repair", "$currentPayloadHash"),
+            ("manual rollback", "$baselinePayloadHash"),
+        ):
+            self.assertIn(f'Assert-Installed "{operation}" {expected_hash}', content)
+        self.assertIn("Get-FileHash $installedExe -Algorithm SHA256", content)
+        self.assertIn("Uninstall left the installed executable behind", content)
 
     def test_installer_and_update_contract_files_exist(self):
         required = [
@@ -143,6 +176,14 @@ class RepositorySafetyTests(unittest.TestCase):
             installer,
         )
         self.assertNotIn("<RemoveRegistryValue", installer)
+
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn("if not _is_msi_installed_build():", app_source)
+        self.assertNotIn(
+            'if not IS_WIN or not getattr(sys, "frozen", False):\n'
+            "                update_status.configure(",
+            app_source,
+        )
 
     def test_package_scripts_are_documented_maintainer_aliases(self):
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))

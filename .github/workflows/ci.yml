@@ -117,14 +117,26 @@ jobs:
 
       - name: Build portable executable
         shell: pwsh
-        run: .\scripts\build.ps1
+        run: |
+          .\scripts\build.ps1
+          .\scripts\build.ps1 `
+            -OutputDirectory dist\baseline `
+            -PayloadIdentity baseline-msi-0.1.1
+
+          $baselinePayload = "dist\baseline\ClarifyVoice.exe"
+          $currentPayload = "dist\ClarifyVoice.exe"
+          $baselineHash = (Get-FileHash $baselinePayload -Algorithm SHA256).Hash
+          $currentHash = (Get-FileHash $currentPayload -Algorithm SHA256).Hash
+          if ($baselineHash -eq $currentHash) {
+            throw "Baseline and current executable payloads must be byte-distinct."
+          }
 
       - name: Build baseline and current installers
         shell: pwsh
         run: |
           .\scripts\build-installer.ps1 `
             -Version 0.1.1 `
-            -SourceExe dist\ClarifyVoice.exe `
+            -SourceExe dist\baseline\ClarifyVoice.exe `
             -OutputPath dist\ClarifyVoice-windows-x64-baseline.msi
           .\scripts\build-installer.ps1 `
             -SourceExe dist\ClarifyVoice.exe `
@@ -135,7 +147,9 @@ jobs:
         run: |
           .\scripts\test-installer.ps1 `
             -BaselineInstaller dist\ClarifyVoice-windows-x64-baseline.msi `
-            -CurrentInstaller dist\ClarifyVoice-windows-x64.msi
+            -CurrentInstaller dist\ClarifyVoice-windows-x64.msi `
+            -BaselinePayloadSha256 $((Get-FileHash dist\baseline\ClarifyVoice.exe -Algorithm SHA256).Hash) `
+            -CurrentPayloadSha256 $((Get-FileHash dist\ClarifyVoice.exe -Algorithm SHA256).Hash)
 
       - name: Validate release manifest contract
         shell: pwsh

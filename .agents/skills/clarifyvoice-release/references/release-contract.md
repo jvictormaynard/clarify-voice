@@ -66,6 +66,8 @@ On the PR and after merge:
 On the tag:
 
 - successful `Release` workflow
+- Azure OIDC login and Artifact Signing actions pinned to reviewed full commit
+  SHAs; mutable tags are not an acceptable release trust boundary
 
 ## Required release assets
 

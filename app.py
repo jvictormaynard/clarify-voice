@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import ntpath
 import os
 import platform
 import queue
@@ -476,6 +477,37 @@ def _autostart_command(executable=None):
         args.append(str(Path(__file__).resolve()))
     args.append("--hidden")
     return subprocess.list2cmdline(args)
+
+
+def _is_msi_installed_build(registry=None, executable=None) -> bool:
+    """Return true only for the executable registered by the per-user MSI."""
+    if not IS_WIN or not getattr(sys, "frozen", False):
+        return False
+    if registry is None:
+        try:
+            import winreg as registry
+        except ImportError:
+            return False
+
+    try:
+        with registry.OpenKey(
+                registry.HKEY_CURRENT_USER, r"Software\ClarifyVoice") as key:
+            install_location, value_type = registry.QueryValueEx(
+                key, "InstallLocation")
+    except OSError:
+        return False
+
+    location = str(install_location).strip()
+    current_executable = str(executable or sys.executable).strip()
+    if (
+            value_type != registry.REG_SZ
+            or not ntpath.isabs(location)
+            or not ntpath.isabs(current_executable)):
+        return False
+
+    expected_executable = ntpath.join(location, "ClarifyVoice.exe")
+    return ntpath.normcase(ntpath.normpath(current_executable)) == ntpath.normcase(
+        ntpath.normpath(expected_executable))
 
 
 def _set_autostart(enabled: bool, registry=None):
@@ -6629,7 +6661,7 @@ class App(ctk.CTk):
             self._exit_application()
 
         def check_for_updates():
-            if not IS_WIN or not getattr(sys, "frozen", False):
+            if not _is_msi_installed_build():
                 update_status.configure(
                     text=self._t("updates_windows_only"), text_color=DIM)
                 return

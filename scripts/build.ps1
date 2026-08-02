@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    [ValidatePattern('^[a-z0-9][a-z0-9.-]{0,63}$')]
+    [string]$PayloadIdentity
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +29,7 @@ $icon = Join-Path $assets "branding\clarify.ico"
 $workDir = Join-Path $repoRoot "build\pyinstaller"
 $specDir = Join-Path $repoRoot "build\spec"
 $packageInput = Join-Path $repoRoot "build\package-input"
+$payloadIdentityFile = Join-Path $packageInput "clarifyvoice-build-identity.txt"
 $soxManifestPath = Join-Path $PSScriptRoot "sox-runtime-manifest.json"
 $extra = Join-Path $packageInput "extra"
 $packageSox = Join-Path $extra "sox-14.4.2"
@@ -52,6 +55,10 @@ New-Item $OutputDirectory, $workDir, $specDir -ItemType Directory -Force | Out-N
 Remove-Item $packageInput -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $packageSox -ItemType Directory -Force | Out-Null
 
+if ($PayloadIdentity) {
+    $PayloadIdentity | Set-Content -LiteralPath $payloadIdentityFile -Encoding ascii
+}
+
 $repoSox = Join-Path $repoExtra "sox-14.4.2"
 $soxManifest = Get-Content $soxManifestPath -Raw | ConvertFrom-Json
 Copy-Item (Join-Path $repoSox $soxManifest.runtime_glob) $packageSox -Force
@@ -75,9 +82,14 @@ $pyInstallerArgs = @(
     "--exclude-module", "numpy",
     # Windows uses native hotkeys and clipboard events. The cross-platform
     # fallback must not become a global hook in the packaged executable.
-    "--exclude-module", "keyboard",
-    $entryPoint
+    "--exclude-module", "keyboard"
 )
+if ($PayloadIdentity) {
+    # This test-only build marker is bundled inside the one-file archive, so CI
+    # gets a valid but byte-distinct historical payload without mutating source.
+    $pyInstallerArgs += @("--add-data", "${payloadIdentityFile};.")
+}
+$pyInstallerArgs += $entryPoint
 
 Write-Host "Building portable ClarifyVoice executable..."
 $arguments = @("-m", "PyInstaller") + $pyInstallerArgs

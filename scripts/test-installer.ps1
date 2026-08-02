@@ -3,7 +3,13 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$BaselineInstaller,
     [Parameter(Mandatory = $true)]
-    [string]$CurrentInstaller
+    [string]$CurrentInstaller,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$BaselinePayloadSha256,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$CurrentPayloadSha256
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +64,11 @@ Assert-DisposableHostedRunner
 
 $baseline = (Resolve-Path $BaselineInstaller).Path
 $current = (Resolve-Path $CurrentInstaller).Path
+$baselinePayloadHash = $BaselinePayloadSha256.ToLowerInvariant()
+$currentPayloadHash = $CurrentPayloadSha256.ToLowerInvariant()
+if ($baselinePayloadHash -ceq $currentPayloadHash) {
+    throw "Baseline and current payload digests must be different."
+}
 $installDirectory = Join-Path $env:LOCALAPPDATA "Programs\ClarifyVoice"
 $installedExe = Join-Path $installDirectory "ClarifyVoice.exe"
 $configDirectory = Join-Path $env:APPDATA "ClarifyVoice"
@@ -92,7 +103,7 @@ function Invoke-MsiExec {
     }
 }
 
-function Assert-Installed([string]$Operation) {
+function Assert-Installed([string]$Operation, [string]$ExpectedPayloadHash) {
     foreach ($path in @($installedExe, $desktopShortcut, $menuShortcut, $sentinel)) {
         if (-not (Test-Path $path -PathType Leaf)) {
             throw "$Operation did not preserve the expected path: $path"
@@ -100,6 +111,10 @@ function Assert-Installed([string]$Operation) {
     }
     if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -cne $sentinelContent) {
         throw "$Operation changed user configuration or credentials."
+    }
+    $actualPayloadHash = (Get-FileHash $installedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualPayloadHash -cne $ExpectedPayloadHash) {
+        throw "$Operation installed payload $actualPayloadHash instead of $ExpectedPayloadHash."
     }
 }
 
@@ -117,21 +132,21 @@ $sentinelContent | Set-Content -LiteralPath $sentinel -Encoding utf8
 
 try {
     Invoke-MsiExec @('/i', $baseline, '/qn', '/norestart') "clean install"
-    Assert-Installed "clean install"
+    Assert-Installed "clean install" $baselinePayloadHash
     New-Item $runKey -Force | Out-Null
     Set-ItemProperty -Path $runKey -Name ClarifyVoice `
         -Value ('"' + $installedExe + '" --hidden')
 
     Invoke-MsiExec @('/i', $current, '/qn', '/norestart') "upgrade"
-    Assert-Installed "upgrade"
+    Assert-Installed "upgrade" $currentPayloadHash
     Assert-AutostartPreserved "upgrade"
 
     Invoke-MsiExec @('/fa', $current, '/qn', '/norestart') "repair"
-    Assert-Installed "repair"
+    Assert-Installed "repair" $currentPayloadHash
     Assert-AutostartPreserved "repair"
 
     Invoke-MsiExec @('/i', $baseline, '/qn', '/norestart') "manual rollback"
-    Assert-Installed "manual rollback"
+    Assert-Installed "manual rollback" $baselinePayloadHash
     Assert-AutostartPreserved "manual rollback"
 
     Invoke-MsiExec @('/x', $baseline, '/qn', '/norestart') "uninstall"

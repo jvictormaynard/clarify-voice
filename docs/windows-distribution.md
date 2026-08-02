@@ -66,15 +66,17 @@ terms.
 | Failed upgrade | Windows Installer rolls the package transaction back. The previous installed product and all user data remain available. |
 | Manual rollback | A user may run an older, still-trusted ClarifyVoice MSI. The MSI permits this explicit rollback, while the in-app update checker refuses every downgrade. |
 | Uninstall | Removes installed program files, shortcuts, install metadata, and the autostart entry. Settings, usage statistics, and credentials remain in `%APPDATA%\ClarifyVoice` for recovery or reinstall. |
-| Portable | The signed portable EXE and ZIP remain supported and do not participate in MSI registration. Manual checksum/signature verification remains documented. |
+| Portable | The signed portable EXE and ZIP remain supported and do not participate in MSI registration. The in-app MSI updater requires the current executable path to match the MSI-owned HKCU install registration, so portable builds fail closed. Manual checksum/signature verification remains documented. |
 
 Do not run an installer while recording or processing text. The update UI
 closes ClarifyVoice after starting the visible Windows Installer flow.
 
 ## Authenticated release manifest
 
-The update checker is manual: **Settings → Check for updates**. It performs no
-idle polling and no forced update.
+The update checker is available only to positively identified MSI installations
+and is manual: **Settings → Check for updates**. It performs no idle polling and
+no forced update. A frozen portable executable is not sufficient evidence of an
+MSI installation and cannot launch `msiexec` through this flow.
 
 1. Download `ClarifyVoice-release-manifest.cab` from the fixed
    `releases/latest/download` URL into a sibling `.part` file.
@@ -108,7 +110,10 @@ when the updater cannot reach or validate the manifest.
 Pull-request CI builds an unsigned smoke-test executable and two MSI versions,
 then exercises clean install, upgrade, repair, explicit rollback, uninstall,
 shortcut cleanup, autostart cleanup, and `%APPDATA%` preservation on an
-ephemeral Windows runner. It also creates and parses the release manifest and
+ephemeral Windows runner. The baseline build embeds a test-only version identity
+so its executable digest differs from the current payload; every install,
+upgrade, repair, and rollback transition must produce the expected SHA-256, and
+uninstall must remove it. It also creates and parses the release manifest and
 CAB. These automated checks do not substitute for signed-artifact or real-user
 manual acceptance.
 
@@ -123,15 +128,17 @@ to the hosted runner; do not bypass its guards.
 
 The tag release workflow must fail unless it can:
 
-1. match `version.py` to the tag;
-2. sign and verify the EXE before embedding it in the MSI;
-3. sign and verify the MSI before hashing it into the manifest;
-4. sign and verify the manifest CAB;
-5. match every signer to `distribution/update-policy.json` and require an RFC
+1. run Azure OIDC login and Artifact Signing actions only from reviewed,
+   immutable full commit SHAs, never mutable tags;
+2. match `version.py` to the tag;
+3. sign and verify the EXE before embedding it in the MSI;
+4. sign and verify the MSI before hashing it into the manifest;
+5. sign and verify the manifest CAB;
+6. match every signer to `distribution/update-policy.json` and require an RFC
    3161 timestamp;
-6. generate separate SHA-256 files without modifying signed bytes;
-7. create GitHub build-provenance attestations for EXE, MSI, CAB, and ZIP;
-8. publish portable and installer assets from that same workflow run.
+7. generate separate SHA-256 files without modifying signed bytes;
+8. create GitHub build-provenance attestations for EXE, MSI, CAB, and ZIP;
+9. publish portable and installer assets from that same workflow run.
 
 Never replace a published binary in place. Fixes require a new green commit,
 annotated tag, signatures, manifest, attestations, and release.
