@@ -762,6 +762,41 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertTrue(link.is_symlink())
             self.assertEqual(session.calls, [])
 
+    def test_install_rejects_reparse_asset_root_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            fixture.root.mkdir()
+            keep = fixture.root / "keep.txt"
+            keep.write_text("target data", encoding="utf-8")
+
+            with patch.object(local_asr.platform, "system", return_value="Windows"), \
+                    patch.object(local_asr, "_reparse_state", return_value=True):
+                with self.assertRaises(local_asr.LocalASRError):
+                    installer.install()
+
+            self.assertEqual(keep.read_text(encoding="utf-8"), "target data")
+            self.assertFalse((fixture.root / local_asr.ROOT_MARKER).exists())
+            self.assertEqual(session.calls, [])
+
+    def test_remove_rejects_reparse_asset_root_before_deleting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            fixture.root.mkdir()
+            marker = fixture.root / local_asr.ROOT_MARKER
+            marker.write_text(f"{local_asr.PROVIDER_ID}\n", encoding="utf-8")
+            keep = fixture.root / "keep.txt"
+            keep.write_text("target data", encoding="utf-8")
+
+            with patch.object(local_asr.platform, "system", return_value="Windows"), \
+                    patch.object(local_asr, "_reparse_state", return_value=True):
+                with self.assertRaises(local_asr.LocalASRError):
+                    installer.remove()
+
+            self.assertTrue(marker.exists())
+            self.assertEqual(keep.read_text(encoding="utf-8"), "target data")
+
     def test_install_wraps_orphaned_staging_cleanup_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)
@@ -1487,6 +1522,41 @@ class LocalASRSidecarTests(unittest.TestCase):
 
             self.assertEqual(factory.processes[0].terminate_calls, 1)
             self.assertIsNone(manager.process_id)
+
+    def test_process_record_persists_positive_pid_after_immediate_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager, installer, _session, _factory = self._manager(directory)
+            process = FakeProcess()
+            process.alive = False
+            process.returncode = 1
+            manager._process = process
+            manager._port = 12345
+            manager._request_path = "/request"
+
+            manager._record_process()
+            record = json.loads(
+                installer.process_record_path.read_text(encoding="utf-8"))
+
+            self.assertIsNone(manager.process_id)
+            self.assertEqual(record["pid"], process.pid)
+            with patch.object(local_asr, "_process_image_path", return_value=None), \
+                    patch.object(local_asr, "_pid_running_state", return_value=False):
+                local_asr.cleanup_recorded_sidecar(
+                    installer.process_record_path,
+                    installer.executable_path,
+                    installer.root,
+                )
+            self.assertFalse(installer.process_record_path.exists())
+
+    def test_process_record_rejects_invalid_pid_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager, installer, _session, _factory = self._manager(directory)
+            for invalid_pid in (None, 0, -1, "123", True):
+                with self.subTest(invalid_pid=invalid_pid):
+                    manager._process = SimpleNamespace(pid=invalid_pid)
+                    with self.assertRaises(local_asr.LocalASRSidecarError):
+                        manager._record_process()
+                    self.assertFalse(installer.process_record_path.exists())
 
     def test_start_does_not_replace_unconfirmed_previous_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:

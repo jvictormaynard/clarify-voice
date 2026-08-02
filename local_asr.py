@@ -568,9 +568,8 @@ class LocalASRInstaller:
         self._report(callback, f"verify:{asset.name}", downloaded, asset.size)
 
     def _claim_root(self) -> None:
+        self._assert_safe_asset_root()
         marker = self.root / ROOT_MARKER
-        if self.root.is_symlink():
-            raise LocalASRError(f"Refusing symlinked asset root: {self.root}")
         if self.root.exists() and not marker.is_file():
             try:
                 has_contents = next(self.root.iterdir(), None) is not None
@@ -600,8 +599,7 @@ class LocalASRInstaller:
 
     def _acquire_install_lock(self) -> _AssetRootInstallLock:
         try:
-            if self.root.is_symlink():
-                raise LocalASRError(f"Refusing symlinked asset root: {self.root}")
+            self._assert_safe_asset_root()
             root = self.root.absolute()
             root.parent.mkdir(parents=True, exist_ok=True)
         except OSError as error:
@@ -612,8 +610,7 @@ class LocalASRInstaller:
         return _AssetRootInstallLock(lock_path)
 
     def _assert_owned_root(self) -> None:
-        if self.root.is_symlink():
-            raise LocalASRError(f"Refusing symlinked asset root: {self.root}")
+        self._assert_safe_asset_root()
         marker = self.root / ROOT_MARKER
         try:
             if not self.root.is_dir() or marker.is_symlink() or not marker.is_file():
@@ -627,6 +624,23 @@ class LocalASRInstaller:
                 "Cannot verify local-ASR asset-root ownership; retry the operation.") from error
         if owner != PROVIDER_ID:
             raise LocalASRError(f"Asset root has an unknown owner: {self.root}")
+
+    def _assert_safe_asset_root(self) -> None:
+        try:
+            if self.root.is_symlink():
+                raise LocalASRError(
+                    f"Refusing symlinked local-ASR asset root: {self.root}")
+            if not os.path.lexists(self.root):
+                return
+        except LocalASRError:
+            raise
+        except OSError as error:
+            raise LocalASRError(
+                "Cannot inspect the local-ASR asset root; retry the operation.") from error
+        state = _reparse_state(self.root)
+        if state is not False:
+            raise LocalASRError(
+                "Refusing symlinked or unverifiable local-ASR asset root")
 
     def _cleanup_orphaned_staging(self) -> None:
         try:
@@ -1164,8 +1178,13 @@ class LocalASRSidecarManager:
     def _record_process(self) -> None:
         path = self.installer.process_record_path
         path.parent.mkdir(parents=True, exist_ok=True)
+        process = self._process
+        pid = getattr(process, "pid", None)
+        if (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0):
+            raise LocalASRSidecarError(
+                "Cannot record the local-ASR sidecar PID; retry the operation.")
         record = {
-            "pid": self.process_id,
+            "pid": pid,
             "executable": str(self.installer.executable_path),
             "port": self._port,
             "started_at": int(time.time()),
