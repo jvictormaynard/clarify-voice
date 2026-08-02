@@ -89,6 +89,14 @@ new adapter implementing the same typed operations, then be registered once.
 Contains the small `WorkflowController` that prevents rewrite and translation
 flows from overlapping.
 
+### `provider_http.py`
+
+Defines the shared provider transport policy: operation-specific connect/read
+timeouts, bounded retries for safe requests, typed errors, cooperative
+cancellation, redacted rotating logs, and user-requested safe diagnostic
+exports. Provider-specific adapters keep ownership of payload and response
+formats. See [Provider HTTP reliability and diagnostics](http-resilience.md).
+
 ### `windows_hotkeys.py`
 
 Owns native Windows `RegisterHotKey` registration and Ctrl-key synthesis.
