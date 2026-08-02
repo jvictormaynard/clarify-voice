@@ -179,6 +179,13 @@ adapter owns only inference cancellation and sidecar shutdown. The current
 application therefore does not import this module, start the sidecar, or
 download assets.
 
+The workflow capture path requires a sequence-bearing snapshot; it retries
+transient snapshot contention and otherwise fails closed rather than falling
+back to an unsafe text-only check-and-set. The copy records the sequence before
+Ctrl+C and the sequence observed by that copy, then uses the adapter's atomic
+ownership check for restoration. A concurrent clipboard write therefore keeps
+the user's newer contents intact, even when the copied selection has no text.
+
 ### `update_security.py`
 
 Owns the manual update trust boundary. A Windows-trusted, publisher-pinned CAB

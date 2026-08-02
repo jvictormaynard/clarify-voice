@@ -3100,16 +3100,46 @@ def _send_key_chord(chord, *, expected_text=None):
         return keyboard.send(chord)
 
 
-def _copy_selected_text(timeout=0.7):
-    """Copy a selection and return text only when the clipboard changed."""
+def _copy_selected_text_with_sequence(
+        timeout=0.7, *, expected_sequence=None, suppress_read_errors=False):
+    """Copy a selection and retain the sequence observed by that copy.
+
+    The caller uses the two sequence values to prove that the clipboard
+    changed during this copy, without assuming that Win32 increments by one
+    when an application publishes multiple formats.  Restoration still uses
+    the adapter's atomic sequence/text ownership check.
+    """
     previous_sequence = _clipboard_sequence_number()
+    if (
+        expected_sequence is not None
+        and previous_sequence != expected_sequence
+    ):
+        return None, previous_sequence, previous_sequence
     _send_key_chord("ctrl+c")
     deadline = time.monotonic() + timeout
+    observed_sequence = previous_sequence
     while time.monotonic() < deadline:
-        if _clipboard_sequence_number() != previous_sequence:
-            return _get_windows_clipboard_text()
+        try:
+            observed_sequence = _clipboard_sequence_number()
+        except Exception:
+            return None, previous_sequence, None
+        if observed_sequence != previous_sequence:
+            try:
+                selected = _get_windows_clipboard_text()
+            except Exception:
+                if not suppress_read_errors:
+                    raise
+                selected = None
+            return selected, previous_sequence, observed_sequence
         time.sleep(0.02)
-    return None
+    return None, previous_sequence, observed_sequence
+
+
+def _copy_selected_text(timeout=0.7):
+    """Copy a selection and return text only when the clipboard changed."""
+    selected, _previous_sequence, _observed_sequence = (
+        _copy_selected_text_with_sequence(timeout))
+    return selected
 
 
 def _same_selected_text(left, right):
@@ -3252,20 +3282,54 @@ class AppWorkflowClipboard:
         return bool(target.window) and _foreground_window_handle() == target.window
 
     @staticmethod
+    def _restore_failed_capture(
+            previous, copy_start_sequence, copy_observed_sequence):
+        """Return clipboard ownership after a copy produced no text.
+
+        ``Ctrl+C`` can replace the clipboard with an image/file selection while
+        ``_copy_selected_text`` still returns ``None``.  Only repair a
+        snapshot whose sequence shows exactly this copy.  The final restore is
+        still atomic, so a user write between the copy's sequence observation
+        and the restore cannot be overwritten.  If the ownership evidence is
+        missing or ambiguous, fail closed.
+        """
+        if (
+            not isinstance(previous, ClipboardSnapshot)
+            or not previous.restorable
+            or copy_start_sequence is None
+            or copy_observed_sequence is None
+            or copy_start_sequence != previous.sequence
+            or copy_observed_sequence == copy_start_sequence
+        ):
+            return
+        try:
+            _restore_clipboard_snapshot_if_owned(
+                previous, copy_observed_sequence, None)
+        except Exception:
+            pass
+
+    @staticmethod
     def capture_selection(target):
         if not AppWorkflowClipboard.is_target_current(target):
             return None
         try:
             previous = _snapshot_windows_clipboard()
         except OSError:
-            previous = None
-        if previous is None:
             try:
-                previous = _get_windows_clipboard_text()
+                # Clipboard contention is transient; retry once before
+                # abandoning the transaction without an ownership snapshot.
+                previous = _snapshot_windows_clipboard()
             except OSError:
                 previous = None
-        selected = _copy_selected_text()
+        if not isinstance(previous, ClipboardSnapshot) or not previous.restorable:
+            return None
+        selected, copy_start_sequence, copy_observed_sequence = (
+            _copy_selected_text_with_sequence(
+                expected_sequence=previous.sequence,
+                suppress_read_errors=True))
         if selected is None:
+            AppWorkflowClipboard._restore_failed_capture(
+                previous, copy_start_sequence, copy_observed_sequence)
             return None
         context = {
             "previous": previous,
@@ -3278,25 +3342,28 @@ class AppWorkflowClipboard:
         context = capture.context if isinstance(capture.context, dict) else {}
         previous = context.get("previous")
         selected = context.get("selected", capture.text)
-        if isinstance(previous, ClipboardSnapshot):
-            _restore_clipboard_snapshot_if_owned(
-                previous, _clipboard_sequence_number(), selected)
+        if not isinstance(previous, ClipboardSnapshot):
             return
-        if previous is None:
-            return
-        try:
-            current = _get_windows_clipboard_text()
-        except OSError:
-            return
-        if _same_selected_text(current, selected):
-            _set_windows_clipboard_text(previous)
+        _restore_clipboard_snapshot_if_owned(
+            previous, _clipboard_sequence_number(), selected)
 
     @staticmethod
     def apply_result(capture, result):
+        # A focus change must never send Ctrl+C to the unrelated foreground
+        # application.  The generated result remains available through the
+        # copy-only path, which performs no verification chord or paste.
+        if not AppWorkflowClipboard.is_target_current(capture.target):
+            _paste_generated_text(result, should_paste=False)
+            return SelectionDisposition.COPIED
         try:
             before = _snapshot_windows_clipboard()
         except OSError:
             before = None
+        # Snapshotting can briefly yield to another application; recheck at
+        # the linearization point immediately before Ctrl+C as well.
+        if not AppWorkflowClipboard.is_target_current(capture.target):
+            _paste_generated_text(result, should_paste=False)
+            return SelectionDisposition.COPIED
         current = _copy_selected_text()
         sequence = _clipboard_sequence_number()
         safe = (
@@ -3363,6 +3430,7 @@ class AppWorkflowStatistics:
                 provider, model, source, result, target_language),
             self.repositories,
         )
+
 
 # ---------------------------------------------------------------------------
 # Flag icons (drawn with Pillow)

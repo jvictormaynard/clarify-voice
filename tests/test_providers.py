@@ -1015,6 +1015,131 @@ class UpdateUiTests(unittest.TestCase):
             text_color="#d17878")
 
 
+class WorkflowClipboardAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.target = app.SelectionTarget(77, "editor.exe")
+
+    def test_capture_without_text_restores_owned_snapshot_after_multiple_sequence_changes(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_clipboard_sequence_number",
+                             side_effect=[10, 12]), \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_get_windows_clipboard_text",
+                             return_value=None), \
+                patch.object(app, "_restore_clipboard_snapshot_if_owned") as restore:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        send_key.assert_called_once_with("ctrl+c")
+        restore.assert_called_once_with(previous, 12, None)
+
+    def test_capture_retries_snapshot_after_contention(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             side_effect=[OSError("busy"), previous]), \
+                patch.object(app, "_copy_selected_text_with_sequence",
+                             return_value=("selected", 10, 11)):
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNotNone(capture)
+        self.assertIs(capture.context["previous"], previous)
+
+    def test_capture_rejects_clipboard_change_before_copy_chord(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_clipboard_sequence_number", return_value=11), \
+                patch.object(app, "_send_key_chord") as send_key:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        send_key.assert_not_called()
+
+    def test_capture_without_snapshot_fails_closed(self):
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard", return_value=None), \
+                patch.object(app, "_copy_selected_text_with_sequence") as copy:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        copy.assert_not_called()
+
+    def test_capture_with_unrestorable_snapshot_fails_closed(self):
+        previous = ClipboardSnapshot(
+            (ClipboardFormat(9001, b"unsupported"),), 10, restorable=False)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_copy_selected_text_with_sequence") as copy:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        copy.assert_not_called()
+
+    def test_capture_keeps_fail_closed_when_atomic_restore_sees_sequence_mismatch(self):
+        previous = ClipboardSnapshot((ClipboardFormat(
+            CF_UNICODETEXT, "previous\x00".encode("utf-16-le")),), 10)
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=True), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=previous), \
+                patch.object(app, "_copy_selected_text_with_sequence",
+                             return_value=(None, 10, 11)), \
+                patch.object(app, "_restore_clipboard_snapshot_if_owned",
+                             return_value=False) as restore, \
+                patch.object(app, "_set_windows_clipboard_text") as unsafe_set:
+            capture = app.AppWorkflowClipboard.capture_selection(self.target)
+
+        self.assertIsNone(capture)
+        restore.assert_called_once_with(previous, 11, None)
+        unsafe_set.assert_not_called()
+
+    def test_apply_result_focus_change_copies_without_verification_chord(self):
+        capture = app.SelectionCapture(self.target, "selected")
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          return_value=False), \
+                patch.object(app, "_copy_selected_text") as copy, \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_paste_generated_text", return_value=False) as copy_result:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        copy.assert_not_called()
+        send_key.assert_not_called()
+        copy_result.assert_called_once_with("generated", should_paste=False)
+
+    def test_apply_result_rechecks_focus_after_clipboard_snapshot(self):
+        capture = app.SelectionCapture(self.target, "selected")
+        with patch.object(app.AppWorkflowClipboard, "is_target_current",
+                          side_effect=[True, False]), \
+                patch.object(app, "_snapshot_windows_clipboard",
+                             return_value=None), \
+                patch.object(app, "_copy_selected_text") as copy, \
+                patch.object(app, "_send_key_chord") as send_key, \
+                patch.object(app, "_paste_generated_text", return_value=False) as copy_result:
+            disposition = app.AppWorkflowClipboard.apply_result(
+                capture, "generated")
+
+        self.assertEqual(disposition, app.SelectionDisposition.COPIED)
+        copy.assert_not_called()
+        send_key.assert_not_called()
+        copy_result.assert_called_once_with("generated", should_paste=False)
+
+
 class RewriteWorkflowTests(unittest.TestCase):
     class Harness:
         def __init__(self):
