@@ -41,6 +41,7 @@ class FakeHttp:
     def __init__(self, *responses):
         self.responses = list(responses)
         self.calls = []
+        self.events = []
 
     def _request(self, method, url, kwargs):
         self.calls.append((method, url, kwargs))
@@ -54,6 +55,23 @@ class FakeHttp:
     @staticmethod
     def json(response, **_kwargs):
         return response.json()
+
+    def invalid_response(self, response, *, provider, operation):
+        error = InvalidResponseError(
+            provider=provider,
+            operation=operation,
+            status_code=response.status_code,
+            operation_id=getattr(response, "_clarify_operation_id", None),
+        )
+        self.events.append({
+            "event": "provider_http_error",
+            "provider": provider,
+            "operation": operation,
+            "operation_id": error.operation_id,
+            "status_code": error.status_code,
+            "error_type": error.code,
+        })
+        return error
 
 
 def compatible_metadata(provider_id="compatible", capabilities=None):
@@ -285,6 +303,57 @@ class ProviderRegistryContractTests(unittest.TestCase):
                         raised.exception.capability,
                         ProviderCapability.TEXT_GENERATION,
                     )
+
+    def test_malformed_success_responses_keep_ids_and_emit_diagnostic_events(self):
+        connection = ProviderConnection("key", "https://compatible.example/v1")
+
+        cases = (
+            (
+                "transcription",
+                {"text": "   "},
+                lambda registry: registry.transcribe(
+                    "compatible", TranscriptionRequest(
+                        self.audio_path, "whisper-compatible", "en",
+                        "unused", "unused", 0.0), connection),
+            ),
+            (
+                "text_generation",
+                {"choices": [{"message": {"content": "   "}}]},
+                lambda registry: registry.rewrite(
+                    "compatible", RewriteRequest(
+                        "Raw", "chat-compatible", "en", "Rewrite.",
+                        "SOURCE", 0.1), connection),
+            ),
+            (
+                "model_discovery",
+                {"data": {"not": "a list"}},
+                lambda registry: registry.discover_models(
+                    "compatible", connection),
+            ),
+        )
+
+        for operation, payload, invoke in cases:
+            with self.subTest(operation=operation):
+                response = FakeResponse(payload)
+                response._clarify_operation_id = f"{operation}-123"
+                http = FakeHttp(response)
+                registry = ProviderRegistry()
+                registry.register_openai_compatible(compatible_metadata(), http)
+
+                with self.assertRaises(InvalidResponseError) as raised:
+                    invoke(registry)
+
+                self.assertEqual(raised.exception.operation_id,
+                                 f"{operation}-123")
+                self.assertEqual(len(http.events), 1)
+                self.assertEqual(http.events[0], {
+                    "event": "provider_http_error",
+                    "provider": "compatible",
+                    "operation": operation,
+                    "operation_id": f"{operation}-123",
+                    "status_code": 200,
+                    "error_type": "invalid_response",
+                })
 
     def test_desktop_workflow_routes_a_registered_compatible_provider(self):
         http = FakeHttp(FakeResponse({"text": "desktop transcript"}))

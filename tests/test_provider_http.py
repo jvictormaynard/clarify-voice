@@ -291,6 +291,7 @@ class ProviderHttpPolicyTests(unittest.TestCase):
                     404,
                     {"error": {
                         "code": "model_not_found",
+                        "status": "NOT_FOUND",
                         "message": "model endpoint not found",
                     }},
                     text="model endpoint not found",
@@ -309,6 +310,17 @@ class ProviderHttpPolicyTests(unittest.TestCase):
             ("transcription", {"code": "model_not_found"}, ""),
             ("text_generation", {"code": "invalid_model"}, ""),
             ("text_generation", {}, "model gpt-test not found"),
+            (
+                "text_generation",
+                {
+                    "code": 404,
+                    "status": "NOT_FOUND",
+                    "message": (
+                        "models/gemini-2.5-flash is not found for API version v1beta"
+                    ),
+                },
+                "models/gemini-2.5-flash is not found for API version v1beta",
+            ),
         )
         for operation, error, text in cases:
             with self.subTest(operation=operation, error=error, text=text):
@@ -429,6 +441,27 @@ class ProviderHttpPolicyTests(unittest.TestCase):
             client.json(result, provider="gemini", operation="model_discovery")
 
         self.assertNotIn("private response body", str(raised.exception))
+
+    def test_invalid_response_preserves_operation_metadata_and_logs(self):
+        response = FakeResponse(payload={"unexpected": "shape"})
+        response._clarify_operation_id = "abc123"
+        logger = Mock()
+        client, _session = self.make_client(get=[response], logger=logger)
+
+        error = client.invalid_response(
+            response, provider="openai", operation="transcription")
+
+        self.assertIsInstance(error, InvalidResponseError)
+        self.assertEqual(error.operation_id, "abc123")
+        self.assertEqual(error.status_code, 200)
+        logger.write.assert_called_once_with({
+            "event": "provider_http_error",
+            "provider": "openai",
+            "operation": "transcription",
+            "operation_id": "abc123",
+            "status_code": 200,
+            "error_type": "invalid_response",
+        })
 
     def test_cancellation_before_send_prevents_the_request(self):
         token = CancellationToken()

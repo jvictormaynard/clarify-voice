@@ -304,6 +304,19 @@ def _response_error_code(response: requests.Response) -> str:
     return str(error.get("code") or error.get("type") or "")[:200].casefold()
 
 
+def _response_error_status(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error", payload)
+    if not isinstance(error, dict):
+        return ""
+    return str(error.get("status") or "")[:200].casefold()
+
+
 def _is_permanent_quota(classification: str) -> bool:
     if "insufficient_quota" in classification:
         return True
@@ -322,13 +335,17 @@ _MODEL_NOT_FOUND_MESSAGE = re.compile(
     r"\bmodel\s+(?:[\"'`]([^\"'`\r\n]{1,128})[\"'`]|"
     r"([A-Za-z0-9][\w./:@-]{0,127}))\s+(?:was\s+)?not\s+found\b",
 )
+_GEMINI_MODEL_NOT_FOUND_MESSAGE = re.compile(
+    r"\bmodels/([A-Za-z0-9][\w./:@-]{0,127})\s+is\s+not\s+found\b",
+)
 _NON_MODEL_ROUTE_NAMES = frozenset((
     "api", "endpoint", "list", "models", "path", "resource", "route",
 ))
 
 
 def _is_invalid_model_response(
-        operation: str, error_code: str, response_text: str) -> bool:
+        operation: str, error_code: str, response_text: str,
+        error_status: str = "") -> bool:
     """Classify only model-targeting failures as unavailable models."""
     if operation not in _MODEL_REQUEST_OPERATIONS:
         return False
@@ -336,20 +353,28 @@ def _is_invalid_model_response(
         return True
     match = _MODEL_NOT_FOUND_MESSAGE.search(response_text)
     if match is None:
-        return False
+        return (
+            error_status == "not_found"
+            and _GEMINI_MODEL_NOT_FOUND_MESSAGE.search(response_text) is not None
+        )
     model_name = (match.group(1) or match.group(2) or "").strip().casefold()
-    return model_name not in _NON_MODEL_ROUTE_NAMES
+    if model_name not in _NON_MODEL_ROUTE_NAMES:
+        return True
+    if error_status != "not_found":
+        return False
+    return _GEMINI_MODEL_NOT_FOUND_MESSAGE.search(response_text) is not None
 
 
 def _http_error(response: requests.Response, provider: str,
                 operation: str, operation_id: str) -> ProviderError:
     status = int(response.status_code)
     error_code = _response_error_code(response)
+    error_status = _response_error_status(response)
     try:
         classification_text = str(getattr(response, "text", ""))[:2000].casefold()
     except Exception:
         classification_text = ""
-    classification = " ".join((error_code, classification_text))
+    classification = " ".join((error_code, error_status, classification_text))
     details = {
         "provider": provider,
         "operation": operation,
@@ -367,7 +392,7 @@ def _http_error(response: requests.Response, provider: str,
     if status in (502, 503, 504) or status >= 500:
         return ServiceUnavailableError(**details)
     if status in (400, 404) and _is_invalid_model_response(
-            operation, error_code, classification_text):
+            operation, error_code, classification_text, error_status):
         return InvalidModelError(**details)
     if status in (400, 404, 405, 409, 415, 422):
         return InvalidRequestError(**details)
@@ -556,21 +581,27 @@ class ProviderHttpClient:
 
         raise AssertionError("provider HTTP retry loop exhausted unexpectedly")
 
+    def invalid_response(self, response: requests.Response, *, provider: str,
+            operation: str) -> InvalidResponseError:
+        operation_id = getattr(response, "_clarify_operation_id", None)
+        typed_error = InvalidResponseError(
+            provider=provider, operation=operation,
+            status_code=getattr(response, "status_code", None),
+            operation_id=operation_id)
+        self._log(
+            event="provider_http_error", provider=provider,
+            operation=operation, operation_id=operation_id,
+            status_code=getattr(response, "status_code", None),
+            error_type=typed_error.code)
+        return typed_error
+
     def json(self, response: requests.Response, *, provider: str,
              operation: str) -> Any:
         try:
             return response.json()
         except (TypeError, ValueError) as error:
-            operation_id = getattr(response, "_clarify_operation_id", None)
-            typed_error = InvalidResponseError(
-                provider=provider, operation=operation,
-                status_code=getattr(response, "status_code", None),
-                operation_id=operation_id)
-            self._log(
-                event="provider_http_error", provider=provider,
-                operation=operation, operation_id=operation_id,
-                status_code=getattr(response, "status_code", None),
-                error_type=typed_error.code)
+            typed_error = self.invalid_response(
+                response, provider=provider, operation=operation)
             raise typed_error from error
 
 

@@ -48,6 +48,25 @@ def _model_entries(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [entry for entry in entries if isinstance(entry, Mapping)]
 
 
+def _valid_catalog_payload(payload: Any, key: str) -> bool:
+    if not isinstance(payload, Mapping) or key not in payload:
+        return False
+    entries = payload[key]
+    return isinstance(entries, list) and all(
+        isinstance(entry, Mapping) for entry in entries)
+
+
+def _invalid_response_error(http, response, provider: str, operation: str):
+    factory = getattr(http, "invalid_response", None)
+    if callable(factory):
+        return factory(response, provider=provider, operation=operation)
+    return InvalidResponseError(
+        provider=provider, operation=operation,
+        status_code=getattr(response, "status_code", None),
+        operation_id=getattr(response, "_clarify_operation_id", None),
+    )
+
+
 class ProviderAdapter:
     """Common capability checks and catalog contract for concrete adapters."""
 
@@ -173,9 +192,9 @@ class GeminiAdapter(ProviderAdapter):
         )
         payload = self.http.json(
             response, provider=self.metadata.provider_id, operation=operation)
-        if not isinstance(payload, Mapping):
-            raise InvalidResponseError(
-                provider=self.metadata.provider_id, operation=operation)
+        if not _valid_catalog_payload(payload, "models"):
+            raise _invalid_response_error(
+                self.http, response, self.metadata.provider_id, operation)
         return payload
 
     def _generate(self, model: str, connection: ProviderConnection,
@@ -208,8 +227,8 @@ class GeminiAdapter(ProviderAdapter):
         except (KeyError, IndexError, TypeError):
             text = ""
         if not text:
-            raise InvalidResponseError(
-                provider=self.metadata.provider_id, operation=operation)
+            raise _invalid_response_error(
+                self.http, response, self.metadata.provider_id, operation)
         return text
 
     def transcribe(self, request: TranscriptionRequest,
@@ -339,9 +358,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         )
         payload = self.http.json(
             response, provider=self.metadata.provider_id, operation=operation)
-        if not isinstance(payload, Mapping):
-            raise InvalidResponseError(
-                provider=self.metadata.provider_id, operation=operation)
+        if not _valid_catalog_payload(payload, "data"):
+            raise _invalid_response_error(
+                self.http, response, self.metadata.provider_id, operation)
         return payload
 
     def discover_models(self, connection: ProviderConnection,
@@ -403,9 +422,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         text = str(payload.get("text", "")).strip() if isinstance(
             payload, Mapping) else ""
         if not text:
-            raise InvalidResponseError(
-                provider=self.metadata.provider_id,
-                operation="transcription")
+            raise _invalid_response_error(
+                self.http, response, self.metadata.provider_id, "transcription")
         return TranscriptionResult(text, self.metadata.provider_id, model)
 
     def _generate_text(self, model: str, instruction: str,
@@ -446,9 +464,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             content = None
         text = content.strip() if isinstance(content, str) else ""
         if not text:
-            raise InvalidResponseError(
-                provider=self.metadata.provider_id,
-                operation="text_generation")
+            raise _invalid_response_error(
+                self.http, response,
+                self.metadata.provider_id, "text_generation")
         return text
 
     def rewrite(self, request: RewriteRequest,
