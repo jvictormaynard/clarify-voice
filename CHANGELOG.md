@@ -20,6 +20,8 @@ Notable user-facing changes are documented here. This project follows
 - Kept UI ownership observers alive through the bounded cleanup policy so a
   late successful retry releases the session, while exhausted cleanup remains
   deterministically owned and observable
+- Made each recording's terminal outcome immutable; cleanup failures no longer
+  rewrite a published `completed` or `cancelled` state
 
 ## [0.1.2] - 2026-07-31
 

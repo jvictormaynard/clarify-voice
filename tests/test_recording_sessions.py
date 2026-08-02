@@ -74,21 +74,47 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertEqual(session.state, "failed")
             self.assertFalse(path.exists())
 
-    def test_cleanup_failure_is_typed_and_fails_session(self):
+    def test_cleanup_failure_does_not_rewrite_completed_terminal_state(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "recording.wav"
             path.write_bytes(b"audio")
             session = app.RecordingSession(recorder=Mock(), audio_path=path)
-            session.state = "processing"
+            session.start()
+            session.begin_processing()
 
             with patch.object(
                     app.Recorder, "_safe_delete",
-                    side_effect=app.RecordingCleanupError("locked")):
+                    side_effect=app.RecordingCleanupError("locked")), \
+                    patch.object(app, "SESSION_CLEANUP_RETRY_DELAY_SECONDS", 0):
                 session.finalize("completed")
+                self.assertTrue(session.cleanup_terminal.wait(2))
 
-            self.assertEqual(session.state, "failed")
+            self.assertEqual(session.state, "completed")
+            self.assertEqual(
+                session.state_history,
+                ["created", "recording", "processing", "completed"],
+            )
             self.assertIsInstance(session.cleanup_error, app.RecordingCleanupError)
             self.assertIsInstance(session.error, app.RecordingCleanupError)
+
+    def test_cleanup_failure_does_not_rewrite_cancelled_terminal_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recording.wav"
+            path.write_bytes(b"audio")
+            session = app.RecordingSession(recorder=Mock(), audio_path=path)
+            session.start()
+
+            with patch.object(
+                    app.Recorder, "_safe_delete",
+                    side_effect=app.RecordingCleanupError("locked")), \
+                    patch.object(app, "SESSION_CLEANUP_RETRY_DELAY_SECONDS", 0):
+                session.cancel()
+                self.assertTrue(session.cleanup_terminal.wait(2))
+
+            self.assertEqual(session.state, "cancelled")
+            self.assertEqual(session.state_history, ["created", "recording", "cancelled"])
+            self.assertIsInstance(session.cleanup_error, app.RecordingCleanupError)
+            self.assertTrue(session.cleanup_retry_exhausted)
 
     def test_cleanup_failure_then_late_success_completes_shutdown(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -114,6 +140,8 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertFalse(path.exists())
             self.assertIsNone(session.cleanup_error)
             self.assertFalse(session.cleanup_retry_exhausted)
+            self.assertEqual(session.state, "cancelled")
+            self.assertEqual(session.state_history.count("cancelled"), 1)
 
     def test_persistent_cleanup_failure_retains_ownership_and_path(self):
         with tempfile.TemporaryDirectory() as directory:

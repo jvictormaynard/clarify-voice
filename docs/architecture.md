@@ -151,6 +151,9 @@ Each recording reserves a unique temporary WAV owned by its
 then removes it on success, provider or encoding failure, cancellation, or
 application exit. SoX is stopped before cleanup, and Windows processes are
 attached to a Job Object so force-closing the app cannot orphan the recorder.
+Each session publishes exactly one immutable terminal state (`completed`,
+`failed`, or `cancelled`); cleanup errors and retry exhaustion are tracked
+separately and never rewrite that published outcome.
 Stale SoX discovery runs during recorder initialization, before a hotkey can
 start fresh capture. On Windows, where `SingleInstanceGuard` owns the data
 directory exclusively, the same recovery removes only the legacy

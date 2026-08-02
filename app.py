@@ -2298,6 +2298,7 @@ class RecordingSession:
         self.audio_path = Path(audio_path) if audio_path is not None else _new_recording_path()
         self.recorder = recorder or Recorder()
         self.state = "created"
+        self.state_history = ["created"]
         self.error = None
         self.cleanup_error = None
         self.started_at = time.time()
@@ -2322,11 +2323,18 @@ class RecordingSession:
     def terminal(self):
         return self.state in self.TERMINAL_STATES
 
+    def _set_state_locked(self, state):
+        """Publish a state transition once while holding ``_lock``."""
+        if self.state == state:
+            return
+        self.state = state
+        self.state_history.append(state)
+
     def start(self):
         with self._lock:
             if self.state != "created":
                 raise RecordingError(f"Cannot start session in state {self.state}")
-            self.state = "recording"
+            self._set_state_locked("recording")
         try:
             try:
                 self.recorder.start(self.audio_path, cancel_event=self.cancel_event)
@@ -2440,7 +2448,7 @@ class RecordingSession:
         with self._lock:
             if self.state != "recording":
                 return False
-            self.state = "processing"
+            self._set_state_locked("processing")
             return True
 
     def stop_recorder(self):
@@ -2454,19 +2462,21 @@ class RecordingSession:
             if self.terminal and self.shutdown_complete.is_set():
                 return False
             self.cancel_event.set()
+        recorder_error = None
         try:
             self.recorder.cancel()
         except Exception as error:
-            self.error = error
+            recorder_error = error
         with self._lock:
             if not self.terminal:
-                self.state = "failed" if self.error else "cancelled"
+                self.error = recorder_error
+                self._set_state_locked("failed" if self.error else "cancelled")
+            elif recorder_error is not None and self.error is None:
+                self.error = recorder_error
         if self._active_workers_except_current():
             self._ensure_shutdown_watcher()
         else:
             cleaned = self._cleanup_once()
-            if not cleaned and self.state == "cancelled":
-                self.state = "failed"
             if not cleaned:
                 self._ensure_shutdown_watcher()
             self._complete_shutdown_if_ready()
@@ -2477,19 +2487,18 @@ class RecordingSession:
         if outcome not in self.TERMINAL_STATES:
             raise RecordingError(f"Invalid terminal state {outcome}")
         with self._lock:
-            if self.terminal and self._cleanup_done.is_set():
+            already_terminal = self.terminal
+            if already_terminal and self._cleanup_done.is_set():
                 return False
-            if not self.terminal:
+            if not already_terminal:
                 self.error = error
-                self.state = outcome
+                self._set_state_locked(outcome)
+            elif error is not None and self.error is None:
+                self.error = error
         if self._active_workers_except_current():
             self._ensure_shutdown_watcher()
             return True
         cleaned = self._cleanup_once()
-        if not cleaned and outcome != "failed":
-            with self._lock:
-                if not self.terminal or self.state == outcome:
-                    self.state = "failed"
         if not cleaned:
             self._ensure_shutdown_watcher()
         self._complete_shutdown_if_ready()
