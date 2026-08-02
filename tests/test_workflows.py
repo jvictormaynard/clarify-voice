@@ -384,10 +384,19 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(self.statistics.rewrites, [])
 
     def test_translation_prepares_picker_then_translates_after_choice(self):
+        picker_restores = []
+        self.service.subscribe(
+            lambda state: picker_restores.append(list(self.clipboard.restores))
+            if state.phase is WorkflowPhase.TRANSLATION_PICKER
+            else None
+        )
+
         self.assertTrue(self.service.dispatch(StartTranslation()))
         self.assertEqual(
             self.service.state.phase, WorkflowPhase.TRANSLATION_PICKER
         )
+        self.assertEqual(picker_restores, [["previous"]])
+        self.assertEqual(self.clipboard.restores, ["previous"])
         self.assertEqual(self.clipboard.writes, [])
 
         self.assertTrue(
@@ -402,6 +411,7 @@ class WorkflowServiceTests(unittest.TestCase):
             self.statistics.translations,
             [("openai", "gpt-test", "Original", "Translated", "de")],
         )
+        self.assertEqual(self.clipboard.restores, ["previous"])
 
     def test_translation_focus_change_during_capture_stops_before_picker(self):
         capture_selection = self.clipboard.capture_selection
@@ -445,6 +455,7 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertTrue(self.service.dispatch(CancelTranslation()))
 
         self.assertEqual(self.clipboard.activations, [77])
+        self.assertEqual(self.clipboard.restores, ["previous"])
         self.assertEqual(self.service.state.phase, WorkflowPhase.READY)
         self.assertEqual(self.statistics.translations, [])
 
@@ -617,6 +628,26 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(self.service.state.phase, WorkflowPhase.COMPLETED)
         self.assertTrue(self.service.finish(operation_id))
         self.assertEqual(self.service.state.phase, WorkflowPhase.READY)
+
+    def test_finish_publishes_ready_after_completed_or_failed_animation(self):
+        for rewritten, terminal_phase in (
+            ("Rewritten", WorkflowPhase.COMPLETED),
+            ("", WorkflowPhase.FAILED),
+        ):
+            with self.subTest(terminal_phase=terminal_phase):
+                self.provider.rewritten = rewritten
+                self.service.dispatch(StartRewrite())
+                operation_id = self.service.state.operation_id
+                self.assertEqual(self.states[-1].phase, terminal_phase)
+
+                self.assertTrue(self.service.finish(operation_id))
+
+                self.assertEqual(self.states[-1].phase, WorkflowPhase.READY)
+                self.assertEqual(self.states[-1].operation_id, 0)
+                self.assertEqual(
+                    [state.phase for state in self.states[-2:]],
+                    [terminal_phase, WorkflowPhase.READY],
+                )
 
 
 if __name__ == "__main__":

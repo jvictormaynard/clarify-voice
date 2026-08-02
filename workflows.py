@@ -296,7 +296,8 @@ class WorkflowService:
                 return False
             self._session = None
             self._state = WorkflowState()
-            return True
+        self._scheduler.call_soon(lambda: self._deliver_ready())
+        return True
 
     def cancel_active(self) -> None:
         """Invalidate any worker, used during application shutdown."""
@@ -702,7 +703,8 @@ class WorkflowService:
                         status_key="no_selection",
                     )
                     return
-            session.selection = capture
+                self._clipboard.restore(capture)
+                session.selection = capture
             self._transition(session, WorkflowPhase.TRANSLATION_PICKER)
         except Exception:
             self._restore_selection_if_current(session, capture)
@@ -739,7 +741,6 @@ class WorkflowService:
             if not self._is_current(session.operation_id):
                 return
             if self._provider_failed(translated):
-                self._restore_selection_if_current(session, session.selection)
                 self._transition(
                     session,
                     WorkflowPhase.FAILED,
@@ -760,7 +761,6 @@ class WorkflowService:
                 ),
             )
         except Exception:
-            self._restore_selection_if_current(session, session.selection)
             self._transition(
                 session, WorkflowPhase.FAILED, status_key="translation_failed"
             )
