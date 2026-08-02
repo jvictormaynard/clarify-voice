@@ -328,6 +328,7 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertTrue(provider_started.wait(1))
 
             with patch.object(app, "SESSION_WORKER_JOIN_SECONDS", 0.01), \
+                    patch.object(app, "SESSION_WORKER_GRACE_SECONDS", 0.01), \
                     patch.object(app.Recorder, "_safe_delete") as delete:
                 session.finalize("completed")
                 self.assertTrue(session.cleanup_terminal.wait(1))
@@ -342,6 +343,46 @@ class RecordingSessionTests(unittest.TestCase):
             worker.join(1)
             self.assertFalse(worker.is_alive())
             self.assertTrue(session.wait_for_shutdown(1))
+            self.assertFalse(path.exists())
+
+    def test_worker_grace_owner_survives_join_deadline_until_detach(self):
+        release_provider = threading.Event()
+        provider_started = threading.Event()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recording.wav"
+            path.write_bytes(b"audio")
+            session = app.RecordingSession(recorder=Mock(), audio_path=path)
+            session.state = "completed"
+
+            def provider_worker():
+                provider_started.set()
+                release_provider.wait(1)
+                session.detach_worker(threading.current_thread())
+
+            worker = threading.Thread(target=provider_worker, daemon=True)
+            session.attach_worker(worker)
+            worker.start()
+            self.assertTrue(provider_started.wait(1))
+
+            def delete(path_to_remove, *, strict=False):
+                path_to_remove.unlink(missing_ok=True)
+
+            with patch.object(app, "SESSION_WORKER_JOIN_SECONDS", 0.01), \
+                    patch.object(app, "SESSION_WORKER_GRACE_SECONDS", 0.2), \
+                    patch.object(app.Recorder, "_safe_delete", side_effect=delete) as cleanup:
+                session.finalize("completed")
+                time.sleep(0.05)
+                self.assertTrue(session._shutdown_watcher.is_alive())
+                self.assertFalse(session.shutdown_complete.is_set())
+                self.assertFalse(session._cleanup_done.is_set())
+                self.assertTrue(path.exists())
+
+                release_provider.set()
+                worker.join(1)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(session.wait_for_shutdown(1))
+
+            self.assertEqual(cleanup.call_count, 1)
             self.assertFalse(path.exists())
 
     def test_late_worker_detach_rearms_shutdown_handoff_once(self):

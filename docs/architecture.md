@@ -163,12 +163,13 @@ cleanup failures never block startup. Recorder cancellation is serialized
 through process and microphone-stream setup. If shutdown happens during an
 upload, the non-daemon
 shutdown watcher keeps the process alive until the provider worker releases
-the file, then performs bounded cleanup retries; the worker join itself has a
-five-second overall deadline and provider requests are bounded to 60 seconds.
-If a provider does not release its worker by that deadline, cleanup is skipped,
-the path remains owned, and a diagnostic is retained so process shutdown can
-finish without deleting an open file. Shutdown is not marked complete until
-deletion succeeds. A
+the file, then performs bounded cleanup retries. The initial worker join is
+five seconds, followed by a finite 60-second non-daemon grace owner aligned to
+the provider request window. A provider that releases during that grace is
+cleaned safely; if it exceeds the total window, cleanup is skipped, the path
+remains owned, and a diagnostic is retained so process shutdown can finish
+without deleting an open file. Shutdown is not marked complete until deletion
+succeeds. A
 persistent cleanup failure remains observable and retains session ownership so
 the path cannot be overwritten by a later recording. UI ownership observers
 wait for the watcher's explicit terminal signal rather than the shorter

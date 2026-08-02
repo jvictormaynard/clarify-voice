@@ -17,6 +17,10 @@ import uuid
 from functools import lru_cache
 from pathlib import Path
 
+# Keep shutdown deadlines independent from tests/integrations that replace
+# the module-level ``time`` helper to control recorder sleeps.
+_REAL_TIME = time
+
 import requests
 
 from desktop_state import WorkflowController
@@ -1971,6 +1975,10 @@ SESSION_WORKER_JOIN_SECONDS = 5.0
 SESSION_CLEANUP_RETRY_ATTEMPTS = 3
 SESSION_CLEANUP_RETRY_DELAY_SECONDS = 0.25
 TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS = 60
+# Keep a non-daemon cleanup owner alive through the provider's bounded request
+# window after the initial UI shutdown join expires. This is finite even when
+# a streaming endpoint never yields a final response.
+SESSION_WORKER_GRACE_SECONDS = TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS
 
 
 def _new_recording_path() -> Path:
@@ -2443,24 +2451,35 @@ class RecordingSession:
     def _finish_shutdown(self):
         rearm_watcher = None
         try:
-            deadline = time.monotonic() + SESSION_WORKER_JOIN_SECONDS
+            deadline = _REAL_TIME.monotonic() + SESSION_WORKER_JOIN_SECONDS
             for worker in self._active_workers():
                 if worker.ident is not None:
-                    remaining = deadline - time.monotonic()
+                    remaining = deadline - _REAL_TIME.monotonic()
                     if remaining <= 0:
                         break
                     worker.join(remaining)
             remaining_workers = self._active_workers()
             if remaining_workers:
-                self.shutdown_error = RecordingError(
-                    "Provider worker did not finish before shutdown deadline")
-                if self.error is None:
-                    self.error = self.shutdown_error
                 self.shutdown_timed_out = True
-                self.cleanup_retry_exhausted = True
-                return
+                grace_deadline = _REAL_TIME.monotonic() + SESSION_WORKER_GRACE_SECONDS
+                while self._active_workers():
+                    remaining = grace_deadline - _REAL_TIME.monotonic()
+                    if remaining <= 0:
+                        break
+                    for worker in self._active_workers():
+                        if worker.ident is not None:
+                            worker.join(min(remaining, 0.1))
+                remaining_workers = self._active_workers()
+                if remaining_workers:
+                    self.shutdown_error = RecordingError(
+                        "Provider worker did not finish before shutdown deadline")
+                    if self.error is None:
+                        self.error = self.shutdown_error
+                    self.cleanup_retry_exhausted = True
+                    return
+                self.shutdown_timed_out = False
+                self._shutdown_handoff_requested = False
             self.shutdown_error = None
-            self.shutdown_timed_out = False
             self._retry_cleanup()
             self._complete_shutdown_if_ready()
         finally:
