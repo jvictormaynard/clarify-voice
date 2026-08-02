@@ -58,6 +58,21 @@ function Get-BootId {
     return ([DateTime]$os.LastBootUpTime).ToUniversalTime().ToString("o")
 }
 
+function Get-HostId {
+    $machineGuid = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Cryptography" -Name MachineGuid -ErrorAction Stop).MachineGuid
+    if ([string]::IsNullOrWhiteSpace([string]$machineGuid)) {
+        throw "Windows MachineGuid is unavailable; cannot identify benchmark host."
+    }
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$machineGuid)
+        $digest = $sha256.ComputeHash($bytes)
+        return "sha256:" + (-join ($digest | ForEach-Object { $_.ToString("x2") }))
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 function Measure-Executable {
     param([string]$Path)
     if (-not (Test-Path $Path)) { throw "Missing executable: $Path" }
@@ -87,6 +102,7 @@ function Measure-Executable {
         Round = $Round
         RunId = $RunId
         BootId = Get-BootId
+        HostId = Get-HostId
         Executable = $resolved
         ColdStartMs = $coldStartMs
         MainWindowSeen = $mainWindowSeen

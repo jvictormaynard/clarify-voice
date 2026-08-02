@@ -23,7 +23,10 @@ powershell -ExecutionPolicy Bypass -File spikes\pyside6\package.ps1
 ```
 
 `benchmark.ps1` measures one target per invocation and records the Windows boot
-identifier. Run at least three independent post-reboot rounds per target,
+identifier plus a stable, non-reversible `HostId`. `HostId` is the lowercase
+`sha256:` plus 64-hex-character SHA-256 digest of the Windows registry
+`MachineGuid`; the raw machine identifier is never written to the CSV. Run at
+least three independent post-reboot rounds per target,
 alternating which target is measured first across rounds. Do not run both
 targets in one invocation and do not describe a single row as a cold-state
 comparison. For example, after each reboot run one of these commands, then use
@@ -53,8 +56,8 @@ The aggregator excludes its resolved `OutputCsv` path from the input list,
 rejects failed launches or non-positive/non-numeric metrics before counting
 samples, parses process/window/thread counts as positive invariant integers,
 normalizes round spellings and timestamp-form boot IDs before counting them,
-rejects malformed or ambiguous boot IDs, rejects fewer than three unique
-boot IDs/rounds per target, and
+rejects malformed or ambiguous boot IDs/host IDs, rejects mixed-host inputs,
+rejects fewer than three unique boot IDs/rounds per target, and
 reports medians for cold-start observations, working set/private memory,
 process/thread counts, and package size. This makes reruns with
 `measurements\*.csv` idempotent. The protocol provides repeated post-reboot

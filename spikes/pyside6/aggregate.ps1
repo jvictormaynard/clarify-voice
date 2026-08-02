@@ -65,6 +65,16 @@ function ConvertTo-CanonicalBootId {
     return $parsed.ToUniversalTime().ToString("o", $invariant)
 }
 
+function ConvertTo-CanonicalHostId {
+    param([string]$Value, [string]$Path)
+
+    $pattern = "^sha256:[0-9a-f]{64}$"
+    if ($Value -cnotmatch $pattern) {
+        throw "Rejected invalid HostId in $Path."
+    }
+    return $Value.ToLowerInvariant()
+}
+
 function ConvertTo-ValidMeasurement {
     param([object]$Row, [string]$Path)
 
@@ -72,7 +82,7 @@ function ConvertTo-ValidMeasurement {
     if (-not [bool]::TryParse([string]$Row.MainWindowSeen, [ref]$seen) -or -not $seen) {
         throw "Rejected unsuccessful launch in $Path (MainWindowSeen is not true)."
     }
-    foreach ($required in @("Target", "RunId", "BootId", "Round", "WindowProcessId")) {
+    foreach ($required in @("Target", "RunId", "BootId", "HostId", "Round", "WindowProcessId")) {
         if ([string]::IsNullOrWhiteSpace([string]$Row.$required)) {
             throw "Rejected incomplete measurement in $Path (missing $required)."
         }
@@ -81,6 +91,7 @@ function ConvertTo-ValidMeasurement {
         throw "Rejected unknown target in $Path."
     }
     $Row.BootId = ConvertTo-CanonicalBootId ([string]$Row.BootId) $Path
+    $Row.HostId = ConvertTo-CanonicalHostId ([string]$Row.HostId) $Path
     $round = 0
     $integerStyle = [System.Globalization.NumberStyles]::Integer
     $invariant = [System.Globalization.CultureInfo]::InvariantCulture
@@ -124,6 +135,10 @@ foreach ($path in $InputCsv) {
     }
 }
 if ($rows.Count -eq 0) { throw "No valid measurement rows were provided." }
+$hostIds = @($rows | Select-Object -ExpandProperty HostId -Unique)
+if ($hostIds.Count -ne 1) {
+    throw "Measurements must come from exactly one benchmark host."
+}
 
 $summaries = @()
 foreach ($target in @("CustomTkinter", "PySide6")) {

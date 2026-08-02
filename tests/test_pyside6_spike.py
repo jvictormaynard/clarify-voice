@@ -55,9 +55,15 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("[string]$RunId", benchmark)
         self.assertIn("[int]$Round", benchmark)
         self.assertIn("LastBootUpTime", benchmark)
+        self.assertIn("function Get-HostId", benchmark)
+        self.assertIn("MachineGuid", benchmark)
+        self.assertIn("SHA256", benchmark)
+        self.assertIn("HostId = Get-HostId", benchmark)
         self.assertNotIn("CustomTkinterExecutable", benchmark)
         self.assertNotIn("PySide6Executable", benchmark)
         self.assertIn("$bootIds.Count -lt 3", aggregate)
+        self.assertIn("ConvertTo-CanonicalHostId", aggregate)
+        self.assertIn("$hostIds.Count -ne 1", aggregate)
         self.assertIn("alternating which target is measured first", readme)
         self.assertIn("does not claim a perfectly controlled OS cold state", readme)
 
@@ -82,6 +88,9 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertTrue((FIXTURES / "invalid_boot_spellings.csv").is_file())
         self.assertTrue((FIXTURES / "invalid_boot_id.csv").is_file())
         self.assertTrue((FIXTURES / "invalid_boot_lowercase_z.csv").is_file())
+        self.assertTrue((FIXTURES / "invalid_mixed_hosts.csv").is_file())
+        self.assertTrue((FIXTURES / "invalid_host_id.csv").is_file())
+        self.assertTrue((FIXTURES / "invalid_host_missing.csv").is_file())
         for fixture in FIXTURES.glob("invalid_*_process_id.csv"):
             self.assertTrue(fixture.is_file())
         for name in (
@@ -136,6 +145,15 @@ class PySide6SpikeTests(unittest.TestCase):
             lowercase_boot = run_aggregate([FIXTURES / "invalid_boot_lowercase_z.csv"])
             self.assertNotEqual(lowercase_boot.returncode, 0)
             self.assertIn("BootId", lowercase_boot.stdout + lowercase_boot.stderr)
+            mixed_hosts = run_aggregate([FIXTURES / "invalid_mixed_hosts.csv"])
+            self.assertNotEqual(mixed_hosts.returncode, 0)
+            self.assertIn("exactly one benchmark host", mixed_hosts.stdout + mixed_hosts.stderr)
+            invalid_host = run_aggregate([FIXTURES / "invalid_host_id.csv"])
+            self.assertNotEqual(invalid_host.returncode, 0)
+            self.assertIn("HostId", invalid_host.stdout + invalid_host.stderr)
+            missing_host = run_aggregate([FIXTURES / "invalid_host_missing.csv"])
+            self.assertNotEqual(missing_host.returncode, 0)
+            self.assertIn("HostId", missing_host.stdout + missing_host.stderr)
             for malformed in sorted(FIXTURES.glob("invalid_*_process_id.csv")) + sorted(
                 FIXTURES.glob("invalid_*_process_count.csv")
             ) + sorted(FIXTURES.glob("invalid_*_thread_count.csv")):
