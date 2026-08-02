@@ -284,6 +284,45 @@ class ProviderHttpPolicyTests(unittest.TestCase):
                         "POST", "https://api.example/generate",
                         provider="openai", operation="text_generation")
 
+    def test_model_list_route_404_is_not_an_invalid_model(self):
+        for operation in ("validation", "model_discovery"):
+            with self.subTest(operation=operation):
+                response = FakeResponse(
+                    404,
+                    {"error": {
+                        "code": "model_not_found",
+                        "message": "model endpoint not found",
+                    }},
+                    text="model endpoint not found",
+                )
+                client, session = self.make_client(get=[response])
+
+                with self.assertRaises(InvalidRequestError):
+                    client.request(
+                        "GET", "https://custom.example/provider/models",
+                        provider="openai", operation=operation)
+
+                self.assertEqual(session.get.call_count, 1)
+
+    def test_model_request_404_is_invalid_model_only_for_specific_signals(self):
+        cases = (
+            ("transcription", {"code": "model_not_found"}, ""),
+            ("text_generation", {"code": "invalid_model"}, ""),
+            ("text_generation", {}, "model gpt-test not found"),
+        )
+        for operation, error, text in cases:
+            with self.subTest(operation=operation, error=error, text=text):
+                response = FakeResponse(
+                    404, {"error": error}, text=text)
+                client, session = self.make_client(post=[response])
+
+                with self.assertRaises(InvalidModelError):
+                    client.request(
+                        "POST", "https://api.example/model",
+                        provider="openai", operation=operation)
+
+                self.assertEqual(session.post.call_count, 1)
+
     def test_timeouts_and_other_request_failures_have_distinct_types(self):
         timeout_client, _session = self.make_client(post=[requests.ReadTimeout()])
         with self.assertRaises(ProviderTimeoutError):

@@ -51,7 +51,6 @@ from update_security import (
     launch_prepared_update,
     prepare_update,
 )
-from version import __version__
 from windows_hotkeys import (
     WM_HOTKEY,
     action_for_hotkey_id,
@@ -333,6 +332,40 @@ def _record_usage_event(event: dict, repositories=None) -> None:
     """Persist anonymous usage metadata; transcript contents are never stored."""
     with _STATS_LOCK:
         _storage_repositories(repositories).usage_stats.append(event)
+
+
+def _set_pending_recording_usage(session, event: dict) -> None:
+    """Hold recording usage until the UI callback accepts the result."""
+    lock = getattr(session, "_lock", None)
+    if lock is None:
+        session._pending_usage_event = event
+        return
+    with lock:
+        session._pending_usage_event = event
+
+
+def _take_pending_recording_usage(session) -> dict | None:
+    """Consume a pending recording event exactly once."""
+    lock = getattr(session, "_lock", None)
+    if lock is None:
+        event = getattr(session, "_pending_usage_event", None)
+        session._pending_usage_event = None
+        return event
+    with lock:
+        event = getattr(session, "_pending_usage_event", None)
+        session._pending_usage_event = None
+        return event
+
+
+def _record_pending_recording_usage(session, repositories=None) -> None:
+    """Persist accepted recording usage without making diagnostics fatal."""
+    event = _take_pending_recording_usage(session)
+    if event is None:
+        return
+    try:
+        _record_usage_event(event, repositories)
+    except OSError:
+        pass
 
 
 def _usage_summary(events=None, now=None, repositories=None) -> dict:
@@ -2526,6 +2559,7 @@ class RecordingSession:
         self.audio_snapshot_complete = threading.Event()
         self.cancel_event = threading.Event()
         self.provider_cancel_token = CancellationToken()
+        self._pending_usage_event = None
         self._lock = threading.RLock()
         self._workers = set()
         self._workers_lock = threading.RLock()
@@ -5383,14 +5417,19 @@ class App(ctk.CTk):
             self._set_state("microphone_unavailable")
 
     def _finish_recording_session(
-            self, session, text=None, error=None, status_key=None):
+            self, session, text=None, error=None, status_key=None,
+            usage_event=None):
+        if usage_event is not None:
+            _set_pending_recording_usage(session, usage_event)
         if not self._session_is_current(session):
+            _take_pending_recording_usage(session)
             return
         cleanup_pending = not session._cleanup_done.is_set()
         if (text and (session.cancel_event.is_set()
                       or getattr(self, "app_state", "processing") != "processing")):
             # Escape can arrive after this callback was queued but before Tk
             # runs it. Release ownership without publishing stale text.
+            _take_pending_recording_usage(session)
             if not cleanup_pending:
                 self._recording_session = None
             else:
@@ -5402,8 +5441,11 @@ class App(ctk.CTk):
         if not cleanup_pending:
             self._recording_session = None
         if text:
+            _record_pending_recording_usage(
+                session, getattr(self, "repositories", None))
             self._on_result(text)
         else:
+            _take_pending_recording_usage(session)
             self._set_state("ready", self._t(status_key or "error"))
         if cleanup_pending:
             observer = getattr(self, "_observe_recording_session_release", None)
@@ -5461,12 +5503,18 @@ class App(ctk.CTk):
                         return
                     text = call_transcription_provider(AUDIO_PATH, self.mode, self.lang)
                     if text and not text.startswith("[Error"):
-                        try:
-                            _record_usage_event(_build_recording_usage_event(
-                                getattr(self, "_recording_usage", {}), elapsed, text))
-                        except OSError:
-                            pass
-                        self.after(0, lambda: self._on_result(text))
+                        usage_event = _build_recording_usage_event(
+                            getattr(self, "_recording_usage", {}), elapsed, text)
+
+                        def publish_result():
+                            try:
+                                _record_usage_event(
+                                    usage_event, getattr(self, "repositories", None))
+                            except OSError:
+                                pass
+                            self._on_result(text)
+
+                        self.after(0, publish_result)
                     else:
                         self.after(0, lambda: self._set_state("ready", self._t("error")))
                 except Exception:
@@ -5505,13 +5553,12 @@ class App(ctk.CTk):
                     raise RecordingCancelledError("Recording cancelled")
                 if not text or text.startswith("[Error"):
                     raise RecordingError(text or "Transcription returned no text")
-                try:
-                    _record_usage_event(_build_recording_usage_event(
-                        getattr(session, "usage_context", {}), elapsed, text),
-                        getattr(self, "repositories", None))
-                except OSError:
-                    pass
+                _set_pending_recording_usage(
+                    session,
+                    _build_recording_usage_event(
+                        getattr(session, "usage_context", {}), elapsed, text))
                 if not session.finalize("completed"):
+                    _take_pending_recording_usage(session)
                     return
                 if is_current(session):
                     finisher = getattr(self, "_finish_recording_session", None)
@@ -5523,9 +5570,14 @@ class App(ctk.CTk):
                             if (session.cancel_event.is_set()
                                     or getattr(self, "app_state", "processing")
                                     != "processing"):
+                                _take_pending_recording_usage(session)
                                 return
+                            _record_pending_recording_usage(
+                                session, getattr(self, "repositories", None))
                             self._on_result(text)
                         self.after(0, publish_result)
+                else:
+                    _take_pending_recording_usage(session)
             except RecordingCancelledError as error:
                 session.finalize("cancelled", error)
             except RecordingEncodingError as error:

@@ -316,6 +316,31 @@ def _is_permanent_quota(classification: str) -> bool:
     ))
 
 
+_MODEL_REQUEST_OPERATIONS = frozenset(("transcription", "text_generation"))
+_STRUCTURED_MODEL_ERRORS = frozenset(("model_not_found", "invalid_model"))
+_MODEL_NOT_FOUND_MESSAGE = re.compile(
+    r"\bmodel\s+(?:[\"'`]([^\"'`\r\n]{1,128})[\"'`]|"
+    r"([A-Za-z0-9][\w./:@-]{0,127}))\s+(?:was\s+)?not\s+found\b",
+)
+_NON_MODEL_ROUTE_NAMES = frozenset((
+    "api", "endpoint", "list", "models", "path", "resource", "route",
+))
+
+
+def _is_invalid_model_response(
+        operation: str, error_code: str, response_text: str) -> bool:
+    """Classify only model-targeting failures as unavailable models."""
+    if operation not in _MODEL_REQUEST_OPERATIONS:
+        return False
+    if error_code in _STRUCTURED_MODEL_ERRORS:
+        return True
+    match = _MODEL_NOT_FOUND_MESSAGE.search(response_text)
+    if match is None:
+        return False
+    model_name = (match.group(1) or match.group(2) or "").strip().casefold()
+    return model_name not in _NON_MODEL_ROUTE_NAMES
+
+
 def _http_error(response: requests.Response, provider: str,
                 operation: str, operation_id: str) -> ProviderError:
     status = int(response.status_code)
@@ -341,7 +366,8 @@ def _http_error(response: requests.Response, provider: str,
         return ProviderTimeoutError(**details)
     if status in (502, 503, 504) or status >= 500:
         return ServiceUnavailableError(**details)
-    if status in (400, 404) and "model" in classification:
+    if status in (400, 404) and _is_invalid_model_response(
+            operation, error_code, classification_text):
         return InvalidModelError(**details)
     if status in (400, 404, 405, 409, 415, 422):
         return InvalidRequestError(**details)

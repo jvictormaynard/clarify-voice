@@ -1653,18 +1653,71 @@ class RewriteWorkflowTests(unittest.TestCase):
                 _session_is_current=lambda candidate: (
                     harness._recording_session is candidate and not harness._closing),
             )
+            app._set_pending_recording_usage(session, {"type": "recording"})
             callbacks.append(
                 lambda: app.App._finish_recording_session(
                     harness, session, text="late result"))
 
             # Escape publishes cancellation before the queued Tk callback runs.
-            app.App._cancel(harness)
-            self.assertEqual(harness.app_state, "ready")
-            self.assertTrue(session.cancel_event.is_set())
-            self.assertTrue(session.provider_cancel_token.cancelled)
-            callbacks.pop(0)()
+            with patch.object(app, "_record_usage_event") as record_usage:
+                app.App._cancel(harness)
+                self.assertEqual(harness.app_state, "ready")
+                self.assertTrue(session.cancel_event.is_set())
+                self.assertTrue(session.provider_cancel_token.cancelled)
+                callbacks.pop(0)()
 
+            record_usage.assert_not_called()
             harness._on_result.assert_not_called()
+
+    def test_recording_success_records_usage_once_before_result(self):
+        session = app.RecordingSession(recorder=Mock())
+        session.state = "completed"
+        session._cleanup_done.set()
+        order = []
+        harness = SimpleNamespace(
+            app_state="processing",
+            _recording_session=session,
+            _closing=False,
+            _on_result=Mock(side_effect=lambda _text: order.append("result")),
+            _session_is_current=lambda candidate: (
+                harness._recording_session is candidate and not harness._closing),
+        )
+        app._set_pending_recording_usage(session, {"type": "recording"})
+
+        with patch.object(
+                app, "_record_usage_event",
+                side_effect=lambda *_args: order.append("usage")) as record_usage:
+            app.App._finish_recording_session(harness, session, text="success")
+
+        self.assertEqual(order, ["usage", "result"])
+        record_usage.assert_called_once()
+        harness._on_result.assert_called_once_with("success")
+
+    def test_recording_success_records_usage_once_with_cleanup_pending(self):
+        session = app.RecordingSession(recorder=Mock())
+        session.state = "completed"
+        order = []
+        harness = SimpleNamespace(
+            app_state="processing",
+            _recording_session=session,
+            _closing=False,
+            _on_result=Mock(side_effect=lambda _text: order.append("result")),
+            _observe_recording_session_release=Mock(
+                side_effect=lambda _session: order.append("release")),
+            _session_is_current=lambda candidate: (
+                harness._recording_session is candidate and not harness._closing),
+        )
+        app._set_pending_recording_usage(session, {"type": "recording"})
+
+        with patch.object(
+                app, "_record_usage_event",
+                side_effect=lambda *_args: order.append("usage")) as record_usage:
+            app.App._finish_recording_session(harness, session, text="success")
+
+        self.assertEqual(order, ["usage", "result", "release"])
+        record_usage.assert_called_once()
+        harness._on_result.assert_called_once_with("success")
+        self.assertIs(harness._recording_session, session)
 
     def test_subsecond_stop_waits_for_recorder_startup(self):
         with tempfile.TemporaryDirectory() as directory:
