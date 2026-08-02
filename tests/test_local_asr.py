@@ -206,6 +206,17 @@ class LocalASRManifestTests(unittest.TestCase):
                 with self.assertRaises(local_asr.LocalASRIntegrityError):
                     local_asr.load_manifest(fixture.manifest_path)
 
+    def test_manifest_rejects_invalid_extracted_file_size(self):
+        for size in (0, -1, "not-an-integer"):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as directory:
+                fixture = InstallerFixture(directory)
+                fixture.manifest["extracted_files"][0]["size"] = size
+                fixture.manifest_path.write_text(
+                    json.dumps(fixture.manifest), encoding="utf-8")
+
+                with self.assertRaises(local_asr.LocalASRIntegrityError):
+                    local_asr.load_manifest(fixture.manifest_path)
+
     def test_repository_contains_no_sidecar_binary_or_model(self):
         names = [path.name.casefold() for path in ROOT.rglob("*") if path.is_file()]
 
@@ -574,6 +585,18 @@ class LocalASRSidecarTests(unittest.TestCase):
             self.assertEqual(options["stdin"], local_asr.subprocess.DEVNULL)
             self.assertFalse(session.trust_env)
             self.assertTrue(session.get_calls[0][0].endswith("/health"))
+            manager.shutdown()
+
+    def test_start_records_process_exactly_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager, installer, _session, _factory = self._manager(directory)
+            record_process = Mock(wraps=manager._record_process)
+            manager._record_process = record_process
+
+            manager.start()
+
+            record_process.assert_called_once_with()
+            self.assertTrue(installer.process_record_path.is_file())
             manager.shutdown()
 
     def test_windows_start_refuses_elevated_or_unknown_privileges(self):
