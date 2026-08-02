@@ -41,6 +41,30 @@ function ConvertTo-PositiveInteger {
     return $parsed
 }
 
+function ConvertTo-CanonicalBootId {
+    param([string]$Value, [string]$Path)
+
+    $pattern = "^(?<stamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{7})?)(?<zone>Z|[+-]\d{2}:\d{2})$"
+    if ($Value -notmatch $pattern) {
+        throw "Rejected invalid BootId in $Path."
+    }
+    $stamp = $Matches.stamp
+    $zone = $Matches.zone
+    $parseValue = $stamp + $(if ($zone -eq "Z") { "+00:00" } else { $zone })
+    $format = if ($stamp.Contains(".")) {
+        "yyyy-MM-dd'T'HH:mm:ss.fffffffzzz"
+    } else {
+        "yyyy-MM-dd'T'HH:mm:sszzz"
+    }
+    $parsed = [DateTimeOffset]::MinValue
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $styles = [System.Globalization.DateTimeStyles]::None
+    if (-not [DateTimeOffset]::TryParseExact($parseValue, $format, $invariant, $styles, [ref]$parsed)) {
+        throw "Rejected invalid BootId in $Path."
+    }
+    return $parsed.ToUniversalTime().ToString("o", $invariant)
+}
+
 function ConvertTo-ValidMeasurement {
     param([object]$Row, [string]$Path)
 
@@ -56,6 +80,7 @@ function ConvertTo-ValidMeasurement {
     if (@("CustomTkinter", "PySide6") -notcontains [string]$Row.Target) {
         throw "Rejected unknown target in $Path."
     }
+    $Row.BootId = ConvertTo-CanonicalBootId ([string]$Row.BootId) $Path
     $round = 0
     $integerStyle = [System.Globalization.NumberStyles]::Integer
     $invariant = [System.Globalization.CultureInfo]::InvariantCulture
