@@ -238,7 +238,8 @@ class RepositorySafetyTests(unittest.TestCase):
         package = (ROOT / "package.json").read_text(encoding="utf-8")
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
-            encoding="utf-8")
+            encoding="utf-8"
+        )
 
         self.assertIn('Join-Path $repoRoot "version.py"', build)
         self.assertIn('"--hidden-import", "version"', build)
