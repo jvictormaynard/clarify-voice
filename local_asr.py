@@ -492,7 +492,12 @@ class LocalASRInstaller:
             return existing
 
         self._claim_root()
-        staging = Path(tempfile.mkdtemp(prefix=".install-", dir=self.root))
+        try:
+            staging = Path(tempfile.mkdtemp(prefix=".install-", dir=self.root))
+        except OSError as error:
+            raise LocalASRError(
+                "Cannot create local-ASR staging directory; "
+                "retry the install.") from error
         runtime_archive = staging / self.asset("runtime").filename
         try:
             self._download(self.asset("runtime"), runtime_archive, callback)

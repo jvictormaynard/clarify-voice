@@ -442,6 +442,25 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertNotIn("private sharing detail", str(raised.exception))
             self.assertFalse(installer.install_dir.exists())
 
+    def test_install_wraps_staging_creation_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, session = fixture.installer()
+            original_mkdtemp = local_asr.tempfile.mkdtemp
+
+            def fail_staging(*args, **kwargs):
+                if Path(kwargs.get("dir")) == fixture.root:
+                    raise OSError("private disk detail")
+                return original_mkdtemp(*args, **kwargs)
+
+            with patch.object(local_asr.tempfile, "mkdtemp", new=fail_staging):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.install()
+
+            self.assertEqual(session.calls, [])
+            self.assertIn("staging", str(raised.exception))
+            self.assertNotIn("private disk detail", str(raised.exception))
+
     def test_install_rejects_mutated_traversal_component_before_deleting(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)
