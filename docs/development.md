@@ -100,6 +100,13 @@ packaged and may require Accessibility permission for simulated paste.
 Contributions that improve these platforms are welcome when they preserve the
 Windows path and include platform-specific validation.
 
+## Decision spikes
+
+The isolated [PySide6 decision spike](pyside6-decision.md) is not part of
+startup, runtime requirements, or production packaging. Run its Windows-only
+build, benchmark, and manual validation protocol from `spikes/pyside6/` before
+using its provisional recommendation.
+
 ## Release process
 
 The repository-local `$clarifyvoice-release` skill under
