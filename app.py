@@ -178,6 +178,26 @@ def _next_language(language):
     current = SUPPORTED_LANGUAGES.index(language)
     return SUPPORTED_LANGUAGES[(current + 1) % len(SUPPORTED_LANGUAGES)]
 
+
+def _run_update_check(current_version, cache_directory, publish):
+    """Run a typed update check and deliver exactly one UI result."""
+    try:
+        prepared = prepare_update(current_version, cache_directory)
+    except (UpdateSecurityError, OSError) as error:
+        publish(prepared=None, error=error)
+        return
+    publish(prepared=prepared, error=None)
+
+
+def _finish_update_error(win, update_button, update_status, translate, error):
+    """Restore update controls after a failed check on the UI thread."""
+    if not win.winfo_exists():
+        return
+    update_button.configure(state="normal")
+    update_status.configure(
+        text=translate("update_failed").format(error=error),
+        text_color="#d17878")
+
 # Public list prices used only for the local estimate shown in Statistics.
 # Unknown/custom models are deliberately left unpriced instead of guessing.
 AUDIO_COST_USD_PER_MINUTE = {
@@ -6809,14 +6829,13 @@ class App(ctk.CTk):
         update_button.pack(anchor="w")
 
         def finish_update_check(prepared=None, error=None):
+            if error is not None:
+                _finish_update_error(
+                    win, update_button, update_status, self._t, error)
+                return
             if not win.winfo_exists():
                 return
             update_button.configure(state="normal")
-            if error is not None:
-                update_status.configure(
-                    text=self._t("update_failed").format(error=error),
-                    text_color="#d17878")
-                return
             if prepared is None:
                 update_status.configure(
                     text=self._t("updates_current"), text_color="#69c58a")
@@ -6850,21 +6869,15 @@ class App(ctk.CTk):
             update_status.configure(
                 text=self._t("checking_updates"), text_color=DIM)
 
-            def run():
+            def publish(prepared=None, error=None):
                 try:
-                    prepared = prepare_update(
-                        __version__, DATA_DIR / "updates")
-                except (UpdateSecurityError, OSError, requests.RequestException) as error:
-                    try:
-                        win.after(0, lambda update_error=error:
-                            finish_update_check(error=update_error))
-                    except tk.TclError:
-                        pass
-                    return
-                try:
-                    win.after(0, lambda: finish_update_check(prepared=prepared))
+                    win.after(0, lambda: finish_update_check(
+                        prepared=prepared, error=error))
                 except tk.TclError:
                     pass
+
+            def run():
+                _run_update_check(__version__, DATA_DIR / "updates", publish)
 
             threading.Thread(target=run, daemon=True).start()
 

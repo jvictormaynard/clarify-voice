@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, call, patch
 
+import requests
+
 # Keep Windows test runs isolated from the developer's real ClarifyVoice config.
 _TEST_APPDATA = tempfile.TemporaryDirectory(prefix="clarifyvoice-tests-")
 os.environ["APPDATA"] = _TEST_APPDATA.name
@@ -23,6 +25,7 @@ import app
 from desktop_state import WorkflowController
 from provider_http import AuthenticationError
 from version import __version__
+from update_security import UpdateTransportError
 import windows_hotkeys
 from windows_clipboard import CF_UNICODETEXT, ClipboardFormat, ClipboardSnapshot
 from PIL import Image as PILImage
@@ -975,6 +978,41 @@ class ProviderTests(unittest.TestCase):
             visited.append(language)
 
         self.assertEqual(visited, ["pt", "es", "de", "ru", "en"])
+
+
+class UpdateUiTests(unittest.TestCase):
+    def test_transport_failure_restores_update_controls(self):
+        update_button = Mock()
+        update_status = Mock()
+        win = SimpleNamespace(
+            winfo_exists=lambda: True,
+            after=lambda _delay, callback: callback(),
+        )
+        published = []
+
+        def publish(prepared=None, error=None):
+            published.append((prepared, error))
+            win.after(0, lambda: app._finish_update_error(
+                win, update_button, update_status,
+                lambda key: app.STRINGS["en"][key], error))
+
+        def unavailable(*_args, **_kwargs):
+            raise UpdateTransportError(
+                "secure update service is temporarily unavailable") from requests.ConnectionError(
+                    "network unavailable")
+
+        with patch.object(app, "prepare_update", side_effect=unavailable) as prepare:
+            app._run_update_check("0.1.2", Path("updates"), publish)
+
+        prepare.assert_called_once_with("0.1.2", Path("updates"))
+        self.assertEqual(len(published), 1)
+        self.assertIsNone(published[0][0])
+        self.assertIsInstance(published[0][1], UpdateTransportError)
+        self.assertIsInstance(published[0][1].__cause__, requests.ConnectionError)
+        update_button.configure.assert_called_once_with(state="normal")
+        update_status.configure.assert_called_once_with(
+            text=("Update blocked: secure update service is temporarily unavailable"),
+            text_color="#d17878")
 
 
 class RewriteWorkflowTests(unittest.TestCase):

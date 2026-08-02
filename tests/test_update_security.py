@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 from unittest.mock import patch
 
+import requests
+
 from update_security import (
     DowngradeError,
     IntegrityError,
@@ -19,6 +21,7 @@ from update_security import (
     SignatureError,
     SignatureIdentity,
     UpdatePolicy,
+    UpdateTransportError,
     _AUTHENTICODE_TIMESTAMP_INSPECTOR,
     download_atomic,
     parse_release_manifest,
@@ -444,6 +447,22 @@ class SignatureValidationTests(unittest.TestCase):
 
 
 class PrepareUpdateTests(unittest.TestCase):
+    def test_transport_failure_is_exposed_as_typed_update_error(self):
+        def unavailable(*_args, **_kwargs):
+            raise requests.ConnectionError("network unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(UpdateTransportError) as raised:
+                prepare_update(
+                    "0.1.2", Path(directory), policy=POLICY,
+                    downloader=unavailable,
+                )
+
+        self.assertEqual(
+            str(raised.exception),
+            "secure update service is temporarily unavailable")
+        self.assertIsInstance(raised.exception.__cause__, requests.ConnectionError)
+
     def test_verifies_container_before_manifest_and_installer_after_download(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory)
