@@ -39,6 +39,12 @@ class RepositorySafetyTests(unittest.TestCase):
             content,
         )
 
+    def test_build_setup_bootstraps_the_locked_toolchain_inside_venv(self):
+        content = (ROOT / "scripts" / "setup.ps1").read_text(encoding="utf-8")
+        self.assertIn('"install_bootstrap_tools.py"', content)
+        self.assertIn('"requirements-lock-windows.txt"', content)
+        self.assertIn('"Could not install the pinned bootstrap tools."', content)
+
     def test_release_publishes_verified_sox_source(self):
         content = (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"

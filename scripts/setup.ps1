@@ -10,6 +10,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $venvDir = Join-Path $repoRoot ".venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $lockFile = Join-Path $repoRoot "requirements-lock-windows.txt"
+$bootstrapScript = Join-Path $PSScriptRoot "install_bootstrap_tools.py"
 
 function ConvertTo-ProcessArgument {
     param([string]$Value)
@@ -88,6 +89,14 @@ if (-not (Test-Path $venvPython)) {
 
 if (-not (Test-Path $lockFile)) {
     throw "The locked dependency set is missing: $lockFile"
+}
+if ($Dev) {
+    if (-not (Test-Path $bootstrapScript)) {
+        throw "The bootstrap installer is missing: $bootstrapScript"
+    }
+    Invoke-CheckedProcess $venvPython @(
+        $bootstrapScript, "--lock-file", "requirements-lock-windows.txt"
+    ) "Could not install the pinned bootstrap tools."
 }
 
 Write-Host "Installing ClarifyVoice dependencies..."
