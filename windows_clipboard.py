@@ -7,9 +7,11 @@ trying to duplicate arbitrary application-owned clipboard objects.
 
 from __future__ import annotations
 
+from array import array
 from dataclasses import dataclass
 import ctypes
 import platform
+import sys
 import time
 
 
@@ -25,12 +27,15 @@ def _decode_unicode_clipboard_text(data: bytes) -> str | None:
     """Decode CF_UNICODETEXT through its first aligned UTF-16 terminator."""
     if len(data) % 2:
         return None
-    terminator = None
-    for offset in range(0, len(data), 2):
-        if data[offset:offset + 2] == b"\x00\x00":
-            terminator = offset
-            break
-    if terminator is None:
+    units = array("H")
+    if units.itemsize != 2:
+        return None
+    units.frombytes(data)
+    if sys.byteorder != "little":
+        units.byteswap()
+    try:
+        terminator = units.index(0) * 2
+    except ValueError:
         return None
     try:
         return data[:terminator].decode("utf-16-le")

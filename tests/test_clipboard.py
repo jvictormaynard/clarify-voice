@@ -8,6 +8,7 @@ from windows_clipboard import (
     CF_UNICODETEXT,
     ClipboardFormat,
     ClipboardSnapshot,
+    MAX_FORMAT_BYTES,
     WindowsClipboardAdapter,
 )
 
@@ -219,6 +220,11 @@ class ClipboardSnapshotTests(unittest.TestCase):
         snapshot = ClipboardSnapshot((ClipboardFormat(CF_UNICODETEXT, data),), 1)
         self.assertEqual(snapshot.text, "rich text")
 
+    def test_unicode_snapshot_ignores_false_unaligned_terminator(self):
+        data = b"A\x00\x00\x00" + b"capacity\x00\x00"
+        snapshot = ClipboardSnapshot((ClipboardFormat(CF_UNICODETEXT, data),), 1)
+        self.assertEqual(snapshot.text, "A")
+
     def test_unicode_snapshot_decodes_surrogate_pair(self):
         data = "A \U0001f600\x00".encode("utf-16-le")
         snapshot = ClipboardSnapshot((ClipboardFormat(CF_UNICODETEXT, data),), 1)
@@ -233,6 +239,12 @@ class ClipboardSnapshotTests(unittest.TestCase):
         data = "missing terminator".encode("utf-16-le")
         snapshot = ClipboardSnapshot((ClipboardFormat(CF_UNICODETEXT, data),), 1)
         self.assertIsNone(snapshot.text)
+
+    def test_unicode_snapshot_large_buffer_uses_native_code_unit_search(self):
+        code_units = (MAX_FORMAT_BYTES // 2) - 1
+        data = (b"A\x00" * code_units) + b"\x00\x00"
+        snapshot = ClipboardSnapshot((ClipboardFormat(CF_UNICODETEXT, data),), 1)
+        self.assertEqual(len(snapshot.text), code_units)
 
     def test_unsupported_only_clipboard_is_not_a_restorable_empty_snapshot(self):
         adapter = _EnumeratingAdapter([9001], {})
