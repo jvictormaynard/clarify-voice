@@ -629,7 +629,6 @@ class WorkflowService:
                 capture,
                 rewritten,
                 copied_status="rewrite_copied",
-                require_current_target=True,
                 statistic=lambda provider, model: self._statistics.record_rewrite(
                     provider, model, capture.text, rewritten
                 ),
@@ -682,6 +681,17 @@ class WorkflowService:
                     session, WorkflowPhase.FAILED, status_key="no_selection"
                 )
                 return
+            with self._lock:
+                if not self._is_current_locked(session.operation_id):
+                    return
+                if not self._target_is_current(session):
+                    self._restore_selection_if_current(session, capture)
+                    self._transition(
+                        session,
+                        WorkflowPhase.FAILED,
+                        status_key="no_selection",
+                    )
+                    return
             session.selection = capture
             self._transition(session, WorkflowPhase.TRANSLATION_PICKER)
         except Exception:
@@ -770,39 +780,25 @@ class WorkflowService:
         result: str,
         *,
         copied_status: str,
-        require_current_target: bool = False,
         statistic: Callable[[str, str], None],
     ) -> None:
-        focus_changed = False
         with self._lock:
             if not self._is_current_locked(session.operation_id):
                 return
-            if (
-                require_current_target
-                and not self._target_is_current(session)
-            ):
-                focus_changed = True
-                try:
-                    self._clipboard.restore(capture)
-                except Exception:
-                    pass
-            else:
-                disposition = self._clipboard.apply_result(capture, result)
-                status_key = (
-                    None
-                    if disposition is SelectionDisposition.PASTED
-                    else copied_status
-                )
-                provider, model = self._config.refinement_identity()
-                try:
-                    statistic(provider, model)
-                except OSError:
-                    pass
-        if focus_changed:
-            self._transition(
-                session, WorkflowPhase.FAILED, status_key="no_selection"
+            # Once capture identity has been validated, the clipboard adapter
+            # owns the later focus-safe fallback: it pastes only into the
+            # original selection, otherwise it leaves the result copied.
+            disposition = self._clipboard.apply_result(capture, result)
+            status_key = (
+                None
+                if disposition is SelectionDisposition.PASTED
+                else copied_status
             )
-            return
+            provider, model = self._config.refinement_identity()
+            try:
+                statistic(provider, model)
+            except OSError:
+                pass
         self._transition(
             session,
             WorkflowPhase.COMPLETED,

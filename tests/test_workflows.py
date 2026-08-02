@@ -239,7 +239,7 @@ class WorkflowServiceTests(unittest.TestCase):
             [WorkflowPhase.REWRITING, WorkflowPhase.COMPLETED],
         )
 
-    def test_rewrite_focus_change_during_provider_rejects_output(self):
+    def test_rewrite_focus_change_after_safe_capture_keeps_copied_result(self):
         original_rewrite = self.provider.rewrite
 
         def change_focus(text):
@@ -251,12 +251,16 @@ class WorkflowServiceTests(unittest.TestCase):
 
         self.service.dispatch(StartRewrite())
 
-        self.assertEqual(self.service.state.phase, WorkflowPhase.FAILED)
-        self.assertEqual(self.service.state.status_key, "no_selection")
-        self.assertEqual(self.clipboard.writes, [])
-        self.assertEqual(self.clipboard.applied, [])
-        self.assertEqual(self.clipboard.restores, ["previous"])
-        self.assertEqual(self.statistics.rewrites, [])
+        self.assertEqual(self.service.state.phase, WorkflowPhase.COMPLETED)
+        self.assertEqual(self.service.state.status_key, "rewrite_copied")
+        self.assertEqual(self.service.state.result_text, "Rewritten")
+        self.assertEqual(self.clipboard.writes, ["Rewritten"])
+        self.assertEqual(len(self.clipboard.applied), 1)
+        self.assertEqual(self.clipboard.restores, [])
+        self.assertEqual(
+            self.statistics.rewrites,
+            [("openai", "gpt-test", "Original", "Rewritten")],
+        )
 
     def test_rewrite_focus_change_during_alt_wait_skips_capture_and_provider(self):
         alt_checks = 0
@@ -330,6 +334,29 @@ class WorkflowServiceTests(unittest.TestCase):
             self.statistics.translations,
             [("openai", "gpt-test", "Original", "Translated", "de")],
         )
+
+    def test_translation_focus_change_during_capture_stops_before_picker(self):
+        capture_selection = self.clipboard.capture_selection
+
+        def capture_then_change_focus(target):
+            capture = capture_selection(target)
+            self.clipboard.window = 88
+            return capture
+
+        self.clipboard.capture_selection = capture_then_change_focus
+
+        self.service.dispatch(StartTranslation())
+
+        self.assertEqual(self.service.state.phase, WorkflowPhase.FAILED)
+        self.assertEqual(self.service.state.status_key, "no_selection")
+        self.assertFalse(hasattr(self.provider, "translation_request"))
+        self.assertNotIn(
+            WorkflowPhase.TRANSLATION_PICKER,
+            [state.phase for state in self.states],
+        )
+        self.assertEqual(self.clipboard.applied, [])
+        self.assertEqual(self.clipboard.restores, ["previous"])
+        self.assertEqual(self.statistics.translations, [])
 
     def test_translation_blocks_rewrite_while_selection_is_preparing(self):
         scheduler = ManualScheduler()
