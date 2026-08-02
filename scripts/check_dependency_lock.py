@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import difflib
 import argparse
+import difflib
 import re
 import shutil
 import subprocess
@@ -20,10 +20,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock-file", default="requirements-lock-linux.txt")
     parser.add_argument("--requirements-file", default="requirements-dev.txt")
+    parser.add_argument(
+        "--allow-unsafe",
+        action="store_true",
+        help="include pip and setuptools in a development lock",
+    )
     args = parser.parse_args(argv)
     lockfile = ROOT / args.lock_file
+    allow_unsafe = "--allow-unsafe " if args.allow_unsafe else ""
+    unsafe_arguments = ["--allow-unsafe"] if args.allow_unsafe else []
     header = (
-        "#    pip-compile --output-file="
+        f"#    pip-compile {allow_unsafe}--output-file="
         f"{Path(args.lock_file).name} --strip-extras {args.requirements_file}"
     )
     with tempfile.TemporaryDirectory(prefix="clarify-voice-lock-") as directory:
@@ -37,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
             "-m",
             "piptools",
             "compile",
+            *unsafe_arguments,
             "--strip-extras",
             "--output-file",
             str(generated),
@@ -56,7 +64,10 @@ def main(argv: list[str] | None = None) -> int:
 
         actual = generated.read_text(encoding="utf-8")
         actual = re.sub(
-            r"(?m)^#    pip-compile --output-file=.*$", header, actual, count=1
+            r"(?m)^#    pip-compile (?:--allow-unsafe )?--output-file=.*$",
+            header,
+            actual,
+            count=1,
         )
         expected = lockfile.read_text(encoding="utf-8")
         if actual != expected:

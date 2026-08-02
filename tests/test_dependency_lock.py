@@ -19,7 +19,7 @@ class DependencyLockCheckerTests(unittest.TestCase):
 
         with patch.object(check_dependency_lock.subprocess, "run", fake_compile):
             result = check_dependency_lock.main(
-                ["--lock-file", "requirements-lock-linux.txt"]
+                ["--lock-file", "requirements-lock-linux.txt", "--allow-unsafe"]
             )
 
         self.assertEqual(result, 0)

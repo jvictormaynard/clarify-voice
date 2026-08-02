@@ -27,15 +27,41 @@ class SbomComponentTests(unittest.TestCase):
             self.assertIn(
                 SOURCE_ARCHIVE_SHA256, component["externalReferences"][0]["comment"]
             )
-            properties = {
-                item["name"].split(":")[-2]: item["value"]
-                for item in component["properties"]
-            }
             expected = {
                 path.name: sha256(path.read_bytes()).hexdigest()
                 for path in runtime_files(runtime_root, manifest)
             }
-            self.assertEqual(properties, expected)
+            file_components = {
+                item["name"]: item
+                for item in document["components"]
+                if item.get("properties")
+                and any(
+                    prop.get("name") == "clarifyvoice:bundled-by"
+                    for prop in item["properties"]
+                )
+            }
+            self.assertEqual(set(file_components), set(expected))
+            for name, digest in expected.items():
+                self.assertEqual(
+                    file_components[name]["hashes"],
+                    [{"alg": "SHA-256", "content": digest}],
+                )
+                self.assertEqual(
+                    file_components[name]["version"], "bundled-with-sox-14.4.2"
+                )
+                self.assertIn("licenses", file_components[name])
+                self.assertIn(
+                    "SoX distribution bundle", file_components[name]["description"]
+                )
+            dependency = next(
+                item
+                for item in document["dependencies"]
+                if item["ref"] == "pkg:generic/sox@14.4.2"
+            )
+            self.assertEqual(
+                set(dependency["dependsOn"]),
+                {item["bom-ref"] for item in file_components.values()},
+            )
 
     def test_rejects_malformed_bom(self):
         with tempfile.TemporaryDirectory() as directory:

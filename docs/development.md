@@ -28,8 +28,8 @@ consume the platform-specific `requirements-lock-linux.txt` or
 on the matching runner only when intentionally changing dependency intent:
 
 ```text
-python -m piptools compile --strip-extras --output-file=requirements-lock-linux.txt requirements-dev.txt
-python -m piptools compile --strip-extras --output-file=requirements-lock-windows.txt requirements-dev.txt
+python -m piptools compile --allow-unsafe --strip-extras --output-file=requirements-lock-linux.txt requirements-dev.txt
+python -m piptools compile --allow-unsafe --strip-extras --output-file=requirements-lock-windows.txt requirements-dev.txt
 python -m piptools compile --strip-extras --output-file=requirements-lock-runtime-windows.txt requirements.txt
 ```
 
@@ -44,6 +44,9 @@ toolchain used to build and validate the executable. The separate
 input to the release SBOM. Keeping these locks separate prevents Ruff, mypy,
 pip-audit, pip-tools, CycloneDX, and PyInstaller from being reported as shipped
 application components while retaining pinned, reproducible build inputs.
+Development locks are compiled with `--allow-unsafe`, so their exact `pip` and
+`setuptools` versions are committed and installed before the rest of the
+toolchain. The runtime-only lock intentionally excludes those bootstrap tools.
 The release checks that every shared runtime package has the same version in
 both Windows locks before building or generating the SBOM.
 
@@ -136,6 +139,10 @@ the SHA-256 of every `sox.exe`/DLL selected by
 `scripts/sox-runtime-manifest.json`; the source-archive SHA-256 remains source
 offer evidence only. The same manifest drives `scripts/build.ps1` before GitHub
 artifact attestations are created for the release files.
+Each selected DLL is represented as its own CycloneDX library component with a
+bundle-scoped version, SPDX license, SHA-256, and a dependency edge from the
+SoX aggregate component. This avoids attributing the source archive digest to
+the executable or hiding codec/runtime libraries in a generic property.
 The attestation is verifiable with GitHub's artifact-attestation tooling and is
 separate from the existing SHA-256 checksum.
 

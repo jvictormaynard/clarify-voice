@@ -109,6 +109,7 @@ class RepositorySafetyTests(unittest.TestCase):
         checker = ROOT / "scripts" / "check_dependency_lock.py"
         self.assertTrue(checker.is_file())
         self.assertTrue((ROOT / "scripts" / "check_runtime_lock.py").is_file())
+        self.assertTrue((ROOT / "scripts" / "install_bootstrap_tools.py").is_file())
         self.assertTrue((ROOT / "scripts" / "add_sbom_component.py").is_file())
         self.assertTrue((ROOT / "scripts" / "sox-runtime-manifest.json").is_file())
         self.assertIn(
@@ -118,11 +119,20 @@ class RepositorySafetyTests(unittest.TestCase):
         checker_content = checker.read_text(encoding="utf-8")
         self.assertNotIn("--check", checker_content)
         self.assertIn("shutil.copyfile(lockfile, generated)", checker_content)
+        self.assertIn('"--allow-unsafe"', checker_content)
         self.assertNotIn('"--upgrade"', checker_content)
 
         runtime_lock = (ROOT / "requirements-lock-runtime-windows.txt").read_text(
             encoding="utf-8"
         )
+        for lock_name in (
+            "requirements-lock-linux.txt",
+            "requirements-lock-windows.txt",
+        ):
+            dev_lock = (ROOT / lock_name).read_text(encoding="utf-8")
+            self.assertRegex(dev_lock, r"(?im)^pip==[^\n]+$")
+            self.assertRegex(dev_lock, r"(?im)^setuptools==[^\n]+$")
+        self.assertNotRegex(runtime_lock, r"(?im)^(pip|setuptools)==")
         for development_tool in (
             "cyclonedx-bom",
             "mypy",
@@ -154,6 +164,7 @@ class RepositorySafetyTests(unittest.TestCase):
             if workflow_name == "ci.yml":
                 self.assertIn("requirements-lock-linux.txt", workflow)
             self.assertIn("scripts/check_dependency_lock.py", workflow)
+            self.assertIn("scripts/install_bootstrap_tools.py", workflow)
             self.assertNotIn("pip-compile --check", workflow)
             self.assertRegex(workflow, r"uses: actions/[^@]+@[0-9a-f]{40}")
             if workflow_name == "ci.yml":

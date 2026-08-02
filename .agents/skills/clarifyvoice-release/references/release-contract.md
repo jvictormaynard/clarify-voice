@@ -27,6 +27,7 @@ The tag, release, and executable must all originate from the same green
 - `requirements-lock-windows.txt`
 - `requirements-lock-runtime-windows.txt`
 - `scripts/check_runtime_lock.py`
+- `scripts/install_bootstrap_tools.py`
 - `scripts/add_sbom_component.py`
 - `scripts/sox-runtime-manifest.json`
 - `scripts/build.ps1`
