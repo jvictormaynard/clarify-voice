@@ -458,7 +458,12 @@ class ProviderHttpClient:
 
     @staticmethod
     def _host(url: str) -> str:
-        return urlsplit(url).hostname or ""
+        try:
+            return urlsplit(url).hostname or ""
+        except (TypeError, ValueError):
+            # Malformed custom endpoints must not mask the typed transport
+            # error while diagnostics are being assembled.
+            return ""
 
     def _log(self, **event: Any) -> None:
         if self.logger is not None:
