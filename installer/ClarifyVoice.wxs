@@ -42,11 +42,6 @@
               Type="string"
               Value="[INSTALLFOLDER]"
               KeyPath="yes" />
-            <RemoveRegistryValue
-              Root="HKCU"
-              Key="Software\Microsoft\Windows\CurrentVersion\Run"
-              Name="ClarifyVoice"
-              Action="removeOnUninstall" />
           </Component>
         </Directory>
       </Directory>
@@ -99,5 +94,23 @@
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="DesktopShortcut" />
     </Feature>
+
+    <!-- Windows Installer cannot remove one arbitrary named registry value only
+         on uninstall. Use the fixed system reg.exe path and a fixed value name;
+         skip this cleanup while a major upgrade or manual rollback replaces the
+         product so the user's autostart preference survives. -->
+    <CustomAction
+      Id="RemoveAutostartOnUninstall"
+      Directory="SystemFolder"
+      ExeCommand="reg.exe delete &quot;HKCU\Software\Microsoft\Windows\CurrentVersion\Run&quot; /v ClarifyVoice /f"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom
+        Action="RemoveAutostartOnUninstall"
+        Before="RemoveFiles"
+        Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
   </Package>
 </Wix>

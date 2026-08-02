@@ -107,6 +107,16 @@ class RepositorySafetyTests(unittest.TestCase):
         build = (ROOT / "scripts" / "build.ps1").read_text(encoding="utf-8")
         self.assertIn('${distribution};distribution', build)
 
+        installer = (ROOT / "installer" / "ClarifyVoice.wxs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('Id="RemoveAutostartOnUninstall"', installer)
+        self.assertIn(
+            'Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"',
+            installer,
+        )
+        self.assertNotIn("<RemoveRegistryValue", installer)
+
     def test_package_scripts_are_documented_maintainer_aliases(self):
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertTrue(package["private"])
