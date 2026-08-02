@@ -68,6 +68,8 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("ConvertTo-PositiveInteger", aggregate)
         self.assertIn("ConvertTo-CanonicalBootId", aggregate)
         self.assertIn("$Row.BootId = ConvertTo-CanonicalBootId", aggregate)
+        self.assertIn("$Value -cnotmatch $pattern", aggregate)
+        self.assertIn('$zone -ceq "Z"', aggregate)
         self.assertIn("$Row.Round = $round", aggregate)
         for metric in ("WindowProcessId", "ProcessCount", "ThreadCount"):
             self.assertIn(f'@("WindowProcessId", "ProcessCount", "ThreadCount")', aggregate)
@@ -79,6 +81,7 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertTrue((FIXTURES / "invalid_round_spellings.csv").is_file())
         self.assertTrue((FIXTURES / "invalid_boot_spellings.csv").is_file())
         self.assertTrue((FIXTURES / "invalid_boot_id.csv").is_file())
+        self.assertTrue((FIXTURES / "invalid_boot_lowercase_z.csv").is_file())
         for fixture in FIXTURES.glob("invalid_*_process_id.csv"):
             self.assertTrue(fixture.is_file())
         for name in (
@@ -130,6 +133,9 @@ class PySide6SpikeTests(unittest.TestCase):
             invalid_boot = run_aggregate([FIXTURES / "invalid_boot_id.csv"])
             self.assertNotEqual(invalid_boot.returncode, 0)
             self.assertIn("BootId", invalid_boot.stdout + invalid_boot.stderr)
+            lowercase_boot = run_aggregate([FIXTURES / "invalid_boot_lowercase_z.csv"])
+            self.assertNotEqual(lowercase_boot.returncode, 0)
+            self.assertIn("BootId", lowercase_boot.stdout + lowercase_boot.stderr)
             for malformed in sorted(FIXTURES.glob("invalid_*_process_id.csv")) + sorted(
                 FIXTURES.glob("invalid_*_process_count.csv")
             ) + sorted(FIXTURES.glob("invalid_*_thread_count.csv")):

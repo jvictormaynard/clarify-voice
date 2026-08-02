@@ -45,12 +45,12 @@ function ConvertTo-CanonicalBootId {
     param([string]$Value, [string]$Path)
 
     $pattern = "^(?<stamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{7})?)(?<zone>Z|[+-]\d{2}:\d{2})$"
-    if ($Value -notmatch $pattern) {
+    if ($Value -cnotmatch $pattern) {
         throw "Rejected invalid BootId in $Path."
     }
     $stamp = $Matches.stamp
     $zone = $Matches.zone
-    $parseValue = $stamp + $(if ($zone -eq "Z") { "+00:00" } else { $zone })
+    $parseValue = $stamp + $(if ($zone -ceq "Z") { "+00:00" } else { $zone })
     $format = if ($stamp.Contains(".")) {
         "yyyy-MM-dd'T'HH:mm:ss.fffffffzzz"
     } else {
