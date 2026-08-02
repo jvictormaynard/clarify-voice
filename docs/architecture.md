@@ -119,7 +119,10 @@ checksummed `whisper.cpp` Windows sidecar and model. `LocalASRProviderAdapter`
 implements the typed provider-registry contract over the narrow
 `LocalTranscriptionBackend` lifecycle seam. It is not registered in the default
 registry because product installation/progress and final wiring are still
-pending #22. It consumes the #18 `TranscriptionRequest.audio_bytes` snapshot;
+pending #22. The #32 signed MSI/update contract is for packaged ClarifyVoice
+artifacts; this source-only sidecar harness does not claim signed-release
+coverage or silently join that updater. It consumes the #18
+`TranscriptionRequest.audio_bytes` snapshot;
 `RecordingSession` remains the sole owner of the temporary WAV, while the local
 adapter owns only inference cancellation and sidecar shutdown. The current
 application therefore does not import this module, start the sidecar, or
@@ -234,10 +237,10 @@ The staged distribution workflow signs the executable, embeds it in a per-user
 WiX MSI, signs that MSI and a release-manifest CAB, verifies the pinned
 publisher, emits checksums, and creates GitHub provenance attestations. Public
 enablement remains gated as documented in
-[Windows distribution security](windows-distribution.md). `scripts/deploy.ps1` is a maintainer tool for
-The local-ASR runtime and model are deliberately excluded from this one-file
-application. The groundwork manifest and maintainer harness remain source-only
-until the remaining lifecycle and download conventions land.
+[Windows distribution security](windows-distribution.md). The local-ASR
+runtime and model are deliberately excluded from this one-file application.
+Their groundwork manifest and maintainer harness remain source-only until the
+remaining lifecycle, download, and #22 acceptance conventions land.
 
 The GitHub release workflow builds on a Windows runner and publishes the
 executable plus a SHA-256 checksum. `scripts/deploy.ps1` is a maintainer tool for

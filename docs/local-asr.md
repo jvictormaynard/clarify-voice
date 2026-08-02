@@ -3,8 +3,12 @@
 This document describes the isolated groundwork for issue #23. It is not yet a
 user-facing provider. The typed provider registry from #16 is now integrated by
 an explicit adapter, and the recording lifecycle from #18 now supplies the
-in-memory audio snapshot contract. Default registration and application
-integration still wait for the download/update conventions from #22.
+in-memory audio snapshot contract. The secure Windows installer/update
+contract staged by #32 is now on `master`, but its real signing, provenance,
+and VM/manual acceptance gates remain open in #22. Local-ASR default
+registration and application integration still wait for the concrete product
+download/update and progress conventions; this branch does not claim that a
+local sidecar/model is covered by the signed MSI update path.
 
 ## Pinned implementation
 
@@ -68,7 +72,9 @@ record for a later attempt.
 the narrow `LocalTranscriptionBackend` protocol. It is deliberately not added
 to the default registry yet: the current provider UI assumes credentials and
 model discovery, while local installation/progress and final product wiring
-still need the conventions from #22.
+still need the conventions from #22. The explicit harness installer remains a
+source-only acceptance tool with its own pinned asset manifest; it does not
+silently inherit or advertise the staged signed-MSI/update contract from #32.
 
 The recording lifecycle from #18 remains authoritative: `RecordingSession`
 owns and deletes its unique WAV, then passes the in-memory `audio_bytes`
@@ -128,7 +134,9 @@ py scripts\local_asr_harness.py --root "$env:TEMP\clarify-local-asr" benchmark `
 ```
 
 No Windows benchmark or product acceptance result is claimed by this groundwork
-PR. The following remains pending after the #22 integration:
+PR. The following remains pending before #23 can be closed. The #32 staged
+installer/update contract does not substitute for these local-ASR checks, and
+#22 still needs real signed-artifact and clean-VM/manual evidence:
 
 | Check | Required evidence | Current state |
 | --- | --- | --- |
@@ -142,5 +150,6 @@ PR. The following remains pending after the #22 integration:
 | Removal | Asset root absent after removal | Unit covered; Windows pending |
 | Cloud regression | Existing provider contract suite unchanged | Typed adapter unit covered; default registration pending |
 
-Do not mark issue #23 closed until those results and the final UI/provider
-integration are in a reviewed follow-up.
+Do not mark issue #23 closed until those results, the final UI/provider and
+download-progress integration, and the required #22 signing/VM acceptance
+evidence are in a reviewed follow-up.

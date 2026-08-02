@@ -56,7 +56,9 @@ be coordinated after impact and remediation are understood.
   execution. The sidecar binds only to loopback behind a random request path,
   refuses to launch when Windows reports elevation or cannot verify privilege
   state, and is not a sandbox against another malicious process running as the
-  same Windows user.
+  same Windows user. The source-only harness is not a signed MSI/update
+  artifact; do not treat its manifest digest as publisher authentication until
+  the real signing and VM/manual gates tracked by #22 are complete.
 
 Accidental key exposure should be handled by revoking the key at the provider,
 creating a replacement, removing it from local files or logs, and checking the
