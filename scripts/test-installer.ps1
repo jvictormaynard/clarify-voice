@@ -9,6 +9,53 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+$repoRoot = Split-Path -Parent $PSScriptRoot
+
+function Assert-DisposableHostedRunner {
+    $requiredEnvironment = @{
+        CI = "true"
+        GITHUB_ACTIONS = "true"
+        RUNNER_ENVIRONMENT = "github-hosted"
+        RUNNER_OS = "Windows"
+    }
+    foreach ($name in $requiredEnvironment.Keys) {
+        $actual = [Environment]::GetEnvironmentVariable($name)
+        if ($actual -cne $requiredEnvironment[$name]) {
+            throw "Refusing destructive installer smoke test: $name must equal '$($requiredEnvironment[$name])'."
+        }
+    }
+
+    foreach ($name in @("GITHUB_WORKSPACE", "RUNNER_TEMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA")) {
+        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+            throw "Refusing destructive installer smoke test: $name is required."
+        }
+    }
+
+    $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\')
+    $actualRepoRoot = [IO.Path]::GetFullPath($repoRoot).TrimEnd('\')
+    if (-not $workspace.Equals($actualRepoRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing destructive installer smoke test: repository root must equal GITHUB_WORKSPACE."
+    }
+    if (-not (Test-Path $env:RUNNER_TEMP -PathType Container)) {
+        throw "Refusing destructive installer smoke test: RUNNER_TEMP must be an existing directory."
+    }
+
+    $expectedAppData = Join-Path $env:USERPROFILE "AppData\Roaming"
+    $expectedLocalAppData = Join-Path $env:USERPROFILE "AppData\Local"
+    foreach ($pair in @(
+        @($env:APPDATA, $expectedAppData, "APPDATA"),
+        @($env:LOCALAPPDATA, $expectedLocalAppData, "LOCALAPPDATA")
+    )) {
+        $actualRoot = [IO.Path]::GetFullPath($pair[0]).TrimEnd('\')
+        $expectedRoot = [IO.Path]::GetFullPath($pair[1]).TrimEnd('\')
+        if (-not $actualRoot.Equals($expectedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing destructive installer smoke test: $($pair[2]) is outside the hosted runner profile."
+        }
+    }
+}
+
+Assert-DisposableHostedRunner
+
 $baseline = (Resolve-Path $BaselineInstaller).Path
 $current = (Resolve-Path $CurrentInstaller).Path
 $installDirectory = Join-Path $env:LOCALAPPDATA "Programs\ClarifyVoice"
@@ -19,6 +66,21 @@ $sentinelContent = '{"schema_version":1,"openai_api_key":"test-only-sentinel"}'
 $desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "ClarifyVoice.lnk"
 $menuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\ClarifyVoice\ClarifyVoice.lnk"
 $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$metadataKey = "HKCU:\Software\ClarifyVoice"
+
+function Assert-CleanSmokeTarget {
+    foreach ($path in @($installDirectory, $configDirectory, $desktopShortcut, $menuShortcut)) {
+        if (Test-Path $path) {
+            throw "Refusing destructive installer smoke test: pre-existing ClarifyVoice state at $path"
+        }
+    }
+    if (Test-Path $metadataKey) {
+        throw "Refusing destructive installer smoke test: pre-existing ClarifyVoice installer metadata."
+    }
+    if (Get-ItemProperty -Path $runKey -Name ClarifyVoice -ErrorAction SilentlyContinue) {
+        throw "Refusing destructive installer smoke test: pre-existing ClarifyVoice autostart entry."
+    }
+}
 
 function Invoke-MsiExec {
     param([string[]]$Arguments, [string]$Operation)
@@ -49,6 +111,7 @@ function Assert-AutostartPreserved([string]$Operation) {
     }
 }
 
+Assert-CleanSmokeTarget
 New-Item $configDirectory -ItemType Directory -Force | Out-Null
 $sentinelContent | Set-Content -LiteralPath $sentinel -Encoding utf8
 
@@ -93,7 +156,14 @@ try {
             Write-Warning $_
         }
     }
-    Remove-Item $sentinel -Force -ErrorAction SilentlyContinue
+    if (Test-Path $sentinel -PathType Leaf) {
+        $finalSentinelContent = (Get-Content -LiteralPath $sentinel -Raw).Trim()
+        if ($finalSentinelContent -ceq $sentinelContent) {
+            Remove-Item $sentinel -Force
+        } else {
+            Write-Warning "Refusing to remove config.json because it is no longer the smoke-test sentinel."
+        }
+    }
 }
 
 Write-Host "Installer install/upgrade/repair/rollback/uninstall smoke test passed."

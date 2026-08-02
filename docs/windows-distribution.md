@@ -107,6 +107,15 @@ ephemeral Windows runner. It also creates and parses the release manifest and
 CAB. These automated checks do not substitute for signed-artifact or real-user
 manual acceptance.
 
+`scripts/test-installer.ps1` is intentionally destructive and must never be run
+on a developer workstation or a shared ClarifyVoice installation. It fails
+closed unless `CI` and `GITHUB_ACTIONS` are true, the runner identifies itself
+as a GitHub-hosted Windows runner, the repository matches `GITHUB_WORKSPACE`,
+the profile roots have their expected hosted-runner layout, and every targeted
+ClarifyVoice path and registry value is initially absent. Use only a disposable
+VM for the separate manual lifecycle procedure. This script itself is restricted
+to the hosted runner; do not bypass its guards.
+
 The tag release workflow must fail unless it can:
 
 1. match `version.py` to the tag;

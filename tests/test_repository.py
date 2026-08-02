@@ -89,6 +89,29 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertIn("ClarifyVoice-windows-x64-baseline.msi", content)
         self.assertNotIn("AZURE_CLIENT_ID", content)
 
+    def test_destructive_installer_smoke_is_hosted_runner_only(self):
+        content = (ROOT / "scripts" / "test-installer.ps1").read_text(
+            encoding="utf-8"
+        )
+        guard_call = content.index("Assert-DisposableHostedRunner\n\n$baseline")
+        first_write = content.index("New-Item $configDirectory")
+        clean_target_call = content.index("Assert-CleanSmokeTarget\nNew-Item")
+
+        self.assertLess(guard_call, first_write)
+        self.assertLess(clean_target_call, first_write)
+        for required in (
+            'CI = "true"',
+            'GITHUB_ACTIONS = "true"',
+            'RUNNER_ENVIRONMENT = "github-hosted"',
+            'RUNNER_OS = "Windows"',
+            "GITHUB_WORKSPACE",
+            "RUNNER_TEMP",
+            "pre-existing ClarifyVoice state",
+            "pre-existing ClarifyVoice autostart entry",
+            "no longer the smoke-test sentinel",
+        ):
+            self.assertIn(required, content)
+
     def test_installer_and_update_contract_files_exist(self):
         required = [
             "distribution/update-policy.json",
