@@ -344,6 +344,9 @@ class SignatureValidationTests(unittest.TestCase):
             fixture.write_text("Write-Output signed-fixture\n", encoding="utf-16")
             command = (
                 "$ErrorActionPreference='Stop';"
+                "$env:PSModulePath=(($env:WINDIR + "
+                "'\\System32\\WindowsPowerShell\\v1.0\\Modules') + ';' + "
+                "($env:ProgramFiles + '\\WindowsPowerShell\\Modules'));"
                 "$source=@'\n"
                 + _AUTHENTICODE_TIMESTAMP_INSPECTOR
                 + "\n'@;"
