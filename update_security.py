@@ -339,51 +339,258 @@ def _signtool_executable() -> str:
     return "signtool.exe"
 
 
-_SIGNTOOL_TIMESTAMP_HEADER = re.compile(
-    r"(?im)^\s*Index\s+Algorithm\s+Timestamp\s*$")
-_SIGNTOOL_TIMESTAMP_ROW = re.compile(
-    r"(?im)^\s*(?P<index>\d+)\s+\S+\s+(?P<timestamp>\S+)\s*$")
+_AUTHENTICODE_TIMESTAMP_INSPECTOR = r"""
+using System;
+using System.Runtime.InteropServices;
+
+public static class ClarifyVoiceTimestampInspector
+{
+    private const uint CertQueryObjectFile = 1;
+    private const uint CertQueryContentPkcs7SignedEmbed = 10;
+    private const uint CertQueryContentFlagPkcs7SignedEmbed = 1u << 10;
+    private const uint CertQueryFormatBinary = 1;
+    private const uint CertQueryFormatFlagBinary = 1u << 1;
+    private const uint Pkcs7AsnEncoding = 0x10000;
+    private const uint CmsgSignerCountParam = 5;
+    private const uint CmsgSignerUnauthAttrParam = 10;
+    private const string Rfc3161SignatureTimeStampTokenOid =
+        "1.2.840.113549.1.9.16.2.14";
+    private const string LegacyCountersignatureOid = "1.2.840.113549.1.9.6";
+    private const string LegacyAuthenticodeCountersignatureOid =
+        "1.3.6.1.4.1.311.3.2.1";
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CryptAttributes
+    {
+        public uint Count;
+        public IntPtr Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CryptAttribute
+    {
+        public IntPtr ObjectId;
+        public uint ValueCount;
+        public IntPtr Values;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CryptAttributeBlob
+    {
+        public uint DataSize;
+        public IntPtr Data;
+    }
+
+    [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CryptQueryObject(
+        uint objectType, string objectPath, uint contentFlags,
+        uint formatFlags, uint flags, out uint encoding, out uint contentType,
+        out uint formatType, out IntPtr certStore, out IntPtr message,
+        out IntPtr context);
+
+    [DllImport("crypt32.dll", SetLastError = true)]
+    private static extern bool CryptMsgGetParam(
+        IntPtr message, uint parameter, uint index, IntPtr data,
+        ref uint dataSize);
+
+    [DllImport("crypt32.dll", SetLastError = true)]
+    private static extern bool CryptMsgClose(IntPtr message);
+
+    [DllImport("crypt32.dll", SetLastError = true)]
+    private static extern bool CertCloseStore(IntPtr store, uint flags);
+
+    private static bool HasNonEmptyValue(CryptAttribute attribute)
+    {
+        if (attribute.ValueCount != 1 || attribute.Values == IntPtr.Zero)
+        {
+            return false;
+        }
+        CryptAttributeBlob blob = (CryptAttributeBlob)Marshal.PtrToStructure(
+            attribute.Values, typeof(CryptAttributeBlob));
+        return blob.DataSize > 0 && blob.Data != IntPtr.Zero;
+    }
+
+    private static string ObjectIdentifier(IntPtr objectId)
+    {
+        return objectId == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(objectId);
+    }
+
+    public static string GetTimestampProtocol(string path)
+    {
+        IntPtr store = IntPtr.Zero;
+        IntPtr message = IntPtr.Zero;
+        uint encoding;
+        uint contentType;
+        uint formatType;
+        IntPtr context;
+        try
+        {
+            if (!CryptQueryObject(
+                    CertQueryObjectFile, path,
+                    CertQueryContentFlagPkcs7SignedEmbed,
+                    CertQueryFormatFlagBinary, 0, out encoding,
+                    out contentType, out formatType, out store,
+                    out message, out context) || message == IntPtr.Zero)
+            {
+                return "Invalid";
+            }
+            if (contentType != CertQueryContentPkcs7SignedEmbed ||
+                formatType != CertQueryFormatBinary ||
+                (encoding & Pkcs7AsnEncoding) == 0)
+            {
+                return "Invalid";
+            }
+
+            uint signerCountSize = sizeof(uint);
+            IntPtr signerCountBuffer = Marshal.AllocHGlobal((int)signerCountSize);
+            try
+            {
+                if (!CryptMsgGetParam(
+                        message, CmsgSignerCountParam, 0, signerCountBuffer,
+                        ref signerCountSize))
+                {
+                    return "Invalid";
+                }
+                uint signerCount = unchecked(
+                    (uint)Marshal.ReadInt32(signerCountBuffer));
+                if (signerCount == 0)
+                {
+                    return "Missing";
+                }
+                if (signerCount > 64)
+                {
+                    return "Invalid";
+                }
+
+                int rfc3161Count = 0;
+                int legacyCount = 0;
+                for (uint signerIndex = 0; signerIndex < signerCount;
+                     signerIndex++)
+                {
+                    uint attributeSize = 0;
+                    CryptMsgGetParam(
+                        message, CmsgSignerUnauthAttrParam, signerIndex,
+                        IntPtr.Zero, ref attributeSize);
+                    if (attributeSize == 0)
+                    {
+                        // No unauthenticated attributes is the documented
+                        // no-timestamp shape; the caller still rejects it.
+                        continue;
+                    }
+                    if (attributeSize > Int32.MaxValue)
+                    {
+                        return "Invalid";
+                    }
+                    IntPtr attributeBuffer = Marshal.AllocHGlobal(
+                        checked((int)attributeSize));
+                    try
+                    {
+                        if (!CryptMsgGetParam(
+                                message, CmsgSignerUnauthAttrParam,
+                                signerIndex, attributeBuffer,
+                                ref attributeSize))
+                        {
+                            return "Invalid";
+                        }
+                        CryptAttributes attributes = (CryptAttributes)
+                            Marshal.PtrToStructure(
+                                attributeBuffer, typeof(CryptAttributes));
+                        if (attributes.Count > 4096 ||
+                            (attributes.Count > 0 &&
+                             attributes.Attributes == IntPtr.Zero))
+                        {
+                            return "Invalid";
+                        }
+                        for (uint attributeIndex = 0;
+                             attributeIndex < attributes.Count;
+                             attributeIndex++)
+                        {
+                            IntPtr attributePointer = IntPtr.Add(
+                                attributes.Attributes,
+                                checked((int)(attributeIndex *
+                                              (uint)Marshal.SizeOf(
+                                                  typeof(CryptAttribute)))));
+                            if (attributePointer == IntPtr.Zero)
+                            {
+                                return "Invalid";
+                            }
+                            CryptAttribute attribute = (CryptAttribute)
+                                Marshal.PtrToStructure(
+                                    attributePointer, typeof(CryptAttribute));
+                            string oid = ObjectIdentifier(attribute.ObjectId);
+                            if (oid == Rfc3161SignatureTimeStampTokenOid)
+                            {
+                                if (!HasNonEmptyValue(attribute))
+                                {
+                                    return "Invalid";
+                                }
+                                rfc3161Count++;
+                            }
+                            else if (oid == LegacyCountersignatureOid ||
+                                     oid == LegacyAuthenticodeCountersignatureOid)
+                            {
+                                legacyCount++;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(attributeBuffer);
+                    }
+                }
+                if (rfc3161Count == 1 && legacyCount == 0)
+                {
+                    return "RFC3161";
+                }
+                if (rfc3161Count == 0 && legacyCount > 0)
+                {
+                    return "Legacy";
+                }
+                if (rfc3161Count == 0)
+                {
+                    return "Missing";
+                }
+                return "Invalid";
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(signerCountBuffer);
+            }
+        }
+        catch
+        {
+            // A malformed/unrecognized PKCS#7 is never proof of a timestamp.
+            return "Invalid";
+        }
+        finally
+        {
+            if (message != IntPtr.Zero)
+            {
+                CryptMsgClose(message);
+            }
+            if (store != IntPtr.Zero)
+            {
+                CertCloseStore(store, 0);
+            }
+        }
+    }
+}
+"""
 
 
-def _parse_signtool_timestamp_status(output: str) -> str:
-    """Parse the primary timestamp protocol from verbose SignTool output.
-
-    SignTool's verbose verification table labels RFC 3161 tokens explicitly.
-    Requiring the table header and a single primary (index zero) row avoids
-    treating a generic timestamp certificate or arbitrary diagnostic text as
-    proof of an RFC 3161 token.  Unknown output is intentionally invalid.
-    """
-
-    header = _SIGNTOOL_TIMESTAMP_HEADER.search(output)
-    if not header:
-        return "Invalid"
-    rows = [
-        match
-        for match in _SIGNTOOL_TIMESTAMP_ROW.finditer(output, header.end())
-        if int(match.group("index")) == 0
-    ]
-    if len(rows) != 1:
-        return "Invalid"
-    return (
-        "Valid"
-        if rows[0].group("timestamp").upper() == "RFC3161"
-        else "Invalid"
-    )
-
-
-def _verify_rfc3161_timestamp(
+def _verify_windows_signature_chain(
         path: Path,
         *,
         runner: Callable[..., subprocess.CompletedProcess[str]],
         signtool: str | None = None) -> None:
-    """Verify the timestamp token and TSA chain with Windows SignTool.
+    """Verify the Authenticode and timestamp/TSA chains with Windows SignTool.
 
     ``Get-AuthenticodeSignature`` exposes the timestamp certificate but does
-    not establish that the embedded token is RFC 3161 or that its TSA chain
-    validates independently.  SignTool performs that Windows trust check; its
-    explicit verbose protocol row is parsed separately and is required to be
-    RFC3161.  Any missing tool, non-zero result, or unfamiliar output fails
-    closed.
+    not establish that the embedded token is RFC 3161.  The PowerShell side
+    inspects the PKCS#7 signer attributes for the RFC 3161
+    ``signatureTimeStampToken`` OID.  SignTool then performs the independent
+    Windows signature/TSA chain check.  Only its documented exit status is
+    used; warnings are failures so ``/tw`` cannot silently weaken the policy.
     """
 
     executable = signtool or _signtool_executable()
@@ -395,7 +602,6 @@ def _verify_rfc3161_timestamp(
                 "/pa",
                 "/all",
                 "/tw",
-                "/v",
                 str(path.resolve()),
             ],
             check=False,
@@ -405,16 +611,13 @@ def _verify_rfc3161_timestamp(
     except OSError as error:
         raise SignatureError(
             "RFC3161 timestamp verifier is unavailable") from error
-    output = "\n".join(
-        str(part or "") for part in (result.stdout, result.stderr))
     if result.returncode:
+        output = "\n".join(
+            str(part or "") for part in (result.stdout, result.stderr))
         detail = output.strip().splitlines()
         suffix = f": {detail[-1][:240]}" if detail else ""
         raise SignatureError(
             "RFC3161 timestamp or TSA chain verification failed" + suffix)
-    if _parse_signtool_timestamp_status(output) != "Valid":
-        raise SignatureError(
-            "SignTool did not confirm a valid RFC3161 timestamp token")
 
 
 def verify_authenticode(
@@ -432,12 +635,19 @@ def verify_authenticode(
     executable = powershell or _powershell_executable()
     script = (
         "$ErrorActionPreference='Stop';"
+        "$inspectorSource=@'\n"
+        + _AUTHENTICODE_TIMESTAMP_INSPECTOR
+        + "\n'@;"
+        "Add-Type -TypeDefinition $inspectorSource -Language CSharp;"
         "$signature=Get-AuthenticodeSignature -LiteralPath "
         "$env:CLARIFYVOICE_SIGNATURE_PATH;"
         "$certificate=$signature.SignerCertificate;"
         "$timestampCertificate=$signature.TimeStamperCertificate;"
-        "$timestampStatus=if(-not $timestampCertificate){'Missing'}"
-        "else{'Present'};"
+        "$timestampProtocol=[ClarifyVoiceTimestampInspector]::"
+        "GetTimestampProtocol($env:CLARIFYVOICE_SIGNATURE_PATH);"
+        "$timestampStatus=if($timestampProtocol -ceq 'RFC3161'){'Valid'}"
+        "elseif($timestampProtocol -ceq 'Missing'){'Missing'}"
+        "else{'Invalid'};"
         "$result=[ordered]@{Status=[string]$signature.Status;"
         "StatusMessage=[string]$signature.StatusMessage;"
         "CommonName=if($certificate){$certificate.GetNameInfo("
@@ -445,6 +655,7 @@ def verify_authenticode(
         "$false)}else{''};"
         "Thumbprint=if($certificate){[string]$certificate.Thumbprint}else{''};"
         "TimestampStatus=$timestampStatus;"
+        "TimestampProtocol=$timestampProtocol;"
         "TimestampCommonName=if($timestampCertificate){"
         "$timestampCertificate.GetNameInfo("
         "[System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,"
@@ -481,18 +692,20 @@ def verify_authenticode(
     if not re.fullmatch(r"[0-9A-F]{40,128}", thumbprint):
         raise SignatureError("Authenticode certificate thumbprint is missing")
     timestamp_status = str(payload.get("TimestampStatus", "Missing"))
+    timestamp_protocol = str(payload.get("TimestampProtocol", "Missing"))
     timestamp_common_name = str(payload.get("TimestampCommonName", "")).strip()
     timestamp_thumbprint = str(
         payload.get("TimestampThumbprint", "")).replace(" ", "").upper()
     if require_timestamp:
-        if timestamp_status != "Present":
+        if timestamp_status != "Valid" or timestamp_protocol != "RFC3161":
             raise SignatureError(
-                "RFC3161 timestamp is missing or invalid: " + timestamp_status)
+                "RFC3161 timestamp is missing or invalid: "
+                + timestamp_protocol)
         if not timestamp_common_name:
             raise SignatureError("RFC3161 timestamp signer is missing")
         if not re.fullmatch(r"[0-9A-F]{40,128}", timestamp_thumbprint):
             raise SignatureError("RFC3161 timestamp certificate is missing")
-        _verify_rfc3161_timestamp(
+        _verify_windows_signature_chain(
             path, runner=runner, signtool=signtool)
     return SignatureIdentity(
         common_name=common_name,

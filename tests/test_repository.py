@@ -110,14 +110,26 @@ class RepositorySafetyTests(unittest.TestCase):
         for required in (
             "Get-AuthenticodeSignature",
             "signtool.exe",
-            "verify /pa /all /tw /v",
-            "Timestamp status: RFC3161",
+            "CryptQueryObject",
+            "CryptMsgGetParam",
+            "CmsgSignerUnauthAttrParam",
+            "Marshal.SizeOf",
+            "IntPtr.Add",
+            "CertQueryContentPkcs7SignedEmbed",
+            "CertQueryFormatBinary",
+            "1.2.840.113549.1.9.16.2.14",
+            "1.2.840.113549.1.9.6",
+            "verify /pa /all /tw",
+            "Timestamp status: $timestampStatus",
+            "Timestamp protocol: $timestampProtocol",
             "Timestamp signer:",
             "Timestamp thumbprint:",
-            "legacy Authenticode",
         ):
             self.assertIn(required, content)
-        self.assertIn("$timestampProtocols.Count -ne 1", content)
+        self.assertNotIn("Index  Algorithm  Timestamp", content)
+        self.assertNotIn("$timestampProtocols", content)
+        self.assertNotIn("/v", content)
+        self.assertNotIn("Marshal.ReadIntPtr", content)
 
     def test_ci_exercises_installer_lifecycle_without_signing_secrets(self):
         content = (ROOT / ".github" / "workflows" / "ci.yml").read_text(

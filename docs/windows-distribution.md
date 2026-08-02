@@ -90,12 +90,20 @@ MSI installation and cannot launch `msiexec` through this flow.
 6. Download the MSI atomically. Interruption, excess bytes, size mismatch, or
    checksum mismatch removes the `.part` file and leaves no runnable update.
 7. Require a valid Authenticode signature from the same pinned publisher. The
-   PowerShell inspection reports the primary signer and the timestamp signer,
-   thumbprint, and certificate presence; certificate presence alone is not
-   accepted as timestamp proof. The updater separately runs Windows SignTool
-   with `verify /pa /all /tw /v`, requires its primary timestamp row to say
-   `RFC3161`, and fails closed for a missing tool, legacy Authenticode
-   countersignature, an untrusted/invalid TSA chain, or unfamiliar output.
+   PowerShell inspection reports the primary signer and timestamp signer,
+   thumbprint, status, and protocol. It reads the embedded PKCS#7 signer
+   unauthenticated attributes with Windows CryptoAPI
+   (`CryptQueryObject`/`CryptMsgGetParam`) and requires exactly one
+   RFC3161 `id-aa-signatureTimeStampToken` attribute
+   (`1.2.840.113549.1.9.16.2.14`). Legacy PKCS#9/Authenticode
+   countersignatures (`1.2.840.113549.1.9.6` and
+   `1.3.6.1.4.1.311.3.2.1`), malformed attributes, and missing tokens are
+   rejected. The updater separately runs the documented Windows SignTool
+   command `verify /pa /all /tw` and accepts only exit code 0, so its
+   signature and TSA-chain validation is independent of the structural OID
+   check; warnings (including `/tw`'s missing-timestamp warning), a missing
+   tool, or any other non-zero result fail closed. SignTool stdout is never
+   parsed because Microsoft does not specify a stable timestamp-table format.
 8. Offer the verified version to the user. Nothing executes without an
    explicit confirmation.
 9. Recheck size, checksum, signature, and publisher immediately before calling

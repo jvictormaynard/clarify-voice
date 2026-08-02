@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from update_security import (
     SignatureError,
     SignatureIdentity,
     UpdatePolicy,
+    _AUTHENTICODE_TIMESTAMP_INSPECTOR,
     download_atomic,
     parse_release_manifest,
     prepare_update,
@@ -141,12 +143,6 @@ class AtomicDownloadTests(unittest.TestCase):
 
 
 class SignatureValidationTests(unittest.TestCase):
-    _VALID_SIGNTOOL_OUTPUT = """
-Index  Algorithm  Timestamp
-========================================
-0      sha256     RFC3161
-"""
-
     def _verify(self, artifact, payload, *, signtool_result=None):
         powershell_result = SimpleNamespace(
             returncode=0,
@@ -156,7 +152,9 @@ Index  Algorithm  Timestamp
         if signtool_result is None:
             signtool_result = SimpleNamespace(
                 returncode=0,
-                stdout=self._VALID_SIGNTOOL_OUTPUT,
+                # SignTool stdout is deliberately not parsed. Its documented
+                # exit status is the only accepted chain-verification signal.
+                stdout="unstructured SignTool output",
                 stderr="",
             )
         runner = Mock(side_effect=[powershell_result, signtool_result])
@@ -170,12 +168,25 @@ Index  Algorithm  Timestamp
         )
         powershell_script = runner.call_args_list[0].args[0][-1]
         for field in (
+            "CryptQueryObject",
+            "CryptMsgGetParam",
+            "CmsgSignerUnauthAttrParam",
+            "Marshal.SizeOf",
+            "IntPtr.Add",
+            "CertQueryContentPkcs7SignedEmbed",
+            "CertQueryFormatBinary",
+            "1.2.840.113549.1.9.16.2.14",
+            "1.2.840.113549.1.9.6",
             "TimeStamperCertificate",
             "TimestampStatus",
+            "TimestampProtocol",
             "TimestampCommonName",
             "TimestampThumbprint",
         ):
             self.assertIn(field, powershell_script)
+        self.assertNotIn("Index  Algorithm  Timestamp", powershell_script)
+        self.assertNotIn("/v", powershell_script)
+        self.assertNotIn("Marshal.ReadIntPtr", powershell_script)
         signtool_command = runner.call_args_list[1].args[0]
         self.assertEqual(
             signtool_command,
@@ -185,7 +196,6 @@ Index  Algorithm  Timestamp
                 "/pa",
                 "/all",
                 "/tw",
-                "/v",
                 str(artifact.resolve()),
             ],
         )
@@ -197,9 +207,10 @@ Index  Algorithm  Timestamp
             "StatusMessage": "Signature verified.",
             "CommonName": POLICY.publisher_common_name,
             "Thumbprint": "AB" * 20,
-            # PowerShell reports only that a timestamp certificate is present.
-            # RFC3161 validity is established by the independent SignTool call.
-            "TimestampStatus": "Present",
+            # The PowerShell side structurally identifies the RFC3161 OID;
+            # SignTool separately validates the Windows/TSA chain.
+            "TimestampStatus": "Valid",
+            "TimestampProtocol": "RFC3161",
             "TimestampCommonName": "Trusted RFC3161 TSA",
             "TimestampThumbprint": "CD" * 20,
         }
@@ -222,6 +233,7 @@ Index  Algorithm  Timestamp
             with self.assertRaises(SignatureError):
                 self._verify(artifact, self._valid_payload(
                     TimestampStatus="Missing",
+                    TimestampProtocol="Missing",
                     TimestampCommonName="",
                     TimestampThumbprint="",
                 ))
@@ -233,24 +245,28 @@ Index  Algorithm  Timestamp
             with self.assertRaises(SignatureError):
                 self._verify(artifact, self._valid_payload(
                     TimestampStatus="Invalid",
+                    TimestampProtocol="Invalid",
                 ))
 
     def test_rejects_legacy_authenticode_countersignature(self):
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / "artifact.msi"
             artifact.write_bytes(b"signed-with-legacy-timestamp")
-            legacy = SimpleNamespace(
-                returncode=0,
-                stdout=(
-                    "Index  Algorithm  Timestamp\n"
-                    "========================================\n"
-                    "0      sha256     Authenticode\n"
-                ),
-                stderr="",
-            )
             with self.assertRaises(SignatureError):
-                self._verify(artifact, self._valid_payload(),
-                             signtool_result=legacy)
+                self._verify(artifact, self._valid_payload(
+                    TimestampStatus="Invalid",
+                    TimestampProtocol="Legacy",
+                ))
+
+    def test_rejects_malformed_rfc3161_attribute(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"signed-with-malformed-rfc3161")
+            with self.assertRaises(SignatureError):
+                self._verify(artifact, self._valid_payload(
+                    TimestampStatus="Invalid",
+                    TimestampProtocol="Invalid",
+                ))
 
     def test_rejects_untrusted_or_invalid_timestamp_authority(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -268,18 +284,102 @@ Index  Algorithm  Timestamp
                 self._verify(artifact, self._valid_payload(),
                              signtool_result=invalid_tsa)
 
-    def test_rejects_unparseable_sign_tool_timestamp_output(self):
+    def test_rejects_signtool_warning_even_with_valid_structural_timestamp(self):
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / "artifact.msi"
-            artifact.write_bytes(b"signed-with-ambiguous-timestamp")
-            malformed = SimpleNamespace(
-                returncode=0,
-                stdout="Successfully verified: artifact.msi",
+            artifact.write_bytes(b"signed-with-timestamp-warning")
+            warning = SimpleNamespace(
+                returncode=2,
+                stdout="Signature verification completed with warnings",
                 stderr="",
             )
             with self.assertRaises(SignatureError):
                 self._verify(artifact, self._valid_payload(),
-                             signtool_result=malformed)
+                             signtool_result=warning)
+
+    def test_ignores_undocumented_signtool_stdout_when_exit_status_is_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"signed-with-rfc3161-timestamp")
+            identity = self._verify(
+                artifact,
+                self._valid_payload(),
+                signtool_result=SimpleNamespace(
+                    returncode=0,
+                    stdout="any future SignTool diagnostic format",
+                    stderr="",
+                ),
+            )
+            self.assertEqual(identity.timestamp_common_name, "Trusted RFC3161 TSA")
+
+    def test_rejects_unavailable_signtool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.msi"
+            artifact.write_bytes(b"signed-with-rfc3161-timestamp")
+            powershell_result = SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(self._valid_payload()),
+                stderr="",
+            )
+            runner = Mock(side_effect=[powershell_result, OSError("not found")])
+            with self.assertRaises(SignatureError):
+                verify_authenticode(
+                    artifact,
+                    POLICY.publisher_common_name,
+                    require_timestamp=True,
+                    runner=runner,
+                    powershell="powershell.exe",
+                    signtool="signtool.exe",
+                )
+
+    @unittest.skipUnless(
+        sys.platform == "win32",
+        "requires Windows CryptoAPI and Authenticode cmdlets",
+    )
+    def test_windows_inspector_reads_real_embedded_pkcs7_without_timestamp(self):
+        """Exercise CryptoAPI against a real temporary Authenticode fixture."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "clarifyvoice-inspector-fixture.ps1"
+            fixture.write_text("Write-Output signed-fixture\n", encoding="utf-16")
+            command = (
+                "$ErrorActionPreference='Stop';"
+                "$source=@'\n"
+                + _AUTHENTICODE_TIMESTAMP_INSPECTOR
+                + "\n'@;"
+                "Add-Type -TypeDefinition $source -Language CSharp;"
+                "$fixture=$env:CLARIFYVOICE_INSPECTOR_FIXTURE;"
+                "$certificate=$null;"
+                "try{"
+                "$certificate=New-SelfSignedCertificate "
+                "-Subject 'CN=ClarifyVoice Inspector Fixture' "
+                "-Type CodeSigningCert -CertStoreLocation Cert:\\CurrentUser\\My;"
+                "$signed=Set-AuthenticodeSignature -LiteralPath $fixture "
+                "-Certificate $certificate;"
+                "if($signed.Status -eq 'NotSigned'){throw 'fixture was not signed'};"
+                "$protocol=[ClarifyVoiceTimestampInspector]::"
+                "GetTimestampProtocol($fixture);"
+                "if($protocol -cne 'Missing'){throw "
+                "('unexpected protocol: ' + $protocol)};"
+                "Write-Output $protocol;"
+                "}finally{"
+                "if($certificate){Remove-Item -LiteralPath "
+                "('Cert:\\CurrentUser\\My\\' + $certificate.Thumbprint) "
+                "-ErrorAction SilentlyContinue};"
+                "Remove-Item -LiteralPath $fixture -Force -ErrorAction SilentlyContinue"
+                "}"
+            )
+            environment = os.environ.copy()
+            environment["CLARIFYVOICE_INSPECTOR_FIXTURE"] = str(fixture)
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "Missing")
 
     def test_rejects_invalid_timestamp_certificate(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -310,6 +410,7 @@ Index  Algorithm  Timestamp
                     CommonName="",
                     Thumbprint="",
                     TimestampStatus="Missing",
+                    TimestampProtocol="Missing",
                     TimestampCommonName="",
                     TimestampThumbprint="",
                 ))
