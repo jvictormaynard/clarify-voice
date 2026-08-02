@@ -13,7 +13,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $Version) {
     $versionSource = Get-Content (Join-Path $repoRoot "version.py") -Raw
     $match = [regex]::Match(
-        $versionSource, '(?m)^__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"$')
+        $versionSource,
+        '(?m)^__version__[ \t]*=[ \t]*"([0-9]+\.[0-9]+\.[0-9]+)"[ \t]*\r?$')
     if (-not $match.Success) {
         throw "Could not read the packaged version from version.py."
     }
