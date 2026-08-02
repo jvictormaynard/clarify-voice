@@ -377,8 +377,26 @@ class SignatureValidationTests(unittest.TestCase):
             )
             environment = os.environ.copy()
             environment["CLARIFYVOICE_INSPECTOR_FIXTURE"] = str(fixture)
+            # PowerShell 7 is the default GitHub Actions shell, but the
+            # Authenticode cmdlets used by this fixture are provided by the
+            # Windows PowerShell 5.1 Security module.  Invoke that binary
+            # explicitly while retaining -NoProfile so module autoloading is
+            # exercised deterministically.
+            powershell_executable = str(
+                Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                / "System32"
+                / "WindowsPowerShell"
+                / "v1.0"
+                / "powershell.exe"
+            )
             result = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                [
+                    powershell_executable,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    command,
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
