@@ -42,6 +42,12 @@ from provider_types import (
     TranslationRequest,
     TranslationResult,
 )
+from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
+from local_asr_product import (
+    LocalASRProductController,
+    LocalASRProductState,
+    format_requirements,
+)
 from repositories import (
     ApplicationRepositories,
     LocalConfigRepository,
@@ -180,6 +186,8 @@ DEFAULT_CONFIG = {
     "groq_base_url": os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
     "groq_audio_model": os.environ.get("GROQ_AUDIO_MODEL", "whisper-large-v3-turbo"),
     "groq_text_model": os.environ.get("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile"),
+    "local_asr_model": os.environ.get("LOCAL_ASR_MODEL", "ggml-small"),
+    "local_asr_cloud_refinement": False,
     "refinement_provider": os.environ.get("REFINEMENT_PROVIDER", ""),
     "refinement_model": os.environ.get("REFINEMENT_MODEL", ""),
     "ui_mode": "prompt",
@@ -2062,6 +2070,7 @@ def _call_provider_audio(
         provider: str, audio_path: Path, mode: str, lang: str = "en",
         audio_bytes: bytes | None = None,
         cancel_token: CancellationToken | None = None) -> str:
+    provider = str(provider or "").strip().lower()
     try:
         metadata = PROVIDER_REGISTRY.describe(provider)
         connection = _provider_connection(provider)
@@ -2082,7 +2091,9 @@ def _call_provider_audio(
         transcript = PROVIDER_REGISTRY.transcribe(
             provider, request, connection, cancel_token).text
         if (mode == "prompt" and not metadata.supports(
-                ProviderCapability.MULTIMODAL_AUDIO)):
+                ProviderCapability.MULTIMODAL_AUDIO)
+                and (provider != LOCAL_ASR_PROVIDER_ID
+                     or bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))):
             return _refine_transcript(transcript, lang, cancel_token)
         return transcript
     except Exception as error:
@@ -4526,6 +4537,11 @@ class App(ctk.CTk):
             self._clarify_transparent_color = TRANSPARENT
 
         self.recorder = Recorder()
+        local_adapter = PROVIDER_REGISTRY.adapter(LOCAL_ASR_PROVIDER_ID)
+        local_backend = getattr(local_adapter, "backend", None)
+        local_installer = getattr(local_backend, "installer", None)
+        self._local_asr_product = LocalASRProductController(
+            installer=local_installer)
         self.app_state = "ready"
         self.mode = str(APP_CONFIG.get("ui_mode", "prompt"))
         self.lang = str(APP_CONFIG.get("ui_language", "en"))
@@ -4740,6 +4756,16 @@ class App(ctk.CTk):
         if not getattr(self, "_recording_shutdown", False):
             self._recording_shutdown = True
             self._shutdown_recording(SESSION_SHUTDOWN_JOIN_SECONDS)
+        product = getattr(self, "_local_asr_product", None)
+        if product is not None:
+            product.shutdown(timeout=SESSION_SHUTDOWN_JOIN_SECONDS)
+        # The registry owns the sidecar backend used by transcription.  Keep
+        # this after recording cancellation so an in-flight local request can
+        # observe the recording's cancellation token before process teardown.
+        try:
+            PROVIDER_REGISTRY.shutdown()
+        except Exception:
+            pass
         return super().destroy()
 
     def _shutdown_recording(self, timeout=None):
@@ -7312,6 +7338,20 @@ class App(ctk.CTk):
                        "cancel_token": None}
             for provider in provider_ids
         }
+        local_product = getattr(self, "_local_asr_product", None)
+        if local_product is not None and LOCAL_ASR_PROVIDER_ID in state:
+            local_product_state = local_product.state
+            state[LOCAL_ASR_PROVIDER_ID].update(
+                status=("active" if local_product_state.status == "installed"
+                        else local_product_state.status),
+                models=(
+                    [default_models[LOCAL_ASR_PROVIDER_ID]]
+                    if local_product_state.status == "installed" else []),
+                error=(local_product_state.detail
+                       if local_product_state.status in ("error", "invalid")
+                       else ""),
+                feedback=local_product_state.detail,
+            )
         selected = {
             "provider": str(APP_CONFIG.get("transcription_provider", "gemini")),
             "model": "",
@@ -7469,11 +7509,22 @@ class App(ctk.CTk):
         validate_buttons = {}
         deactivate_buttons = {}
         detail_inputs = {}
+        local_detail_widgets = {}
         model_menu_visible = {"value": False}
         model_signature = {"value": None}
 
         def status_presentation(provider):
             status = state[provider]["status"]
+            if provider == LOCAL_ASR_PROVIDER_ID and status == "active":
+                return "Installed", "#69c58a"
+            if provider == LOCAL_ASR_PROVIDER_ID and status == "installing":
+                return "Downloading…", "#b9a66b"
+            if provider == LOCAL_ASR_PROVIDER_ID and status == "removing":
+                return "Removing…", "#b9a66b"
+            if provider == LOCAL_ASR_PROVIDER_ID and status == "cancelled":
+                return "Cancelled", "#d3a46f"
+            if provider == LOCAL_ASR_PROVIDER_ID and status == "error":
+                return "Action needed", "#d36f6f"
             if status == "active":
                 return self._t("active"), "#69c58a"
             if status == "validating":
@@ -7973,6 +8024,21 @@ class App(ctk.CTk):
             status, color = status_presentation(provider)
             card_status_buttons[provider].configure(
                 text=status, text_color=color)
+            if provider == LOCAL_ASR_PROVIDER_ID:
+                widgets = local_detail_widgets.get(provider)
+                if widgets is not None:
+                    busy = state[provider]["status"] in ("installing", "removing")
+                    installed = state[provider]["status"] == "active"
+                    widgets["install"].configure(
+                        state="disabled" if busy or installed else "normal")
+                    widgets["cancel"].configure(
+                        state="normal" if busy else "disabled")
+                    widgets["remove"].configure(
+                        state="normal" if installed and not busy else "disabled")
+                if provider in detail_status_labels:
+                    detail_status_labels[provider].configure(
+                        text=status, text_color=color)
+                return
             if provider in detail_status_labels:
                 detail_status_labels[provider].configure(text=status, text_color=color)
                 error = state[provider]["error"]
@@ -8059,6 +8125,169 @@ class App(ctk.CTk):
             detail_status_labels[provider] = ctk.CTkLabel(heading, text="",
                 font=font_caption)
             detail_status_labels[provider].pack(side="right")
+            if provider == LOCAL_ASR_PROVIDER_ID:
+                # Local ASR has no API key or endpoint.  Its entire product
+                # boundary is explicit asset installation/removal, with
+                # manifest requirements and byte-level progress visible here.
+                requirements = ctk.CTkLabel(
+                    inner, text=format_requirements(
+                        (local_product.state.requirements if local_product
+                         else {})), text_color=DIM, font=font_caption,
+                    anchor="w", justify="left", wraplength=430)
+                requirements.pack(fill="x", padx=2, pady=(0, 7))
+                ctk.CTkLabel(
+                    inner,
+                    text=("Downloads are explicit and verified before extraction. "
+                          "Audio stays local; cloud refinement is off by default."),
+                    text_color="#777777", font=font_caption, anchor="w",
+                    justify="left", wraplength=430).pack(
+                        fill="x", padx=2, pady=(0, 8))
+                message = ctk.CTkLabel(
+                    inner, text="", text_color="#d17878", font=font_caption,
+                    anchor="w", justify="left", wraplength=430)
+                message.pack(fill="x", padx=2, pady=(4, 4))
+                progress = ctk.CTkProgressBar(
+                    inner, height=8, corner_radius=4, fg_color="#202020",
+                    progress_color="#e7e7e7")
+                progress.set(0)
+                progress.pack(fill="x", padx=2, pady=(2, 8))
+                actions = ctk.CTkFrame(inner, fg_color="transparent")
+                actions.pack(fill="x", pady=(2, 0))
+                install_button = ctk.CTkButton(
+                    actions, text="Download local ASR", width=164, height=32,
+                    corner_radius=16, fg_color="#ededed", hover_color="#ffffff",
+                    text_color="#050505", font=font_label)
+                install_button.pack(side="left")
+                cancel_button = ctk.CTkButton(
+                    actions, text="Cancel", width=92, height=32, corner_radius=16,
+                    fg_color="transparent", hover_color="#252525",
+                    border_width=1, border_color="#3a3a3a", text_color=DIM,
+                    font=font_label)
+                remove_button = ctk.CTkButton(
+                    actions, text="Remove assets", height=32, corner_radius=16,
+                    fg_color="transparent", hover_color="#251717",
+                    border_width=1, border_color="#3a2222", text_color="#b67b7b",
+                    font=font_label)
+                refinement_switch = ctk.CTkSwitch(
+                    inner, text="Allow cloud refinement for Prompt mode",
+                    height=24, switch_width=36, switch_height=18,
+                    corner_radius=9, border_width=1, fg_color="#171717",
+                    progress_color="#e7e7e7", button_color="#777777",
+                    text_color=DIM, font=font_label)
+                refinement_switch.pack(fill="x", padx=2, pady=(12, 0))
+                if bool(APP_CONFIG.get("local_asr_cloud_refinement", False)):
+                    refinement_switch.select()
+                ctk.CTkLabel(
+                    inner,
+                    text=("When enabled, the local transcript is sent to the "
+                          "selected cloud refinement provider. It never happens "
+                          "automatically."),
+                    text_color="#686868", font=font_caption, anchor="w",
+                    justify="left", wraplength=430).pack(
+                        fill="x", padx=50, pady=(2, 0))
+                local_detail_widgets[provider] = {
+                    "requirements": requirements,
+                    "message": message,
+                    "progress": progress,
+                    "install": install_button,
+                    "cancel": cancel_button,
+                    "remove": remove_button,
+                    "refinement": refinement_switch,
+                }
+                detail_inputs[provider] = {}
+                detail_messages[provider] = message
+                validate_buttons[provider] = install_button
+                deactivate_buttons[provider] = remove_button
+
+                def apply_local_preference():
+                    APP_CONFIG["local_asr_cloud_refinement"] = bool(
+                        refinement_switch.get())
+                    try:
+                        _save_app_config(self.repositories)
+                    except OSError as error:
+                        message.configure(text=f"Could not save setting: {error}")
+                        return
+                    refresh_dirty_state()
+
+                refinement_switch.configure(command=apply_local_preference)
+
+                def update_local_widgets(product_state: LocalASRProductState):
+                    if not win.winfo_exists():
+                        return
+                    status_value = (
+                        "active" if product_state.status == "installed"
+                        else product_state.status)
+                    state[provider].update(
+                        status=status_value,
+                        models=([default_models[provider]]
+                                if status_value == "active" else []),
+                        error=(product_state.detail
+                               if product_state.status in ("error", "invalid")
+                               else ""),
+                        feedback=product_state.detail,
+                    )
+                    requirements.configure(
+                        text=format_requirements(product_state.requirements))
+                    message.configure(text=product_state.detail or "")
+                    progress.configure(
+                        mode="indeterminate"
+                        if product_state.status in ("installing", "removing")
+                        else "determinate")
+                    if product_state.status in ("installing", "removing"):
+                        progress.start()
+                    else:
+                        progress.stop()
+                        progress.set(product_state.fraction)
+                    busy = product_state.status in ("installing", "removing")
+                    install_button.configure(
+                        state="disabled" if busy or status_value == "active" else "normal")
+                    cancel_button.configure(state="normal" if busy else "disabled")
+                    remove_button.configure(
+                        state="disabled" if busy or status_value != "active" else "normal")
+                    refresh_provider_ui(provider)
+                    schedule_model_refresh()
+
+                def schedule_local_update(product_state):
+                    try:
+                        win.after(0, lambda: update_local_widgets(product_state))
+                    except tk.TclError:
+                        pass
+
+                if local_product is not None:
+                    local_product.subscribe(schedule_local_update)
+
+                def install_local():
+                    try:
+                        local_product.install_async()
+                    except Exception as error:
+                        update_local_widgets(LocalASRProductState(
+                            status="error", detail=str(error),
+                            requirements=local_product.state.requirements))
+
+                def cancel_local():
+                    if local_product is not None:
+                        local_product.cancel()
+
+                def remove_local():
+                    if selected["provider"] == provider:
+                        message.configure(
+                            text=("Select a cloud provider explicitly before removing "
+                                  "the active local provider."))
+                        return
+                    try:
+                        local_product.remove_async()
+                    except Exception as error:
+                        update_local_widgets(LocalASRProductState(
+                            status="error", detail=str(error),
+                            requirements=local_product.state.requirements))
+
+                install_button.configure(command=install_local)
+                cancel_button.configure(command=cancel_local, state="disabled")
+                remove_button.configure(command=remove_local, state="disabled")
+                update_local_widgets(
+                    local_product.state if local_product is not None else
+                    LocalASRProductState(status="error", detail="Local ASR unavailable"))
+                return
             ctk.CTkLabel(inner, text=self._t("api_key"), text_color=DIM,
                 font=font_label, anchor="w").pack(fill="x", padx=2, pady=(0, 4))
             key_entry = ctk.CTkEntry(inner, height=32, corner_radius=10,
@@ -8505,6 +8734,10 @@ if __name__ == "__main__":
         lambda: app.after(0, app._show_if_hidden))
     selected_key = APP_CONFIG.get(
         f"{APP_CONFIG.get('transcription_provider', 'gemini')}_api_key", "")
-    if not start_hidden and not str(selected_key).strip():
+    local_ready = (
+        APP_CONFIG.get("transcription_provider") == LOCAL_ASR_PROVIDER_ID
+        and getattr(app, "_local_asr_product", None) is not None
+        and app._local_asr_product.state.status == "installed")
+    if not start_hidden and not str(selected_key).strip() and not local_ready:
         app.after(300, app._open_settings)
     app.mainloop()

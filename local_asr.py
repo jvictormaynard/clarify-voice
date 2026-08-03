@@ -537,7 +537,10 @@ class LocalASRInstaller:
         asset: ManifestAsset,
         destination: Path,
         callback: ProgressCallback | None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise LocalASRCancelledError("Local ASR installation was cancelled")
         self._report(callback, f"download:{asset.name}", 0, asset.size)
         digest = hashlib.sha256()
         downloaded = 0
@@ -548,6 +551,9 @@ class LocalASRInstaller:
             response.raise_for_status()
             with destination.open("wb") as stream:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise LocalASRCancelledError(
+                            "Local ASR installation was cancelled")
                     if not chunk:
                         continue
                     downloaded += len(chunk)
@@ -681,7 +687,12 @@ class LocalASRInstaller:
                     "Cannot clean abandoned local-ASR staging; "
                     "retry the install.") from error
 
-    def _extract_runtime(self, archive_path: Path, staging: Path) -> None:
+    def _extract_runtime(
+        self,
+        archive_path: Path,
+        staging: Path,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         expected = {
             str(entry["archive_path"]): entry
             for entry in self.manifest["extracted_files"]
@@ -694,6 +705,9 @@ class LocalASRInstaller:
                     raise LocalASRIntegrityError(
                         f"Runtime archive is missing {sorted(missing)[0]}")
                 for archive_name, entry in expected.items():
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise LocalASRCancelledError(
+                            "Local ASR installation was cancelled")
                     destination = staging / _safe_relative_path(str(entry["path"]))
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(archive_name) as source, destination.open("wb") as output:
@@ -707,11 +721,18 @@ class LocalASRInstaller:
         except (OSError, zipfile.BadZipFile, KeyError) as error:
             raise LocalASRIntegrityError(f"Cannot extract verified runtime: {error}") from error
 
-    def _copy_license_notices(self, staging: Path) -> None:
+    def _copy_license_notices(
+        self,
+        staging: Path,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         notices = self.manifest.get("license_files", [])
         if not isinstance(notices, list):
             raise LocalASRIntegrityError("Manifest license_files must be a list")
         for value in notices:
+            if cancel_event is not None and cancel_event.is_set():
+                raise LocalASRCancelledError(
+                    "Local ASR installation was cancelled")
             relative = _safe_relative_path(str(value))
             source = _resource_root() / relative
             destination = staging / relative
@@ -744,13 +765,21 @@ class LocalASRInstaller:
             "Cannot roll back the invalid local-ASR installation; "
             "retry removal.")
 
-    def install(self, callback: ProgressCallback | None = None) -> dict:
+    def install(
+        self,
+        callback: ProgressCallback | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict:
+        if cancel_event is not None and cancel_event.is_set():
+            raise LocalASRCancelledError("Local ASR installation was cancelled")
         # Validate manifest-derived paths before creating or claiming any root.
         self.install_dir
         lock = self._acquire_install_lock()
         with lock:
             self._claim_root()
             self._assert_owned_root()
+            if cancel_event is not None and cancel_event.is_set():
+                raise LocalASRCancelledError("Local ASR installation was cancelled")
             existing = self.status()
             if existing["state"] == "installed":
                 self._report(callback, "complete", 1, 1)
@@ -764,9 +793,10 @@ class LocalASRInstaller:
                     "retry the install.") from error
             runtime_archive = staging / self.asset("runtime").filename
             try:
-                self._download(self.asset("runtime"), runtime_archive, callback)
+                self._download(
+                    self.asset("runtime"), runtime_archive, callback, cancel_event)
                 self._report(callback, "extract:runtime", 0, 1)
-                self._extract_runtime(runtime_archive, staging)
+                self._extract_runtime(runtime_archive, staging, cancel_event)
                 try:
                     runtime_archive.unlink(missing_ok=True)
                 except OSError as error:
@@ -783,8 +813,11 @@ class LocalASRInstaller:
                     raise LocalASRError(
                         "Cannot create local-ASR model staging directory; "
                         "retry the install.") from error
-                self._download(model, model_path, callback)
-                self._copy_license_notices(staging)
+                self._download(model, model_path, callback, cancel_event)
+                self._copy_license_notices(staging, cancel_event)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise LocalASRCancelledError(
+                        "Local ASR installation was cancelled")
 
                 receipt = {
                     "schema_version": 1,

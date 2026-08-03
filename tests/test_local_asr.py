@@ -2100,7 +2100,7 @@ class LocalASRProviderAdapterTests(unittest.TestCase):
                     ProviderCapability.AUDIO_TRANSCRIPTION,
                 )
 
-    def test_adapter_rejects_unpinned_model_and_is_not_registered_by_default(self):
+    def test_adapter_rejects_unpinned_model_and_is_registered_without_starting(self):
         adapter = local_asr.LocalASRProviderAdapter(Mock())
         request = TranscriptionRequest(
             Path("input.wav"), "another-model", "en", "", "", 0.0)
@@ -2108,7 +2108,10 @@ class LocalASRProviderAdapterTests(unittest.TestCase):
         with self.assertRaises(ProviderConfigurationError):
             adapter.transcribe(request, ProviderConnection("", ""))
 
-        self.assertNotIn(local_asr.PROVIDER_ID, build_provider_registry().provider_ids)
+        registry = build_provider_registry()
+        self.assertIn(local_asr.PROVIDER_ID, registry.provider_ids)
+        self.assertTrue(registry.supports(
+            local_asr.PROVIDER_ID, ProviderCapability.AUDIO_TRANSCRIPTION))
 
 
 if __name__ == "__main__":

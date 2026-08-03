@@ -1,14 +1,24 @@
-# Local ASR sidecar groundwork
+# Optional local ASR sidecar
 
-This document describes the isolated groundwork for issue #23. It is not yet a
-user-facing provider. The typed provider registry from #16 is now integrated by
-an explicit adapter, and the recording lifecycle from #18 now supplies the
-in-memory audio snapshot contract. The secure Windows installer/update
-contract staged by #32 is now on `master`, but its real signing, provenance,
-and VM/manual acceptance gates remain open in #22. Local-ASR default
-registration and application integration still wait for the concrete product
-download/update and progress conventions; this branch does not claim that a
-local sidecar/model is covered by the signed MSI update path.
+This document describes the opt-in local transcription provider. The typed
+provider registry from #16 supplies the same `TranscriptionRequest` contract
+as cloud providers, and the recording lifecycle from #18 supplies an
+in-memory audio snapshot. The app registers the local provider at startup but
+does not download assets or start a process. Users must open Settings →
+Providers → Local Whisper and explicitly choose **Download local ASR**.
+
+The install view displays platform, memory, disk, and download requirements,
+streams byte progress, verifies every digest before extraction, and exposes
+cancel/retry/remove actions. Failed operations retain an actionable message;
+they never switch to a cloud provider. The sidecar and model live outside the
+one-file app and can be removed from the same view.
+
+The secure Windows installer/update contract staged by #32 is now on `master`,
+but its real signing, provenance, and VM/manual acceptance gates remain open
+in #22. The local-ASR manifest is bundled into the signed application payload
+and is still independently verified before any optional asset is executed. It
+does not claim that unsigned source files or a mutable release URL are an
+update channel.
 
 ## Pinned implementation
 
@@ -31,14 +41,15 @@ The official binary imports the Microsoft Visual C++ runtime, so the x64
 Microsoft Visual C++ 2015-2022 Redistributable is also required and must be
 reported before download by the future UI.
 
-Nothing imports `local_asr.py` from the product runtime yet. No sidecar, model,
-download library, or optional dependency is added to the portable application,
-normal startup, or unit-test environment.
+Importing `local_asr.py` performs no network or process work. The local adapter
+is lightweight at registry construction, and the controller's install worker
+is created only after the explicit settings action. No sidecar, model, or
+additional optional dependency is bundled in the base executable.
 
 ## Explicit installation and removal harness
 
-Run the harness with Windows Python and an isolated root while this work is not
-integrated:
+Run the harness with Windows Python and an isolated root for platform
+acceptance, or use the product Settings view for normal installation:
 
 ```powershell
 py scripts\local_asr_harness.py --root "$env:TEMP\clarify-local-asr" status
@@ -78,12 +89,13 @@ process image or liveness conclusively, cleanup fails closed and preserves the
 record for a later attempt.
 
 `LocalASRProviderAdapter` implements the merged typed registry contract around
-the narrow `LocalTranscriptionBackend` protocol. It is deliberately not added
-to the default registry yet: the current provider UI assumes credentials and
-model discovery, while local installation/progress and final product wiring
-still need the conventions from #22. The explicit harness installer remains a
-source-only acceptance tool with its own pinned asset manifest; it does not
-silently inherit or advertise the staged signed-MSI/update contract from #32.
+the narrow `LocalTranscriptionBackend` protocol and is registered alongside
+the cloud adapters. Registration is not authorization: the provider remains
+unavailable to the model picker until its installer reports `installed`.
+Selecting it before installation produces a typed, actionable configuration
+error. The explicit controller owns installation progress and cancellation;
+the source harness remains useful for Windows acceptance and does not silently
+inherit or advertise the staged signed-MSI/update contract from #32.
 
 The recording lifecycle from #18 remains authoritative: `RecordingSession`
 owns and deletes its unique WAV, then passes the in-memory `audio_bytes`
@@ -123,10 +135,11 @@ against the committed manifest. The manager then:
 
 Inference sends the in-memory WAV snapshot only to the random loopback endpoint.
 The sidecar does not need a cloud credential and the local path contains no
-cloud fallback. When
-integrated, switching to a cloud provider must remain an explicit user action;
-there must be no silent fallback. Prompt/refinement mode also needs a clear UI
-warning if it will send the locally produced transcript text to a cloud model.
+cloud fallback. Switching to a cloud provider remains an explicit user action;
+there is no silent fallback. Prompt mode returns the local transcript without
+refinement by default. Settings exposes a separate **Allow cloud refinement for
+Prompt mode** opt-in; only that switch may send the local transcript to the
+configured cloud model, and the UI explains the privacy consequence.
 
 The downloaded model and runtime are readable by processes running as the same
 Windows user. The local HTTP server is not a general security sandbox; the
@@ -166,8 +179,9 @@ installer/update contract does not substitute for these local-ASR checks, and
 | Exit cleanup | Quit during inference; no owned process or temporary WAV remains | Unit seam covered; product/Windows pending |
 | Crash recovery | Kill sidecar during inference and observe one bounded restart | Unit covered; Windows pending |
 | Removal | Asset root absent after removal | Unit covered; Windows pending |
-| Cloud regression | Existing provider contract suite unchanged | Typed adapter unit covered; default registration pending |
+| Cloud regression | Existing provider contract suite unchanged | Covered by the shared registry/provider suite |
 
-Do not mark issue #23 closed until those results, the final UI/provider and
-download-progress integration, and the required #22 signing/VM acceptance
-evidence are in a reviewed follow-up.
+Do not mark issue #23 closed until the Windows benchmark/offline/manual results
+are attached, including packaged cancellation and exit cleanup. The product
+integration is present, but those platform-specific acceptance gates remain
+open and are intentionally not replaced by mocked unit tests.
