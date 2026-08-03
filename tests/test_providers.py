@@ -831,6 +831,24 @@ class ProviderTests(unittest.TestCase):
         product.state.status = "not_installed"
         self.assertTrue(app._settings_onboarding_decision(config, product))
 
+    def test_load_app_config_rejects_local_asr_refinement_provider(self):
+        values = app.DEFAULT_CONFIG.copy()
+        values.update({
+            "transcription_provider": "local_asr",
+            "refinement_provider": "local_asr",
+            "refinement_model": "ggml-small",
+        })
+        fake_config = SimpleNamespace(to_legacy_mapping=lambda: values)
+        fake_repositories = SimpleNamespace(
+            config=SimpleNamespace(load=lambda: fake_config))
+
+        with patch.object(app, "_storage_repositories",
+                          return_value=fake_repositories):
+            config = app._load_app_config(fake_repositories)
+
+        self.assertEqual(config["refinement_provider"], "openai")
+        self.assertEqual(config["refinement_model"], "gpt-4o-mini")
+
     @patch("app._save_app_config")
     def test_local_removal_persists_valid_cloud_route(self, save):
         app.APP_CONFIG["transcription_provider"] = "local_asr"

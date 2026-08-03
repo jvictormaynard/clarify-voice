@@ -498,11 +498,15 @@ def _load_app_config(repositories=None):
     config = _storage_repositories(repositories).config.load().to_legacy_mapping()
     if config["transcription_provider"] not in PROVIDER_REGISTRY.provider_ids:
         config["transcription_provider"] = "gemini"
-    if config["refinement_provider"] not in PROVIDER_REGISTRY.provider_ids:
+    if (config["refinement_provider"] not in PROVIDER_REGISTRY.provider_ids
+            or not PROVIDER_REGISTRY.supports(
+                config["refinement_provider"],
+                ProviderCapability.TEXT_GENERATION)):
         provider = config["transcription_provider"]
         config["refinement_provider"] = (
             provider if PROVIDER_REGISTRY.supports(
                 provider, ProviderCapability.TEXT_GENERATION) else "openai")
+        config["refinement_model"] = ""
     if not str(config["refinement_model"]).strip():
         provider = config["refinement_provider"]
         config["refinement_model"] = PROVIDER_REGISTRY.text_model_from_legacy(

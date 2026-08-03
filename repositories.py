@@ -148,14 +148,21 @@ class AppConfig:
             return value if value in choices else fallback
 
         provider = choice("transcription_provider", SUPPORTED_PROVIDERS, "gemini")
+        requested_refinement_provider = string("refinement_provider").strip().lower()
         refinement_provider = choice(
             "refinement_provider", SUPPORTED_PROVIDERS, "openai")
-        if not string("refinement_provider"):
+        refinement_fallback = (
+            not requested_refinement_provider
+            or requested_refinement_provider not in SUPPORTED_PROVIDERS
+            or not PROVIDER_REGISTRY.supports(
+                refinement_provider, ProviderCapability.TEXT_GENERATION)
+        )
+        if refinement_fallback:
             refinement_provider = (
                 provider if (
                     PROVIDER_REGISTRY.supports(
                         provider, ProviderCapability.TEXT_GENERATION)
-                    and not PROVIDER_REGISTRY.supports(
+                        and not PROVIDER_REGISTRY.supports(
                         provider, ProviderCapability.MULTIMODAL_AUDIO)
                 )
                 else "openai")
@@ -189,7 +196,10 @@ class AppConfig:
                     metadata.text_model_key, defaults_for_provider["text_model"])),
             )
 
-        refinement_model = string("refinement_model")
+        # A model saved for an invalid/transcription-only provider is not
+        # meaningful for the text-capable fallback and must not survive the
+        # normalization step.
+        refinement_model = "" if refinement_fallback else string("refinement_model")
         if not refinement_model:
             metadata = PROVIDER_REGISTRY.describe(refinement_provider)
             refinement_model = (
