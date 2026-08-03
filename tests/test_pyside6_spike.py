@@ -46,6 +46,13 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("Get-TreeWindowProcess $process.Id", source)
         self.assertIn("$candidate.MainWindowHandle", source)
         self.assertIn("WindowProcessId", source)
+        self.assertIn("finally", source)
+        self.assertIn("$process.HasExited", source)
+        self.assertIn("ArtifactManifest", source)
+        self.assertIn("ExecutableSHA256", source)
+        self.assertIn("ManifestArtifactSHA256", source)
+        self.assertIn("ConvertFrom-Json", source)
+        self.assertIn("Executable hash does not match the artifact manifest", source)
 
     def test_measurement_protocol_has_no_fixed_target_order(self):
         benchmark = (SPIKE / "benchmark.ps1").read_text(encoding="utf-8")
@@ -73,6 +80,13 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("MainWindowSeen is not true", aggregate)
         self.assertIn("ConvertTo-PositiveInteger", aggregate)
         self.assertIn("ConvertTo-CanonicalBootId", aggregate)
+        self.assertIn("ConvertTo-CanonicalSha256", aggregate)
+        self.assertIn("ExecutableSHA256", aggregate)
+        self.assertIn("all three nonblank artifact hash fields", aggregate)
+        self.assertIn("Every measurement must include all three nonblank artifact hash fields", aggregate)
+        self.assertIn("single artifact manifest digest", aggregate)
+        self.assertIn("one executable artifact hash", aggregate)
+        self.assertIn("executable and manifest artifact hashes must match", aggregate)
         self.assertIn("$Row.BootId = ConvertTo-CanonicalBootId", aggregate)
         self.assertIn("$Value -cnotmatch $pattern", aggregate)
         self.assertIn('$zone -ceq "Z"', aggregate)
@@ -91,6 +105,8 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertTrue((FIXTURES / "invalid_mixed_hosts.csv").is_file())
         self.assertTrue((FIXTURES / "invalid_host_id.csv").is_file())
         self.assertTrue((FIXTURES / "invalid_host_missing.csv").is_file())
+        self.assertTrue((FIXTURES / "invalid_hash_missing.csv").is_file())
+        self.assertTrue((FIXTURES / "invalid_hash_mismatch.csv").is_file())
         for fixture in FIXTURES.glob("invalid_*_process_id.csv"):
             self.assertTrue(fixture.is_file())
         for name in (
@@ -154,6 +170,12 @@ class PySide6SpikeTests(unittest.TestCase):
             missing_host = run_aggregate([FIXTURES / "invalid_host_missing.csv"])
             self.assertNotEqual(missing_host.returncode, 0)
             self.assertIn("HostId", missing_host.stdout + missing_host.stderr)
+            missing_hashes = run_aggregate([FIXTURES / "invalid_hash_missing.csv"])
+            self.assertNotEqual(missing_hashes.returncode, 0)
+            self.assertIn("three nonblank", missing_hashes.stdout + missing_hashes.stderr)
+            mismatched_hashes = run_aggregate([FIXTURES / "invalid_hash_mismatch.csv"])
+            self.assertNotEqual(mismatched_hashes.returncode, 0)
+            self.assertIn("hashes must match", mismatched_hashes.stdout + mismatched_hashes.stderr)
             for malformed in sorted(FIXTURES.glob("invalid_*_process_id.csv")) + sorted(
                 FIXTURES.glob("invalid_*_process_count.csv")
             ) + sorted(FIXTURES.glob("invalid_*_thread_count.csv")):
@@ -192,6 +214,7 @@ class PySide6SpikeTests(unittest.TestCase):
             "benchmark.ps1",
             "aggregate.ps1",
             ".gitignore",
+            "evidence-template.md",
         ):
             self.assertTrue((SPIKE / relative).is_file(), relative)
         decision = (ROOT / "docs" / "pyside6-decision.md").read_text(encoding="utf-8")
@@ -201,14 +224,34 @@ class PySide6SpikeTests(unittest.TestCase):
             "Migration and rollback outline",
             "Recommendation",
             "pending independent rounds",
+            "12–20 engineer-days",
+            "Decision gate",
+            "artifacts-manifest.json",
         ):
             self.assertIn(phrase, decision)
+
+    def test_evidence_template_is_explicit_about_manual_hooks(self):
+        evidence = (SPIKE / "evidence-template.md").read_text(encoding="utf-8")
+        for phrase in (
+            "three distinct `BootId`",
+            "100% DPI screenshot",
+            "Production global-hotkey coexistence",
+            "Do not commit executable artifacts",
+            "defer",
+        ):
+            self.assertIn(phrase, evidence)
 
     def test_spike_packaging_does_not_use_production_output_paths(self):
         package = (SPIKE / "package.ps1").read_text(encoding="utf-8")
         self.assertIn('"artifacts"', package)
         self.assertNotIn('"dist"', package)
         self.assertNotIn("scripts\\build.ps1", package)
+        self.assertIn("requirements-lock-runtime-windows.txt", package)
+        self.assertIn("build-environment.txt", package)
+        self.assertIn("artifacts-manifest.json", package)
+        self.assertIn("Get-FileHash", package)
+        self.assertIn("status --porcelain --untracked-files=all", package)
+        self.assertIn("Refusing to package a dirty working tree", package)
 
     def test_production_requirements_do_not_gain_optional_qt_dependency(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")

@@ -75,6 +75,15 @@ function ConvertTo-CanonicalHostId {
     return $Value.ToLowerInvariant()
 }
 
+function ConvertTo-CanonicalSha256 {
+    param([string]$Value, [string]$Metric, [string]$Path)
+
+    if ($Value -cnotmatch "^[0-9a-fA-F]{64}$") {
+        throw "Rejected invalid SHA-256 $Metric in $Path."
+    }
+    return $Value.ToLowerInvariant()
+}
+
 function ConvertTo-ValidMeasurement {
     param([object]$Row, [string]$Path)
 
@@ -92,6 +101,21 @@ function ConvertTo-ValidMeasurement {
     }
     $Row.BootId = ConvertTo-CanonicalBootId ([string]$Row.BootId) $Path
     $Row.HostId = ConvertTo-CanonicalHostId ([string]$Row.HostId) $Path
+    $hashProperties = @(
+        "ExecutableSHA256",
+        "ArtifactManifestSHA256",
+        "ManifestArtifactSHA256"
+    )
+    $presentHashes = @($hashProperties | Where-Object {
+        $Row.PSObject.Properties.Name -contains $_ -and
+        -not [string]::IsNullOrWhiteSpace([string]$Row.$_)
+    })
+    if ($presentHashes.Count -ne $hashProperties.Count) {
+        throw "Measurement in $Path must include all three nonblank artifact hash fields."
+    }
+    foreach ($hashProperty in $presentHashes) {
+        $Row.$hashProperty = ConvertTo-CanonicalSha256 ([string]$Row.$hashProperty) $hashProperty $Path
+    }
     $round = 0
     $integerStyle = [System.Globalization.NumberStyles]::Integer
     $invariant = [System.Globalization.CultureInfo]::InvariantCulture
@@ -135,6 +159,31 @@ foreach ($path in $InputCsv) {
     }
 }
 if ($rows.Count -eq 0) { throw "No valid measurement rows were provided." }
+
+$hashRows = @($rows | Where-Object {
+    $_.PSObject.Properties.Name -contains "ArtifactManifestSHA256"
+})
+if ($hashRows.Count -ne $rows.Count) {
+    throw "Every measurement must include all three nonblank artifact hash fields."
+}
+if ($hashRows.Count -gt 0) {
+    $manifestHashes = @($hashRows | Select-Object -ExpandProperty ArtifactManifestSHA256 -Unique)
+    if ($manifestHashes.Count -ne 1) {
+        throw "Measurements must use a single artifact manifest digest."
+    }
+    foreach ($target in @("CustomTkinter", "PySide6")) {
+        $targetHashRows = @($hashRows | Where-Object { $_.Target -eq $target })
+        $artifactHashes = @($targetHashRows | Select-Object -ExpandProperty ExecutableSHA256 -Unique)
+        $expectedHashes = @($targetHashRows | Select-Object -ExpandProperty ManifestArtifactSHA256 -Unique)
+        if ($artifactHashes.Count -ne 1 -or $expectedHashes.Count -ne 1) {
+            throw "$target measurements must use one executable artifact hash."
+        }
+        if ($artifactHashes[0] -cne $expectedHashes[0]) {
+            throw "$target executable and manifest artifact hashes must match."
+        }
+    }
+}
+
 $hostIds = @($rows | Select-Object -ExpandProperty HostId -Unique)
 if ($hostIds.Count -ne 1) {
     throw "Measurements must come from exactly one benchmark host."

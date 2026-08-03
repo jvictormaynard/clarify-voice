@@ -4,6 +4,7 @@ param(
     [ValidateSet("CustomTkinter", "PySide6")]
     [string]$Target,
     [Parameter(Mandatory = $true)] [string]$Executable,
+    [Parameter(Mandatory = $true)] [string]$ArtifactManifest,
     [Parameter(Mandatory = $true)] [string]$RunId,
     [Parameter(Mandatory = $true)] [ValidateRange(1, 10)] [int]$Round,
     [string]$OutputCsv = "measurements-windows.csv"
@@ -73,54 +74,107 @@ function Get-HostId {
     }
 }
 
-function Measure-Executable {
+function Get-Sha256 {
     param([string]$Path)
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Read-ManifestArtifact {
+    param([string]$ManifestPath, [string]$Target, [string]$ExecutablePath)
+
+    if (-not (Test-Path -LiteralPath $ManifestPath)) {
+        throw "Missing artifact manifest: $ManifestPath"
+    }
+    $resolvedManifest = (Resolve-Path -LiteralPath $ManifestPath).Path
+    try {
+        $manifest = Get-Content -Raw -LiteralPath $resolvedManifest | ConvertFrom-Json
+    } catch {
+        throw "Could not parse artifact manifest: $resolvedManifest"
+    }
+    $matches = @($manifest.Artifacts | Where-Object { [string]$_.Target -ceq $Target })
+    if ($matches.Count -ne 1) {
+        throw "Artifact manifest must contain exactly one $Target artifact."
+    }
+    $expected = ([string]$matches[0].SHA256).ToLowerInvariant()
+    if ($expected -cnotmatch "^[0-9a-f]{64}$") {
+        throw "Artifact manifest contains an invalid SHA-256 for $Target."
+    }
+    $actual = Get-Sha256 $ExecutablePath
+    if ($actual -cne $expected) {
+        throw "Executable hash does not match the artifact manifest for $Target."
+    }
+    return [pscustomobject]@{
+        Path = $resolvedManifest
+        ManifestSHA256 = Get-Sha256 $resolvedManifest
+        ExpectedSHA256 = $expected
+    }
+}
+
+function Measure-Executable {
+    param([string]$Path, [object]$ManifestArtifact)
     if (-not (Test-Path $Path)) { throw "Missing executable: $Path" }
     $resolved = (Resolve-Path $Path).Path
     $sizeMb = [math]::Round((Get-Item $resolved).Length / 1MB, 2)
-    $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    $process = Start-Process -FilePath $resolved -PassThru
-    $mainWindowSeen = $false
-    $windowProcessId = $null
-    while ($watch.Elapsed.TotalSeconds -lt 20) {
-        Start-Sleep -Milliseconds 100
-        $windowProcess = Get-TreeWindowProcess $process.Id
-        if ($null -ne $windowProcess) {
-            $mainWindowSeen = $true
-            $windowProcessId = $windowProcess.Id
-            break
+    $executableSha256 = Get-Sha256 $resolved
+    if ($executableSha256 -cne [string]$ManifestArtifact.ExpectedSHA256) {
+        throw "Executable changed after manifest validation; refusing to launch."
+    }
+    $process = $null
+    try {
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $process = Start-Process -FilePath $resolved -PassThru
+        $mainWindowSeen = $false
+        $windowProcessId = $null
+        while ($watch.Elapsed.TotalSeconds -lt 20) {
+            Start-Sleep -Milliseconds 100
+            if ($process.HasExited) { break }
+            $windowProcess = Get-TreeWindowProcess $process.Id
+            if ($null -ne $windowProcess) {
+                $mainWindowSeen = $true
+                $windowProcessId = $windowProcess.Id
+                break
+            }
+        }
+        $coldStartMs = [math]::Round($watch.Elapsed.TotalMilliseconds, 0)
+        if ($mainWindowSeen) { Start-Sleep -Seconds 5 }
+        $processes = @(Get-TreeProcesses $process.Id)
+        $workingSetMb = [math]::Round((($processes | Measure-Object WorkingSet64 -Sum).Sum) / 1MB, 2)
+        $privateMb = [math]::Round((($processes | Measure-Object PrivateMemorySize64 -Sum).Sum) / 1MB, 2)
+        $threads = ($processes | ForEach-Object { $_.Threads.Count } | Measure-Object -Sum).Sum
+        return [pscustomobject]@{
+            Target = $Target
+            Round = $Round
+            RunId = $RunId
+            BootId = Get-BootId
+            HostId = Get-HostId
+            Executable = $resolved
+            ExecutableSHA256 = $executableSha256
+            ArtifactManifestSHA256 = $ManifestArtifact.ManifestSHA256
+            ManifestArtifactSHA256 = $ManifestArtifact.ExpectedSHA256
+            ColdStartMs = $coldStartMs
+            MainWindowSeen = $mainWindowSeen
+            WindowProcessId = $windowProcessId
+            WorkingSetMB = $workingSetMb
+            PrivateMemoryMB = $privateMb
+            ProcessCount = $processes.Count
+            ThreadCount = $threads
+            PackageSizeMB = $sizeMb
+            MeasuredAtUtc = [DateTime]::UtcNow.ToString("o")
+        }
+    } finally {
+        if ($null -ne $process) {
+            foreach ($runningProcess in @(Get-TreeProcesses $process.Id)) {
+                try { Stop-Process -Id $runningProcess.Id -Force -ErrorAction SilentlyContinue } catch { }
+            }
+            try {
+                if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+            } catch { }
         }
     }
-    $coldStartMs = [math]::Round($watch.Elapsed.TotalMilliseconds, 0)
-    Start-Sleep -Seconds 5
-    $processes = @(Get-TreeProcesses $process.Id)
-    $workingSetMb = [math]::Round((($processes | Measure-Object WorkingSet64 -Sum).Sum) / 1MB, 2)
-    $privateMb = [math]::Round((($processes | Measure-Object PrivateMemorySize64 -Sum).Sum) / 1MB, 2)
-    $threads = ($processes | ForEach-Object { $_.Threads.Count } | Measure-Object -Sum).Sum
-    $result = [pscustomobject]@{
-        Target = $Target
-        Round = $Round
-        RunId = $RunId
-        BootId = Get-BootId
-        HostId = Get-HostId
-        Executable = $resolved
-        ColdStartMs = $coldStartMs
-        MainWindowSeen = $mainWindowSeen
-        WindowProcessId = $windowProcessId
-        WorkingSetMB = $workingSetMb
-        PrivateMemoryMB = $privateMb
-        ProcessCount = $processes.Count
-        ThreadCount = $threads
-        PackageSizeMB = $sizeMb
-        MeasuredAtUtc = [DateTime]::UtcNow.ToString("o")
-    }
-    foreach ($runningProcess in $processes) {
-        try { Stop-Process -Id $runningProcess.Id -Force -ErrorAction SilentlyContinue } catch { }
-    }
-    return $result
 }
 
-$result = Measure-Executable $Executable
+$manifestArtifact = Read-ManifestArtifact $ArtifactManifest $Target $Executable
+$result = Measure-Executable $Executable $manifestArtifact
 $destination = if ([System.IO.Path]::IsPathRooted($OutputCsv)) { $OutputCsv } else { Join-Path (Get-Location) $OutputCsv }
 $parent = Split-Path -Parent $destination
 if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }

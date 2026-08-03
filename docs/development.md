@@ -182,7 +182,11 @@ Windows path and include platform-specific validation.
 The isolated [PySide6 decision spike](pyside6-decision.md) is not part of
 startup, runtime requirements, or production packaging. Run its Windows-only
 build, benchmark, and manual validation protocol from `spikes/pyside6/` before
-using its provisional recommendation.
+using its provisional recommendation. The package script records a locked
+runtime, exact artifact hashes, and tool versions; use the
+[`evidence-template.md`](../spikes/pyside6/evidence-template.md) to attach
+Windows CSVs, screenshots, and video without committing machine-specific
+artifacts.
 
 ## Release process
 

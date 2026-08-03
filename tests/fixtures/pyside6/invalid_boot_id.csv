@@ -1,2 +1,2 @@
-Target,Round,RunId,BootId,HostId,Executable,ColdStartMs,MainWindowSeen,WindowProcessId,WorkingSetMB,PrivateMemoryMB,ProcessCount,ThreadCount,PackageSizeMB,MeasuredAtUtc
-CustomTkinter,1,bad-boot-id,boot-bad,sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,C:\\ctk.exe,100,True,101,80,50,1,8,40,2026-08-08T00:00:00Z
+Target,Round,RunId,BootId,HostId,Executable,ColdStartMs,MainWindowSeen,WindowProcessId,WorkingSetMB,PrivateMemoryMB,ProcessCount,ThreadCount,PackageSizeMB,MeasuredAtUtc,ExecutableSHA256,ArtifactManifestSHA256,ManifestArtifactSHA256
+CustomTkinter,1,bad-boot-id,boot-bad,sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,C:\\ctk.exe,100,True,101,80,50,1,8,40,2026-08-08T00:00:00Z,1111111111111111111111111111111111111111111111111111111111111111,3333333333333333333333333333333333333333333333333333333333333333,1111111111111111111111111111111111111111111111111111111111111111
