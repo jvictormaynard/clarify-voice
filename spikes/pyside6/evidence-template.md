@@ -70,6 +70,8 @@ come from mixed hosts, failed launches, malformed IDs, or fewer than three
 independent post-reboot rounds per target. It must also use one manifest
 digest for the entire dataset and one executable digest per target; if the
 package step is rerun, start a new evidence set instead of mixing CSV files.
+The executable digest and the manifest's expected artifact digest must be the
+same for each target.
 
 ## Manual behavior matrix
 

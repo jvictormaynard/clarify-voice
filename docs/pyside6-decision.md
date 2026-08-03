@@ -46,6 +46,9 @@ SHA-256 fields together and rejects malformed or partially edited rows. A
 single manifest digest and one executable hash per target are required across
 the imported dataset, so rounds cannot silently mix separate builds. A failed
 launch is never silently converted into a zero or discarded as an outlier.
+The executable hash and the manifest's expected artifact hash must also be
+identical for each target; a forged pair is rejected before medians are
+computed.
 
 The protocol intentionally has no fixed target order: run only one target after
 each reboot, alternate which target is first across at least three rounds, and

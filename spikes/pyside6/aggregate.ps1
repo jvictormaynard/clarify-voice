@@ -178,6 +178,9 @@ if ($hashRows.Count -gt 0) {
         if ($artifactHashes.Count -ne 1 -or $expectedHashes.Count -ne 1) {
             throw "$target measurements must use one executable artifact hash."
         }
+        if ($artifactHashes[0] -cne $expectedHashes[0]) {
+            throw "$target executable and manifest artifact hashes must match."
+        }
     }
 }
 
