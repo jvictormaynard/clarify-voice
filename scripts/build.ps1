@@ -26,6 +26,8 @@ $versionSource = Join-Path $repoRoot "version.py"
 $repoExtra = Join-Path $repoRoot "extra"
 $assets = Join-Path $repoRoot "assets"
 $distribution = Join-Path $repoRoot "distribution"
+$localAsrManifest = Join-Path $repoRoot "local_asr_manifest.json"
+$localAsrLicenses = Join-Path $repoRoot "licenses"
 $icon = Join-Path $assets "branding\clarify.ico"
 $workDir = Join-Path $repoRoot "build\pyinstaller"
 $specDir = Join-Path $repoRoot "build\spec"
@@ -46,7 +48,7 @@ function ConvertTo-ProcessArgument {
 
 foreach ($requiredPath in @(
     $entryPoint, $versionSource, $repoExtra, $assets, $distribution, $icon,
-    $soxManifestPath
+    $soxManifestPath, $localAsrManifest, $localAsrLicenses
 )) {
     if (-not (Test-Path $requiredPath)) {
         throw "Required build input is missing: $requiredPath"
@@ -79,6 +81,11 @@ $pyInstallerArgs = @(
     "--add-data", "${extra};extra",
     "--add-data", "${assets};assets",
     "--add-data", "${distribution};distribution",
+    # The local provider is optional at runtime, but its pinned manifest and
+    # license notices must travel inside the signed executable so an attacker
+    # cannot redirect the product to an unreviewed asset definition.
+    "--add-data", "${localAsrManifest};.",
+    "--add-data", "${localAsrLicenses};licenses",
     "--hidden-import", "version",
     "--hidden-import", "sounddevice",
     "--hidden-import", "_sounddevice_data",

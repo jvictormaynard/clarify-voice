@@ -1,3 +1,4 @@
+import io
 import json
 import inspect
 import os
@@ -815,6 +816,105 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual(config["ui_mode"], "transcription")
         self.assertEqual(config["ui_language"], "pt")
+
+    def test_local_asr_onboarding_waits_for_async_verification(self):
+        config = {
+            "transcription_provider": "local_asr",
+            "local_asr_api_key": "",
+        }
+        product = SimpleNamespace(
+            state=SimpleNamespace(status="checking"))
+
+        self.assertIsNone(app._settings_onboarding_decision(config, product))
+        product.state.status = "installed"
+        self.assertFalse(app._settings_onboarding_decision(config, product))
+        product.state.status = "not_installed"
+        self.assertTrue(app._settings_onboarding_decision(config, product))
+
+    def test_load_app_config_rejects_local_asr_refinement_provider(self):
+        values = app.DEFAULT_CONFIG.copy()
+        values.update({
+            "transcription_provider": "local_asr",
+            "refinement_provider": "local_asr",
+            "refinement_model": "ggml-small",
+        })
+        fake_config = SimpleNamespace(to_legacy_mapping=lambda: values)
+        fake_repositories = SimpleNamespace(
+            config=SimpleNamespace(load=lambda: fake_config))
+
+        with patch.object(app, "_storage_repositories",
+                          return_value=fake_repositories):
+            config = app._load_app_config(fake_repositories)
+
+        self.assertEqual(config["refinement_provider"], "openai")
+        self.assertEqual(config["refinement_model"], "gpt-4o-mini")
+
+    @patch("app._save_app_config")
+    def test_local_removal_persists_valid_cloud_route(self, save):
+        app.APP_CONFIG["transcription_provider"] = "local_asr"
+        selected = {"provider": "openai", "model": "whisper-1"}
+        repositories = object()
+
+        self.assertTrue(app._persist_cloud_selection_before_local_removal(
+            selected,
+            [("openai", "whisper-1")],
+            {"openai": "openai_audio_model"},
+            repositories,
+        ))
+        self.assertEqual(app.APP_CONFIG["transcription_provider"], "openai")
+        self.assertEqual(app.APP_CONFIG["openai_audio_model"], "whisper-1")
+        save.assert_called_once_with(repositories)
+
+    @patch("app._save_app_config", side_effect=OSError("config unavailable"))
+    def test_local_removal_cloud_route_save_failure_rolls_back(self, save):
+        app.APP_CONFIG["transcription_provider"] = "local_asr"
+        previous = app.APP_CONFIG.copy()
+
+        self.assertFalse(app._persist_cloud_selection_before_local_removal(
+            {"provider": "openai", "model": "whisper-1"},
+            [("openai", "whisper-1")],
+            {"openai": "openai_audio_model"},
+        ))
+        self.assertEqual(app.APP_CONFIG, previous)
+        save.assert_called_once_with(None)
+
+    @patch("app._save_app_config", side_effect=OSError("config unavailable"))
+    def test_local_refinement_opt_in_save_failure_rolls_back(self, save):
+        app.APP_CONFIG["local_asr_cloud_refinement"] = False
+
+        self.assertFalse(app._persist_local_asr_cloud_refinement(True))
+        self.assertFalse(app.APP_CONFIG["local_asr_cloud_refinement"])
+        save.assert_called_once_with(None)
+
+    @patch("app.PROVIDER_REGISTRY.shutdown", side_effect=RuntimeError("cleanup"))
+    @patch("app.call_transcription_provider", return_value="[Error: local failure]")
+    def test_cli_local_transcription_cleanup_preserves_exit_code(
+            self, transcribe, shutdown):
+        app.APP_CONFIG["transcription_provider"] = "local_asr"
+        with patch.object(app.sys, "stdout", io.StringIO()):
+            result = app._run_cli([
+                "transcribe", "--file", str(self.audio_path),
+            ])
+
+        self.assertEqual(result, 1)
+        transcribe.assert_called_once()
+        shutdown.assert_called_once_with()
+
+    @patch("app.PROVIDER_REGISTRY.shutdown")
+    @patch("app.call_transcription_provider", return_value="local text")
+    def test_headless_local_transcription_shuts_down_registry(
+            self, transcribe, shutdown):
+        app.APP_CONFIG["transcription_provider"] = "local_asr"
+        fake_stdin = type("FakeStdin", (), {
+            "buffer": io.BytesIO(b"pcm16"),
+        })()
+        with patch.object(app.sys, "stdin", fake_stdin), \
+                patch.object(app.sys, "stdout", io.StringIO()):
+            result = app._run_cli(["headless-transcribe-stdin"])
+
+        self.assertEqual(result, 0)
+        transcribe.assert_called_once()
+        shutdown.assert_called_once_with()
 
     def test_all_supported_interface_languages_are_accepted(self):
         for language in app.SUPPORTED_LANGUAGES:
@@ -2783,6 +2883,30 @@ class WindowFadeTests(unittest.TestCase):
 
 
 class UsageStatisticsTests(unittest.TestCase):
+    def test_local_asr_opted_out_refinement_is_not_accounted(self):
+        original = app.APP_CONFIG.copy()
+        try:
+            app.APP_CONFIG.update({
+                "transcription_provider": "local_asr",
+                "local_asr_model": "ggml-small",
+                "ui_mode": "prompt",
+                "local_asr_cloud_refinement": False,
+                "refinement_provider": "openai",
+                "refinement_model": "gpt-4o-mini",
+            })
+
+            context = app._recording_usage_context("prompt")
+            event = app._build_recording_usage_event(
+                context, 60, "A local transcript")
+
+            self.assertEqual(context["refinement_provider"], "")
+            self.assertEqual(context["refinement_model"], "")
+            self.assertEqual(len(event["models"]), 1)
+            self.assertEqual(event["models"][0]["provider"], "local_asr")
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original)
+
     def test_recording_event_tracks_models_cost_and_no_transcript(self):
         event = app._build_recording_usage_event({
             "provider": "openai",

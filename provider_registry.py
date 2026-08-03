@@ -24,6 +24,7 @@ from provider_types import (
     UnknownProviderError,
     UnsupportedCapabilityError,
 )
+from local_asr import LocalASRProviderAdapter
 
 
 OPENAI_OFFICIAL_AUDIO_MODELS = (
@@ -180,8 +181,26 @@ class ProviderRegistry:
             provider_id, ProviderCapability.TEXT_GENERATION,
         ).translate(request, connection, cancel_token)
 
+    def cancel(self) -> None:
+        """Cancel in-flight work owned by adapters that expose lifecycle hooks."""
+        for adapter in tuple(self._adapters.values()):
+            cancel = getattr(adapter, "cancel", None)
+            if callable(cancel):
+                cancel()
 
-def build_provider_registry(http: HttpClient | None = None) -> ProviderRegistry:
+    def shutdown(self) -> None:
+        """Release adapter-owned workers/processes during application exit."""
+        for adapter in tuple(self._adapters.values()):
+            shutdown = getattr(adapter, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+
+
+def build_provider_registry(
+        http: HttpClient | None = None,
+        *,
+        local_asr_adapter: LocalASRProviderAdapter | None = None,
+) -> ProviderRegistry:
     http = http or ProviderHttpClient()
     registry = ProviderRegistry()
     shared = frozenset({
@@ -227,6 +246,11 @@ def build_provider_registry(http: HttpClient | None = None) -> ProviderRegistry:
             "Whisper Large V3 Turbo": "whisper-large-v3-turbo",
             "Whisper Large V3": "whisper-large-v3",
         })
+    # The adapter is lightweight and performs no download/process work at
+    # registration time.  Installation remains an explicit settings action;
+    # selecting this provider before installation fails with an actionable
+    # typed configuration error rather than falling back to cloud.
+    registry.register(local_asr_adapter or LocalASRProviderAdapter())
     return registry
 
 

@@ -1,0 +1,173 @@
+import threading
+import time
+import unittest
+
+from local_asr import LocalASRCancelledError, LocalASRError
+from local_asr_product import (
+    LocalASRProductController,
+    format_requirements,
+)
+
+
+class FakeInstaller:
+    def __init__(self):
+        self.requirements_value = {
+            "platform": "Windows x64",
+            "memory_bytes": 852_000_000,
+            "disk_bytes": 510_000_000,
+            "download_bytes": 495_584_068,
+        }
+        self.install_calls = 0
+        self.remove_calls = 0
+        self.cancel_seen = threading.Event()
+        self.remove_started = threading.Event()
+        self.remove_cancel_seen = threading.Event()
+        self.block_remove = False
+        self.release = threading.Event()
+        self._status = "not_installed"
+        self.status_calls = 0
+
+    def requirements(self):
+        return dict(self.requirements_value)
+
+    def status(self):
+        self.status_calls += 1
+        return {
+            "state": self._status,
+            "detail": "not installed" if self._status == "not_installed" else "ready",
+            "requirements": self.requirements(),
+        }
+
+    def install(self, callback=None, cancel_event=None):
+        self.install_calls += 1
+        if callback:
+            callback("download:model", 10, 100)
+        while not self.release.wait(0.01):
+            if cancel_event is not None and cancel_event.is_set():
+                self.cancel_seen.set()
+                raise LocalASRCancelledError("cancelled")
+        self._status = "installed"
+        return self.status()
+
+    def remove(self, cancel_event=None):
+        self.remove_calls += 1
+        if self.block_remove:
+            self.remove_started.set()
+            while not self.release.wait(0.01):
+                if cancel_event is not None and cancel_event.is_set():
+                    self.remove_cancel_seen.set()
+                    raise LocalASRCancelledError("cancelled")
+        self._status = "not_installed"
+        return True
+
+
+class FakeBackend:
+    def __init__(self):
+        self.events = []
+        self.stop_calls = 0
+        self.cancel_calls = 0
+
+    def cancel(self):
+        self.cancel_calls += 1
+        self.events.append("cancel")
+
+    def stop(self):
+        self.stop_calls += 1
+        self.events.append("stop")
+
+
+class LocalASRProductControllerTests(unittest.TestCase):
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail("condition did not complete")
+
+    def test_constructor_is_read_only_and_install_is_explicit(self):
+        installer = FakeInstaller()
+        states = []
+        controller = LocalASRProductController(installer, listener=states.append)
+
+        self.assertEqual(installer.install_calls, 0)
+        self.assertEqual(installer.status_calls, 0)
+        self.assertEqual(controller.state.status, "checking")
+        controller.refresh_async()
+        self.wait_for(
+            lambda: controller.state.status == "not_installed"
+            and not controller.busy)
+        self.assertEqual(installer.status_calls, 1)
+        controller.install_async()
+        self.wait_for(lambda: installer.install_calls == 1)
+        self.assertEqual(controller.state.status, "installing")
+        self.assertTrue(any(state.stage == "download:model" for state in states))
+        installer.release.set()
+        self.wait_for(lambda: controller.state.status == "installed")
+        self.assertEqual(controller.state.fraction, 0.0)
+
+    def test_cancel_propagates_to_installer_and_leaves_no_worker(self):
+        installer = FakeInstaller()
+        controller = LocalASRProductController(installer)
+        controller.install_async()
+        self.wait_for(lambda: installer.install_calls == 1)
+        controller.cancel()
+        self.wait_for(lambda: controller.state.status == "cancelled")
+        self.assertTrue(installer.cancel_seen.is_set())
+        self.assertFalse(controller.busy)
+
+    def test_unsupported_platform_rejects_install_before_download(self):
+        installer = FakeInstaller()
+        installer.platform_supported = lambda: False
+        controller = LocalASRProductController(installer)
+
+        with self.assertRaises(LocalASRError):
+            controller.install_async()
+
+        self.assertEqual(installer.install_calls, 0)
+        self.assertEqual(controller.state.status, "error")
+        self.assertIn("Windows x64", controller.state.detail)
+        self.assertFalse(controller.busy)
+
+    def test_remove_is_explicit_and_reports_not_installed(self):
+        installer = FakeInstaller()
+        installer._status = "installed"
+        backend = FakeBackend()
+        controller = LocalASRProductController(installer, backend=backend)
+        controller.remove_async()
+        self.wait_for(lambda: controller.state.status == "not_installed")
+        self.assertEqual(installer.remove_calls, 1)
+        self.assertEqual(backend.stop_calls, 1)
+        self.assertEqual(backend.events, ["cancel", "stop"])
+
+    def test_remove_cancellation_reaches_installer(self):
+        installer = FakeInstaller()
+        installer._status = "installed"
+        installer.block_remove = True
+        controller = LocalASRProductController(
+            installer, backend=FakeBackend())
+        controller.remove_async()
+        self.wait_for(lambda: installer.remove_started.is_set())
+        controller.cancel()
+        self.wait_for(lambda: controller.state.status == "cancelled")
+        self.assertTrue(installer.remove_cancel_seen.is_set())
+        self.assertFalse(controller.busy)
+
+    def test_requirement_summary_is_human_readable(self):
+        summary = format_requirements({
+            "platform": "Windows x64",
+            "compute": "CPU-only; AVX support",
+            "runtime": "Microsoft Visual C++ 2015-2022 Redistributable (x64)",
+            "memory_bytes": 852_000_000,
+            "disk_bytes": 510_000_000,
+            "download_bytes": 495_584_068,
+        })
+        self.assertIn("Windows x64", summary)
+        self.assertIn("AVX support", summary)
+        self.assertIn("Visual C++", summary)
+        self.assertIn("MiB", summary)
+        self.assertIn("download", summary)
+
+
+if __name__ == "__main__":
+    unittest.main()

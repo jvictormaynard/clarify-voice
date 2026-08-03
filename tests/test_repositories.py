@@ -43,6 +43,20 @@ class DeleteReadbackStore(MemorySecretStore):
 
 
 class ConfigurationRepositoryTests(unittest.TestCase):
+    def test_local_asr_selection_and_cloud_refinement_opt_in_round_trip(self):
+        config = AppConfig.from_mapping({
+            "transcription_provider": "local_asr",
+            "local_asr_model": "ggml-small",
+            "local_asr_cloud_refinement": True,
+        })
+
+        self.assertEqual(config.selection.transcription_provider, "local_asr")
+        self.assertEqual(config.local_asr.audio_model, "ggml-small")
+        self.assertTrue(config.local_asr_cloud_refinement)
+        values = config.to_mapping()
+        self.assertEqual(values["transcription_provider"], "local_asr")
+        self.assertTrue(values["local_asr_cloud_refinement"])
+
     def test_missing_refinement_preserves_legacy_capability_defaults(self):
         gemini = AppConfig.from_mapping({
             "transcription_provider": "gemini",
@@ -53,6 +67,28 @@ class ConfigurationRepositoryTests(unittest.TestCase):
 
         self.assertEqual(gemini.selection.refinement_provider, "openai")
         self.assertEqual(groq.selection.refinement_provider, "groq")
+
+    def test_local_asr_is_rejected_as_refinement_provider(self):
+        config = AppConfig.from_mapping({
+            "transcription_provider": "local_asr",
+            "refinement_provider": "local_asr",
+            "refinement_model": "ggml-small",
+        })
+
+        self.assertEqual(config.selection.refinement_provider, "openai")
+        self.assertEqual(config.selection.refinement_model, "gpt-4o-mini")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "transcription_provider": "local_asr",
+                "refinement_provider": "local_asr",
+                "refinement_model": "ggml-small",
+            }), encoding="utf-8")
+            loaded = LocalConfigRepository(path).load()
+
+        self.assertEqual(loaded.selection.refinement_provider, "openai")
+        self.assertEqual(loaded.selection.refinement_model, "gpt-4o-mini")
 
     def test_asr_only_provider_uses_openai_refinement_fallback_on_mapping_and_load(self):
         registry = build_provider_registry()

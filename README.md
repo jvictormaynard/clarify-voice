@@ -198,6 +198,8 @@ provider_types.py              Typed provider requests, results, and capabilitie
 provider_adapters.py           Gemini and OpenAI-compatible adapters
 provider_registry.py           Provider metadata and request routing registry
 local_asr.py                    Optional local-ASR adapter, installer, and sidecar
+local_asr_product.py            Explicit install/progress/removal product boundary
+local_asr_manifest.json         Pinned sidecar/model assets and SHA-256 allowlist
 repositories.py                Versioned configuration and statistics storage
 update_security.py             Authenticated manifest and atomic update checks
 version.py                     Packaged application version

@@ -358,6 +358,49 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertFalse(installer.executable_path.exists())
             self.assertFalse(installer.model_path.exists())
 
+    def test_cancellable_remove_preserves_owned_root_when_cancelled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer.install()
+            cancel_event = threading.Event()
+            cancel_event.set()
+
+            with self.assertRaises(local_asr.LocalASRCancelledError):
+                installer.remove(cancel_event=cancel_event)
+
+            self.assertTrue(fixture.root.exists())
+            self.assertTrue((fixture.root / local_asr.ROOT_MARKER).exists())
+            cancel_event.clear()
+            self.assertTrue(installer.remove(cancel_event=cancel_event))
+            self.assertFalse(fixture.root.exists())
+
+    def test_cancellable_remove_refuses_reparse_child_before_recursing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer.install()
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            protected = outside / "must-stay.txt"
+            protected.write_text("outside asset root", encoding="utf-8")
+            junction = fixture.root / "junction"
+            junction.mkdir()
+            (junction / "inside.txt").write_text("owned", encoding="utf-8")
+
+            def reparse_state(path):
+                return True if Path(path) == junction else False
+
+            with patch.object(
+                    local_asr, "_reparse_state", side_effect=reparse_state):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.remove(cancel_event=threading.Event())
+
+            self.assertIn("symlinked or unverifiable", str(raised.exception))
+            self.assertTrue((fixture.root / local_asr.ROOT_MARKER).exists())
+            self.assertTrue(protected.exists())
+            self.assertTrue((junction / "inside.txt").exists())
+
     def test_install_refuses_nonempty_unowned_custom_root(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)
@@ -470,6 +513,30 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertFalse(installer.install_dir.exists())
             self.assertFalse(installer.executable_path.exists())
             self.assertFalse(list(fixture.root.glob(".install-*")))
+
+    def test_install_cancellation_reaches_post_publish_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            cancel_event = threading.Event()
+            original_sha256 = local_asr._sha256
+
+            def cancel_when_published_model_is_hashed(
+                    path, *args, cancel_check=None, **kwargs):
+                if Path(path) == installer.model_path:
+                    cancel_event.set()
+                return original_sha256(
+                    path, *args, cancel_check=cancel_check, **kwargs)
+
+            with patch.object(
+                    local_asr, "_sha256",
+                    side_effect=cancel_when_published_model_is_hashed):
+                with self.assertRaises(local_asr.LocalASRCancelledError):
+                    installer.install(cancel_event=cancel_event)
+
+            self.assertFalse(installer.install_dir.exists())
+            self.assertFalse(installer.executable_path.exists())
+            self.assertFalse(installer.model_path.exists())
 
     def test_install_reports_typed_post_publish_rollback_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2100,7 +2167,7 @@ class LocalASRProviderAdapterTests(unittest.TestCase):
                     ProviderCapability.AUDIO_TRANSCRIPTION,
                 )
 
-    def test_adapter_rejects_unpinned_model_and_is_not_registered_by_default(self):
+    def test_adapter_rejects_unpinned_model_and_is_registered_without_starting(self):
         adapter = local_asr.LocalASRProviderAdapter(Mock())
         request = TranscriptionRequest(
             Path("input.wav"), "another-model", "en", "", "", 0.0)
@@ -2108,7 +2175,10 @@ class LocalASRProviderAdapterTests(unittest.TestCase):
         with self.assertRaises(ProviderConfigurationError):
             adapter.transcribe(request, ProviderConnection("", ""))
 
-        self.assertNotIn(local_asr.PROVIDER_ID, build_provider_registry().provider_ids)
+        registry = build_provider_registry()
+        self.assertIn(local_asr.PROVIDER_ID, registry.provider_ids)
+        self.assertTrue(registry.supports(
+            local_asr.PROVIDER_ID, ProviderCapability.AUDIO_TRANSCRIPTION))
 
 
 if __name__ == "__main__":

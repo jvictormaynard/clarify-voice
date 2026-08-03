@@ -63,6 +63,10 @@ def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[s
         "groq_base_url": env.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
         "groq_audio_model": env.get("GROQ_AUDIO_MODEL", "whisper-large-v3-turbo"),
         "groq_text_model": env.get("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile"),
+        "local_asr_model": env.get("LOCAL_ASR_MODEL", "ggml-small"),
+        # Local transcription never sends text to a cloud refinement provider
+        # unless the user explicitly opts in from Settings.
+        "local_asr_cloud_refinement": False,
         "refinement_provider": env.get("REFINEMENT_PROVIDER", ""),
         "refinement_model": env.get("REFINEMENT_MODEL", ""),
         "ui_mode": "prompt",
@@ -116,8 +120,10 @@ class AppConfig:
     gemini: ProviderConfig = field(default_factory=ProviderConfig)
     openai: ProviderConfig = field(default_factory=ProviderConfig)
     groq: ProviderConfig = field(default_factory=ProviderConfig)
+    local_asr: ProviderConfig = field(default_factory=ProviderConfig)
     ui: UIPreferences = field(default_factory=UIPreferences)
     startup: StartupSettings = field(default_factory=StartupSettings)
+    local_asr_cloud_refinement: bool = False
 
     @classmethod
     def from_mapping(
@@ -142,14 +148,21 @@ class AppConfig:
             return value if value in choices else fallback
 
         provider = choice("transcription_provider", SUPPORTED_PROVIDERS, "gemini")
+        requested_refinement_provider = string("refinement_provider").strip().lower()
         refinement_provider = choice(
             "refinement_provider", SUPPORTED_PROVIDERS, "openai")
-        if not string("refinement_provider"):
+        refinement_fallback = (
+            not requested_refinement_provider
+            or requested_refinement_provider not in SUPPORTED_PROVIDERS
+            or not PROVIDER_REGISTRY.supports(
+                refinement_provider, ProviderCapability.TEXT_GENERATION)
+        )
+        if refinement_fallback:
             refinement_provider = (
                 provider if (
                     PROVIDER_REGISTRY.supports(
                         provider, ProviderCapability.TEXT_GENERATION)
-                    and not PROVIDER_REGISTRY.supports(
+                        and not PROVIDER_REGISTRY.supports(
                         provider, ProviderCapability.MULTIMODAL_AUDIO)
                 )
                 else "openai")
@@ -183,7 +196,10 @@ class AppConfig:
                     metadata.text_model_key, defaults_for_provider["text_model"])),
             )
 
-        refinement_model = string("refinement_model")
+        # A model saved for an invalid/transcription-only provider is not
+        # meaningful for the text-capable fallback and must not survive the
+        # normalization step.
+        refinement_model = "" if refinement_fallback else string("refinement_model")
         if not refinement_model:
             metadata = PROVIDER_REGISTRY.describe(refinement_provider)
             refinement_model = (
@@ -194,6 +210,10 @@ class AppConfig:
         autostart = source.get("autostart", False)
         if not isinstance(autostart, bool):
             autostart = False
+        local_asr_cloud_refinement = source.get(
+            "local_asr_cloud_refinement", False)
+        if not isinstance(local_asr_cloud_refinement, bool):
+            local_asr_cloud_refinement = False
 
         return cls(
             schema_version=CONFIG_SCHEMA_VERSION,
@@ -201,8 +221,10 @@ class AppConfig:
             gemini=provider_config("gemini"),
             openai=provider_config("openai"),
             groq=provider_config("groq"),
+            local_asr=provider_config("local_asr"),
             ui=UIPreferences(mode, language),
             startup=StartupSettings(autostart),
+            local_asr_cloud_refinement=local_asr_cloud_refinement,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -222,6 +244,8 @@ class AppConfig:
             "groq_base_url": self.groq.base_url,
             "groq_audio_model": self.groq.audio_model,
             "groq_text_model": self.groq.text_model,
+            "local_asr_model": self.local_asr.audio_model,
+            "local_asr_cloud_refinement": self.local_asr_cloud_refinement,
             "refinement_provider": self.selection.refinement_provider,
             "refinement_model": self.selection.refinement_model,
             "ui_mode": self.ui.mode,

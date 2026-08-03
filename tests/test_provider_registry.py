@@ -14,6 +14,7 @@ from provider_types import (
     ProviderConnection,
     ProviderMetadata,
     RewriteRequest,
+    TranscriptionResult,
     TranscriptionRequest,
     TranslationRequest,
     UnsupportedCapabilityError,
@@ -105,7 +106,8 @@ class ProviderRegistryContractTests(unittest.TestCase):
         http = FakeHttp()
         registry = build_provider_registry(http)
 
-        self.assertEqual(registry.provider_ids, ("gemini", "openai", "groq"))
+        self.assertEqual(
+            registry.provider_ids, ("gemini", "openai", "groq", "local_asr"))
         self.assertEqual(registry.describe("openai").display_name, "OpenAI")
         self.assertEqual(
             registry.describe("groq").audio_model_key, "groq_audio_model")
@@ -113,9 +115,38 @@ class ProviderRegistryContractTests(unittest.TestCase):
             "gemini", ProviderCapability.MULTIMODAL_AUDIO))
         self.assertFalse(registry.supports(
             "groq", ProviderCapability.MULTIMODAL_AUDIO))
+        self.assertTrue(registry.supports(
+            "local_asr", ProviderCapability.AUDIO_TRANSCRIPTION))
+        self.assertFalse(registry.supports(
+            "local_asr", ProviderCapability.TEXT_GENERATION))
         for provider_id in registry.provider_ids:
             with self.subTest(provider_id=provider_id):
-                self.assertIs(registry.adapter(provider_id).http, http)
+                adapter = registry.adapter(provider_id)
+                if provider_id == "local_asr":
+                    self.assertEqual(adapter.metadata.provider_id, provider_id)
+                else:
+                    self.assertIs(adapter.http, http)
+
+    def test_local_prompt_does_not_fallback_to_cloud_without_opt_in(self):
+        original = app.APP_CONFIG.copy()
+        try:
+            app.APP_CONFIG["transcription_provider"] = "local_asr"
+            app.APP_CONFIG["local_asr_model"] = "ggml-small"
+            app.APP_CONFIG["local_asr_cloud_refinement"] = False
+            with patch.object(
+                    app.PROVIDER_REGISTRY, "transcribe",
+                    return_value=TranscriptionResult(
+                        "local transcript", "local_asr", "ggml-small")) as transcribe, \
+                    patch.object(app, "_refine_transcript") as refine:
+                result = app._call_provider_audio(
+                    "local_asr", self.audio_path, "prompt", "en",
+                    audio_bytes=b"RIFF")
+            self.assertEqual(result, "local transcript")
+            transcribe.assert_called_once()
+            refine.assert_not_called()
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original)
 
     def test_gemini_contract_discovers_canonical_ids_and_uses_custom_proxy_auth(self):
         http = FakeHttp(
