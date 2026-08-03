@@ -47,6 +47,13 @@ from repositories import (
     LocalConfigRepository,
     LocalUsageStatsRepository,
 )
+from secret_store import (
+    SUPPORTED_SECRET_PROVIDERS,
+    SecretStoreCorruptedError,
+    SecretStoreError,
+    SecretStoreUnavailableError,
+    create_secret_store,
+)
 from version import __version__
 from windows_clipboard import ClipboardSnapshot, WindowsClipboardAdapter
 from update_security import (
@@ -124,6 +131,13 @@ except Exception:
 # Config
 # ---------------------------------------------------------------------------
 
+# The packaged credential-store self-test must not initialize the normal
+# profile repository first: doing so could migrate a legacy plaintext key
+# before the isolated test directory is created. This flag is intentionally
+# derived before any data-directory or repository setup below.
+_RUN_SECRET_STORE_SELF_TEST = (
+    len(sys.argv) > 1 and sys.argv[1] == "secret-store-self-test")
+
 def load_env():
     env_path = Path(__file__).parent / ".env"
     if env_path.exists():
@@ -133,12 +147,12 @@ def load_env():
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip())
 
-load_env()
+if not _RUN_SECRET_STORE_SELF_TEST:
+    load_env()
 
 IS_WIN = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
 DATA_DIR = (Path(os.environ.get("APPDATA", Path.home())) / "ClarifyVoice") if IS_WIN else (Path.home() / ".clarifyvoice")
-DATA_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_PATH = DATA_DIR / "temp_recording.wav"
 CONFIG_PATH = DATA_DIR / "config.json"
 STATS_PATH = DATA_DIR / "usage_stats.json"
@@ -148,6 +162,9 @@ PILL_FADE_IN_SECONDS = 0.12
 PILL_FADE_OUT_SECONDS = 0.14
 MICROPHONE_ALERT_SECONDS = 1.5
 MICROPHONE_PILL_WIDTH = 100
+
+if not _RUN_SECRET_STORE_SELF_TEST:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_CONFIG = {
     "transcription_provider": "gemini",
@@ -488,7 +505,7 @@ def _load_app_config(repositories=None):
     return config
 
 
-APP_CONFIG = _load_app_config()
+APP_CONFIG = {} if _RUN_SECRET_STORE_SELF_TEST else _load_app_config()
 
 
 def _save_app_config(repositories=None):
@@ -8291,12 +8308,112 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     stdin_transcribe.add_argument("--mode", choices=["transcription", "prompt"], default="transcription")
     stdin_transcribe.add_argument("--lang", choices=["en", "pt"], default="en")
 
+    self_test = subparsers.add_parser(
+        "secret-store-self-test",
+        help="Validate save/load/delete with an isolated temporary credential store",
+    )
+    self_test.add_argument(
+        "--result-file",
+        help="Write the safe JSON result to a file (for windowed packages)",
+    )
+
     return parser
+
+
+def _emit_secret_store_self_test_result(
+        payload: dict[str, object], result_file: str | None) -> bool:
+    """Emit a self-test result without ever including credential material."""
+
+    if result_file:
+        try:
+            destination = Path(result_file)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(
+                json.dumps(payload, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            return True
+        except OSError:
+            return False
+    if sys.stdout is None:
+        # PyInstaller's ``--windowed`` bootloader intentionally has no
+        # console stream. A caller that did not request a result file still
+        # gets the process exit status without turning a successful backend
+        # check into an output-related failure.
+        return True
+    print(json.dumps(payload, ensure_ascii=False))
+    return True
+
+
+def _run_secret_store_self_test(result_file: str | None = None) -> int:
+    """Exercise the packaged secret backend without touching user data.
+
+    The executable's CI smoke test uses this command on a disposable Windows
+    runner. A temporary directory ensures that no real profile credential
+    store is opened, and the JSON result intentionally contains no secrets.
+    """
+
+    expected = {
+        provider: f"clarifyvoice-self-test-{provider}"
+        for provider in SUPPORTED_SECRET_PROVIDERS
+    }
+    try:
+        with tempfile.TemporaryDirectory(
+                prefix="clarifyvoice-secret-store-test-") as directory:
+            first = create_secret_store(directory)
+            for provider, value in expected.items():
+                first.set(provider, value)
+                if first.get(provider) != value:
+                    raise SecretStoreError("Credential read-back failed")
+
+            restarted = create_secret_store(directory)
+            for provider, value in expected.items():
+                if restarted.get(provider) != value:
+                    raise SecretStoreError("Credential restart read failed")
+
+            for provider in expected:
+                restarted.delete(provider)
+                if restarted.get(provider) is not None:
+                    raise SecretStoreError("Credential delete failed")
+    except SecretStoreUnavailableError:
+        _emit_secret_store_self_test_result({
+            "ok": False,
+            "error": "secret_store_backend_unavailable",
+        }, result_file)
+        return 1
+    except SecretStoreCorruptedError:
+        _emit_secret_store_self_test_result({
+            "ok": False,
+            "error": "secret_store_entry_corrupted",
+        }, result_file)
+        return 1
+    except OSError:
+        _emit_secret_store_self_test_result({
+            "ok": False,
+            "error": "secret_store_io_failed",
+        }, result_file)
+        return 1
+    except Exception:
+        _emit_secret_store_self_test_result({
+            "ok": False,
+            "error": "secret_store_self_test_failed",
+        }, result_file)
+        return 1
+
+    if not _emit_secret_store_self_test_result({
+        "ok": True,
+        "providers": list(SUPPORTED_SECRET_PROVIDERS),
+    }, result_file):
+        return 1
+    return 0
 
 
 def _run_cli(argv: list[str]) -> int:
     parser = _build_cli_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "secret-store-self-test":
+        return _run_secret_store_self_test(args.result_file)
 
     if args.command not in ("transcribe", "headless-transcribe-stdin"):
         parser.print_help()

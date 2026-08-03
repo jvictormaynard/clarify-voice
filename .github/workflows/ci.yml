@@ -144,6 +144,32 @@ jobs:
             -SourceExe dist\ClarifyVoice.exe `
             -OutputPath dist\ClarifyVoice-windows-x64.msi
 
+      - name: Validate packaged secret store
+        shell: pwsh
+        run: |
+          $resultFile = Join-Path $env:RUNNER_TEMP "clarifyvoice-secret-store-self-test.json"
+          Remove-Item $resultFile -Force -ErrorAction SilentlyContinue
+          $executable = (Resolve-Path .\dist\ClarifyVoice.exe).Path
+          $selfTest = Start-Process -FilePath $executable `
+            -ArgumentList @('secret-store-self-test', '--result-file', $resultFile) `
+            -Wait -PassThru
+          $selfTestExitCode = $selfTest.ExitCode
+          if (-not (Test-Path $resultFile -PathType Leaf)) {
+            throw "Packaged secret-store self-test did not write its result file (exit code $selfTestExitCode)."
+          }
+          $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
+          if (-not $result.ok) {
+            throw "Packaged secret-store self-test reported failure: $($result.error) (exit code $selfTestExitCode)."
+          }
+          if ($selfTestExitCode -ne 0) {
+            throw "Packaged secret-store self-test returned exit code $selfTestExitCode after reporting success."
+          }
+          $providers = @($result.providers)
+          if ($providers.Count -ne 3 -or ($providers -join ",") -cne "gemini,openai,groq") {
+            throw "Packaged secret-store self-test did not cover all providers."
+          }
+          Remove-Item $resultFile -Force
+
       - name: Test install, upgrade, repair, rollback, and uninstall
         shell: pwsh
         run: |

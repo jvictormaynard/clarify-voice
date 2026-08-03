@@ -95,7 +95,13 @@ class _JsonSecretStore(SecretStore):
             return {}
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
+        except OSError:
+            # A permission or filesystem failure means the backend cannot be
+            # used right now. Keep that distinct from a readable but invalid
+            # file so callers can preserve a legacy credential and retry.
+            raise SecretStoreUnavailableError(
+                "The credential store cannot be read") from None
+        except (ValueError, TypeError):
             raise SecretStoreCorruptedError(
                 "The credential store cannot be read") from None
         if not isinstance(payload, Mapping):
@@ -297,7 +303,11 @@ class DpapiSecretStore(_JsonSecretStore):
         try:
             protected = base64.b64decode(encoded, validate=True)
             _protect, unprotect = self._callbacks()
-            return unprotect(protected).decode("utf-8")
+            clear = unprotect(protected).decode("utf-8")
+            if not clear:
+                raise SecretStoreCorruptedError(
+                    "A credential-store entry is invalid")
+            return clear
         except SecretStoreError:
             raise
         except (ValueError, UnicodeError, TypeError):
@@ -339,6 +349,6 @@ def create_secret_store(
 
     directory = Path(data_directory)
     platform_name = platform.system() if system is None else system
-    if platform_name == "Windows":
+    if str(platform_name).strip().casefold() == "windows":
         return DpapiSecretStore(directory / f"{filename_stem}.dpapi.json")
     return PlaintextFileSecretStore(directory / f"{filename_stem}.json")
