@@ -159,6 +159,28 @@ foreach ($path in $InputCsv) {
     }
 }
 if ($rows.Count -eq 0) { throw "No valid measurement rows were provided." }
+
+$hashRows = @($rows | Where-Object {
+    $_.PSObject.Properties.Name -contains "ArtifactManifestSHA256"
+})
+if ($hashRows.Count -gt 0) {
+    if ($hashRows.Count -ne $rows.Count) {
+        throw "All measurements must include artifact hash fields when any row does."
+    }
+    $manifestHashes = @($hashRows | Select-Object -ExpandProperty ArtifactManifestSHA256 -Unique)
+    if ($manifestHashes.Count -ne 1) {
+        throw "Measurements must use a single artifact manifest digest."
+    }
+    foreach ($target in @("CustomTkinter", "PySide6")) {
+        $targetHashRows = @($hashRows | Where-Object { $_.Target -eq $target })
+        $artifactHashes = @($targetHashRows | Select-Object -ExpandProperty ExecutableSHA256 -Unique)
+        $expectedHashes = @($targetHashRows | Select-Object -ExpandProperty ManifestArtifactSHA256 -Unique)
+        if ($artifactHashes.Count -ne 1 -or $expectedHashes.Count -ne 1) {
+            throw "$target measurements must use one executable artifact hash."
+        }
+    }
+}
+
 $hostIds = @($rows | Select-Object -ExpandProperty HostId -Unique)
 if ($hostIds.Count -ne 1) {
     throw "Measurements must come from exactly one benchmark host."

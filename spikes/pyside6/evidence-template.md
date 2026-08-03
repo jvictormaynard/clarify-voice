@@ -67,7 +67,9 @@ The aggregator must accept the summary and report two rows. If it rejects a
 row, correct the measurement procedure or attach the failure as evidence; do
 not edit a CSV to make a result pass. The summary is not valid if the rows
 come from mixed hosts, failed launches, malformed IDs, or fewer than three
-independent post-reboot rounds per target.
+independent post-reboot rounds per target. It must also use one manifest
+digest for the entire dataset and one executable digest per target; if the
+package step is rerun, start a new evidence set instead of mixing CSV files.
 
 ## Manual behavior matrix
 

@@ -71,6 +71,8 @@ samples, parses process/window/thread counts as positive invariant integers,
 normalizes round spellings and timestamp-form boot IDs before counting them,
 rejects malformed or ambiguous boot IDs/host IDs, rejects mixed-host inputs,
 validates the executable/manifest SHA-256 fields when present,
+requires one manifest digest for the imported dataset and one executable hash
+per target,
 rejects fewer than three unique boot IDs/rounds per target, and
 reports medians for cold-start observations, working set/private memory,
 process/thread counts, and package size. This makes reruns with

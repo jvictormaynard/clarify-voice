@@ -43,8 +43,9 @@ independent post-reboot rounds per target, and reports medians for cold-start
 observations, working set/private memory, process count, thread count, and
 package size. When artifact hash columns are present, it validates all three
 SHA-256 fields together and rejects malformed or partially edited rows. A
-failed launch is never silently converted into a zero or discarded as an
-outlier.
+single manifest digest and one executable hash per target are required across
+the imported dataset, so rounds cannot silently mix separate builds. A failed
+launch is never silently converted into a zero or discarded as an outlier.
 
 The protocol intentionally has no fixed target order: run only one target after
 each reboot, alternate which target is first across at least three rounds, and

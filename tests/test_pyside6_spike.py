@@ -83,6 +83,8 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("ConvertTo-CanonicalSha256", aggregate)
         self.assertIn("ExecutableSHA256", aggregate)
         self.assertIn("all artifact hash fields together", aggregate)
+        self.assertIn("single artifact manifest digest", aggregate)
+        self.assertIn("one executable artifact hash", aggregate)
         self.assertIn("$Row.BootId = ConvertTo-CanonicalBootId", aggregate)
         self.assertIn("$Value -cnotmatch $pattern", aggregate)
         self.assertIn('$zone -ceq "Z"', aggregate)
