@@ -3,6 +3,8 @@ import os
 import tempfile
 import traceback
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 from secret_store import (
@@ -86,6 +88,28 @@ class SecretStoreContractTests(unittest.TestCase):
 
             self.assertNotIn("not valid base64", str(raised.exception))
 
+    def test_empty_decrypted_entry_is_corrupted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "secrets.dpapi.json"
+            path.write_text(json.dumps({
+                "version": 1,
+                "backend": "windows-dpapi",
+                "entries": {"openai": "AA=="},
+            }), encoding="utf-8")
+            store = DpapiSecretStore(path, lambda value: value, lambda _value: b"")
+
+            with self.assertRaises(SecretStoreCorruptedError):
+                store.get("openai")
+
+    def test_unreadable_container_is_unavailable_not_corrupted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "secrets.dpapi.json"
+            path.mkdir()
+            store = PlaintextFileSecretStore(path)
+
+            with self.assertRaises(SecretStoreUnavailableError):
+                store.get("openai")
+
     def test_unavailable_dpapi_error_does_not_echo_the_secret(self):
         value = "test-secret-must-not-appear"
 
@@ -114,6 +138,27 @@ class SecretStoreContractTests(unittest.TestCase):
 
             self.assertIsInstance(store, PlaintextFileSecretStore)
             self.assertEqual(store.path, Path(directory) / "secrets.json")
+
+    def test_factory_accepts_case_insensitive_windows_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = create_secret_store(directory, system="windows")
+
+            self.assertIsInstance(store, DpapiSecretStore)
+            self.assertEqual(store.path, Path(directory) / "secrets.dpapi.json")
+
+    def test_packaged_cli_self_test_reports_only_safe_metadata(self):
+        import app
+
+        output = StringIO()
+        with redirect_stdout(output):
+            result = app._run_cli(["secret-store-self-test"])
+
+        self.assertEqual(result, 0)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            payload["providers"], ["gemini", "openai", "groq"])
+        self.assertNotIn("clarifyvoice-self-test", output.getvalue())
 
     def test_windows_factory_is_lazy_when_dpapi_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -144,6 +144,22 @@ jobs:
             -SourceExe dist\ClarifyVoice.exe `
             -OutputPath dist\ClarifyVoice-windows-x64.msi
 
+      - name: Validate packaged secret store
+        shell: pwsh
+        run: |
+          $output = & .\dist\ClarifyVoice.exe secret-store-self-test
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged secret-store self-test failed: $output"
+          }
+          $result = $output | ConvertFrom-Json
+          if (-not $result.ok) {
+            throw "Packaged secret-store self-test reported failure."
+          }
+          $providers = @($result.providers)
+          if ($providers.Count -ne 3 -or ($providers -join ",") -cne "gemini,openai,groq") {
+            throw "Packaged secret-store self-test did not cover all providers."
+          }
+
       - name: Test install, upgrade, repair, rollback, and uninstall
         shell: pwsh
         run: |

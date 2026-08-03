@@ -88,6 +88,18 @@ file loading, future/unknown fields, idempotent migrations, atomic writes, and
 rollback when a secret backend cannot be verified. The backend contract and
 corrupted-entry handling are covered in `tests/test_secret_store.py`.
 
+After a Windows package is built, the executable can validate its actual
+credential backend without touching the developer profile:
+
+```powershell
+.\dist\ClarifyVoice.exe secret-store-self-test
+```
+
+The command writes non-production markers to a temporary directory, creates a
+fresh store instance to verify restart reads, then deletes every entry. It
+prints only a JSON success flag and provider names; a non-zero exit means the
+packaged backend is unavailable or failed its read-back/delete checks.
+
 Headless orchestration tests live in `tests/test_workflows.py`. They exercise
 dictation, rewrite, translation, overlap prevention, focus-safe target capture,
 publication ordering, shutdown cancellation, and stale-worker rejection without

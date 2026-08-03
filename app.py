@@ -47,6 +47,11 @@ from repositories import (
     LocalConfigRepository,
     LocalUsageStatsRepository,
 )
+from secret_store import (
+    SUPPORTED_SECRET_PROVIDERS,
+    SecretStoreError,
+    create_secret_store,
+)
 from version import __version__
 from windows_clipboard import ClipboardSnapshot, WindowsClipboardAdapter
 from update_security import (
@@ -8291,12 +8296,64 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     stdin_transcribe.add_argument("--mode", choices=["transcription", "prompt"], default="transcription")
     stdin_transcribe.add_argument("--lang", choices=["en", "pt"], default="en")
 
+    subparsers.add_parser(
+        "secret-store-self-test",
+        help="Validate save/load/delete with an isolated temporary credential store",
+    )
+
     return parser
+
+
+def _run_secret_store_self_test() -> int:
+    """Exercise the packaged secret backend without touching user data.
+
+    The executable's CI smoke test uses this command on a disposable Windows
+    runner. A temporary directory ensures that no real profile credential
+    store is opened, and the JSON result intentionally contains no secrets.
+    """
+
+    expected = {
+        provider: f"clarifyvoice-self-test-{provider}"
+        for provider in SUPPORTED_SECRET_PROVIDERS
+    }
+    try:
+        with tempfile.TemporaryDirectory(
+                prefix="clarifyvoice-secret-store-test-") as directory:
+            first = create_secret_store(directory)
+            for provider, value in expected.items():
+                first.set(provider, value)
+                if first.get(provider) != value:
+                    raise SecretStoreError("Credential read-back failed")
+
+            restarted = create_secret_store(directory)
+            for provider, value in expected.items():
+                if restarted.get(provider) != value:
+                    raise SecretStoreError("Credential restart read failed")
+
+            for provider in expected:
+                restarted.delete(provider)
+                if restarted.get(provider) is not None:
+                    raise SecretStoreError("Credential delete failed")
+    except Exception:
+        print(json.dumps({
+            "ok": False,
+            "error": "secret_store_self_test_failed",
+        }, ensure_ascii=False))
+        return 1
+
+    print(json.dumps({
+        "ok": True,
+        "providers": list(SUPPORTED_SECRET_PROVIDERS),
+    }, ensure_ascii=False))
+    return 0
 
 
 def _run_cli(argv: list[str]) -> int:
     parser = _build_cli_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "secret-store-self-test":
+        return _run_secret_store_self_test()
 
     if args.command not in ("transcribe", "headless-transcribe-stdin"):
         parser.print_help()

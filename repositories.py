@@ -19,7 +19,12 @@ from typing import Any, Mapping
 
 from provider_registry import PROVIDER_IDS, PROVIDER_REGISTRY
 from provider_types import ProviderCapability
-from secret_store import SecretStore, SecretStoreError, create_secret_store
+from secret_store import (
+    SecretStore,
+    SecretStoreError,
+    SecretStoreUnavailableError,
+    create_secret_store,
+)
 
 
 CONFIG_SCHEMA_VERSION = 1
@@ -381,7 +386,7 @@ class LocalConfigRepository(ConfigRepository):
                     self.secret_store.set(provider, value)
                 else:
                     self.secret_store.delete(provider)
-            except (OSError, ValueError):
+            except Exception:
                 # The original write error remains the actionable result. A
                 # later load still preserves any untouched plaintext legacy key.
                 pass
@@ -405,6 +410,10 @@ class LocalConfigRepository(ConfigRepository):
                 stored = self.secret_store.get(provider)
             except SecretStoreError:
                 store_available = False
+            except Exception:
+                # Third-party or injected backends must not be able to expose
+                # a raw exception (which may contain credential material).
+                store_available = False
 
             if legacy and store_available and not future_schema:
                 try:
@@ -416,6 +425,10 @@ class LocalConfigRepository(ConfigRepository):
                     if stored == legacy:
                         removable.add(key)
                 except (SecretStoreError, ValueError):
+                    stored = None
+                except Exception:
+                    # Preserve the plaintext source when an injected backend
+                    # fails outside the SecretStore error hierarchy.
                     stored = None
 
             runtime[key] = self._environment_secret(provider) or stored or legacy or ""
@@ -466,6 +479,7 @@ class LocalConfigRepository(ConfigRepository):
 
             values = model.to_mapping()
             changes: dict[str, str] = {}
+            preserve_legacy: set[str] = set()
             for provider, key in PROVIDER_SECRET_KEYS.items():
                 if key not in supplied_keys:
                     continue
@@ -476,6 +490,14 @@ class LocalConfigRepository(ConfigRepository):
                     # normal settings save must never copy them into storage.
                     # A different, explicitly submitted value is user intent
                     # and must replace the stored credential.
+                    #
+                    # If a previous load could not migrate a legacy key, do
+                    # not remove that recoverable source merely because the
+                    # environment currently masks it. A later save without
+                    # the override can retry the migration.
+                    if (isinstance(current_payload.get(key), str)
+                            and current_payload.get(key)):
+                        preserve_legacy.add(key)
                     continue
                 changes[provider] = value
 
@@ -502,13 +524,21 @@ class LocalConfigRepository(ConfigRepository):
                 # key and therefore either verify secret storage or fail.
                 for key in PROVIDER_SECRET_KEYS.values():
                     legacy = current_payload.get(key)
-                    if (key not in supplied_keys and isinstance(legacy, str)
+                    if ((key not in supplied_keys or key in preserve_legacy)
+                            and isinstance(legacy, str)
                             and legacy):
                         values[key] = legacy
                 _atomic_write_json(self.path, values)
+            except SecretStoreError:
+                self._restore_secrets(previous)
+                raise
             except (OSError, ValueError):
                 self._restore_secrets(previous)
                 raise
+            except Exception:
+                self._restore_secrets(previous)
+                raise SecretStoreUnavailableError(
+                    "The credential store could not be updated") from None
 
 
 class LocalUsageStatsRepository(UsageStatsRepository):

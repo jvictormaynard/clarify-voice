@@ -154,6 +154,69 @@ class ConfigurationRepositoryTests(unittest.TestCase):
                 json.loads(path.read_text(encoding="utf-8")),
             )
 
+    def test_environment_override_does_not_erase_unmigrated_legacy_key(self):
+        class UnavailableStore(MemorySecretStore):
+            def get(self, _provider):
+                raise SecretStoreUnavailableError(
+                    "The credential store is unavailable")
+
+            def set(self, _provider, _secret):
+                raise SecretStoreUnavailableError(
+                    "The credential store is unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            original = {
+                "openai_api_key": "recoverable-test-credential",
+                "ui_language": "de",
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            repository = LocalConfigRepository(
+                path,
+                environment={"OPENAI_API_KEY": "environment-test-credential"},
+                secret_store=UnavailableStore(),
+            )
+
+            loaded = repository.load()
+            with self.assertRaises(SecretStoreUnavailableError):
+                repository.save(loaded)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["openai_api_key"], "recoverable-test-credential")
+            self.assertEqual(payload["ui_language"], "de")
+
+    def test_unexpected_backend_failure_is_sanitized_and_preserves_legacy(self):
+        class ExplodingStore(MemorySecretStore):
+            def get(self, _provider):
+                raise RuntimeError("credential=must-not-escape")
+
+            def set(self, _provider, _secret):
+                raise RuntimeError("credential=must-not-escape")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "openai_api_key": "recoverable-test-credential",
+            }), encoding="utf-8")
+            repository = LocalConfigRepository(
+                path, secret_store=ExplodingStore())
+
+            loaded = repository.load()
+            self.assertEqual(
+                loaded.openai.api_key, "recoverable-test-credential")
+            with self.assertRaises(SecretStoreUnavailableError) as raised:
+                repository.save({
+                    "openai_api_key": "replacement-test-credential",
+                })
+
+            self.assertNotIn(
+                "must-not-escape", str(raised.exception))
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["openai_api_key"],
+                "recoverable-test-credential",
+            )
+
     def test_explicit_key_different_from_environment_persists_for_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
