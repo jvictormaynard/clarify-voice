@@ -46,6 +46,8 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("Get-TreeWindowProcess $process.Id", source)
         self.assertIn("$candidate.MainWindowHandle", source)
         self.assertIn("WindowProcessId", source)
+        self.assertIn("finally", source)
+        self.assertIn("$process.HasExited", source)
 
     def test_measurement_protocol_has_no_fixed_target_order(self):
         benchmark = (SPIKE / "benchmark.ps1").read_text(encoding="utf-8")
@@ -192,6 +194,7 @@ class PySide6SpikeTests(unittest.TestCase):
             "benchmark.ps1",
             "aggregate.ps1",
             ".gitignore",
+            "evidence-template.md",
         ):
             self.assertTrue((SPIKE / relative).is_file(), relative)
         decision = (ROOT / "docs" / "pyside6-decision.md").read_text(encoding="utf-8")
@@ -201,14 +204,32 @@ class PySide6SpikeTests(unittest.TestCase):
             "Migration and rollback outline",
             "Recommendation",
             "pending independent rounds",
+            "12–20 engineer-days",
+            "Decision gate",
+            "artifacts-manifest.json",
         ):
             self.assertIn(phrase, decision)
+
+    def test_evidence_template_is_explicit_about_manual_hooks(self):
+        evidence = (SPIKE / "evidence-template.md").read_text(encoding="utf-8")
+        for phrase in (
+            "three distinct `BootId`",
+            "100% DPI screenshot",
+            "Production global-hotkey coexistence",
+            "Do not commit executable artifacts",
+            "defer",
+        ):
+            self.assertIn(phrase, evidence)
 
     def test_spike_packaging_does_not_use_production_output_paths(self):
         package = (SPIKE / "package.ps1").read_text(encoding="utf-8")
         self.assertIn('"artifacts"', package)
         self.assertNotIn('"dist"', package)
         self.assertNotIn("scripts\\build.ps1", package)
+        self.assertIn("requirements-lock-runtime-windows.txt", package)
+        self.assertIn("build-environment.txt", package)
+        self.assertIn("artifacts-manifest.json", package)
+        self.assertIn("Get-FileHash", package)
 
     def test_production_requirements_do_not_gain_optional_qt_dependency(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")

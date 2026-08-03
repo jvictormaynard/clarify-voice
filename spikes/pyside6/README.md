@@ -16,11 +16,20 @@ The window exercises idle, recording, processing, success, result, and settings 
 
 ## Comparable builds and measurements
 
-Build both one-file, windowed artifacts into the spike directory only:
+Build both one-file, windowed artifacts into the spike directory only. The
+script uses `requirements-lock-runtime-windows.txt` for the production side,
+installs the optional PySide6 dependency into the same disposable environment,
+and records the exact environment and artifact hashes:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File spikes\pyside6\package.ps1
 ```
+
+The generated `artifacts\build-environment.txt` and
+`artifacts\artifacts-manifest.json` are provenance for the measurements, not
+release artifacts. If a different lock or output location is required for a
+controlled experiment, pass `-RuntimeRequirements`, `-SpikeRequirements`, or
+`-OutputDirectory` explicitly and attach the resulting manifest.
 
 `benchmark.ps1` measures one target per invocation and records the Windows boot
 identifier plus a stable, non-reversible `HostId`. `HostId` is the lowercase
@@ -64,6 +73,11 @@ process/thread counts, and package size. This makes reruns with
 samples; it does not claim a perfectly controlled OS cold state.
 Use 100%, 125%, and 150% display scaling where available, and attach the CSV
 summary plus screenshots/video to the decision record.
+
+Use [`evidence-template.md`](evidence-template.md) as the operator checklist.
+It names the screenshot/video hooks and records missing Windows evidence
+without turning it into a pass. Never commit the completed evidence sheet or
+machine-specific artifacts to the repository.
 
 ## Manual behavior matrix
 

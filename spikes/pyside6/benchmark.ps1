@@ -78,46 +78,55 @@ function Measure-Executable {
     if (-not (Test-Path $Path)) { throw "Missing executable: $Path" }
     $resolved = (Resolve-Path $Path).Path
     $sizeMb = [math]::Round((Get-Item $resolved).Length / 1MB, 2)
-    $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    $process = Start-Process -FilePath $resolved -PassThru
-    $mainWindowSeen = $false
-    $windowProcessId = $null
-    while ($watch.Elapsed.TotalSeconds -lt 20) {
-        Start-Sleep -Milliseconds 100
-        $windowProcess = Get-TreeWindowProcess $process.Id
-        if ($null -ne $windowProcess) {
-            $mainWindowSeen = $true
-            $windowProcessId = $windowProcess.Id
-            break
+    $process = $null
+    try {
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $process = Start-Process -FilePath $resolved -PassThru
+        $mainWindowSeen = $false
+        $windowProcessId = $null
+        while ($watch.Elapsed.TotalSeconds -lt 20) {
+            Start-Sleep -Milliseconds 100
+            if ($process.HasExited) { break }
+            $windowProcess = Get-TreeWindowProcess $process.Id
+            if ($null -ne $windowProcess) {
+                $mainWindowSeen = $true
+                $windowProcessId = $windowProcess.Id
+                break
+            }
+        }
+        $coldStartMs = [math]::Round($watch.Elapsed.TotalMilliseconds, 0)
+        if ($mainWindowSeen) { Start-Sleep -Seconds 5 }
+        $processes = @(Get-TreeProcesses $process.Id)
+        $workingSetMb = [math]::Round((($processes | Measure-Object WorkingSet64 -Sum).Sum) / 1MB, 2)
+        $privateMb = [math]::Round((($processes | Measure-Object PrivateMemorySize64 -Sum).Sum) / 1MB, 2)
+        $threads = ($processes | ForEach-Object { $_.Threads.Count } | Measure-Object -Sum).Sum
+        return [pscustomobject]@{
+            Target = $Target
+            Round = $Round
+            RunId = $RunId
+            BootId = Get-BootId
+            HostId = Get-HostId
+            Executable = $resolved
+            ColdStartMs = $coldStartMs
+            MainWindowSeen = $mainWindowSeen
+            WindowProcessId = $windowProcessId
+            WorkingSetMB = $workingSetMb
+            PrivateMemoryMB = $privateMb
+            ProcessCount = $processes.Count
+            ThreadCount = $threads
+            PackageSizeMB = $sizeMb
+            MeasuredAtUtc = [DateTime]::UtcNow.ToString("o")
+        }
+    } finally {
+        if ($null -ne $process) {
+            foreach ($runningProcess in @(Get-TreeProcesses $process.Id)) {
+                try { Stop-Process -Id $runningProcess.Id -Force -ErrorAction SilentlyContinue } catch { }
+            }
+            try {
+                if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+            } catch { }
         }
     }
-    $coldStartMs = [math]::Round($watch.Elapsed.TotalMilliseconds, 0)
-    Start-Sleep -Seconds 5
-    $processes = @(Get-TreeProcesses $process.Id)
-    $workingSetMb = [math]::Round((($processes | Measure-Object WorkingSet64 -Sum).Sum) / 1MB, 2)
-    $privateMb = [math]::Round((($processes | Measure-Object PrivateMemorySize64 -Sum).Sum) / 1MB, 2)
-    $threads = ($processes | ForEach-Object { $_.Threads.Count } | Measure-Object -Sum).Sum
-    $result = [pscustomobject]@{
-        Target = $Target
-        Round = $Round
-        RunId = $RunId
-        BootId = Get-BootId
-        HostId = Get-HostId
-        Executable = $resolved
-        ColdStartMs = $coldStartMs
-        MainWindowSeen = $mainWindowSeen
-        WindowProcessId = $windowProcessId
-        WorkingSetMB = $workingSetMb
-        PrivateMemoryMB = $privateMb
-        ProcessCount = $processes.Count
-        ThreadCount = $threads
-        PackageSizeMB = $sizeMb
-        MeasuredAtUtc = [DateTime]::UtcNow.ToString("o")
-    }
-    foreach ($runningProcess in $processes) {
-        try { Stop-Process -Id $runningProcess.Id -Force -ErrorAction SilentlyContinue } catch { }
-    }
-    return $result
 }
 
 $result = Measure-Executable $Executable
