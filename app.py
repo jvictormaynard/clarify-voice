@@ -49,7 +49,9 @@ from repositories import (
 )
 from secret_store import (
     SUPPORTED_SECRET_PROVIDERS,
+    SecretStoreCorruptedError,
     SecretStoreError,
+    SecretStoreUnavailableError,
     create_secret_store,
 )
 from version import __version__
@@ -8367,6 +8369,24 @@ def _run_secret_store_self_test(result_file: str | None = None) -> int:
                 restarted.delete(provider)
                 if restarted.get(provider) is not None:
                     raise SecretStoreError("Credential delete failed")
+    except SecretStoreUnavailableError:
+        _emit_secret_store_self_test_result({
+            "ok": False,
+            "error": "secret_store_backend_unavailable",
+        }, result_file)
+        return 1
+    except SecretStoreCorruptedError:
+        _emit_secret_store_self_test_result({
+            "ok": False,
+            "error": "secret_store_entry_corrupted",
+        }, result_file)
+        return 1
+    except OSError:
+        _emit_secret_store_self_test_result({
+            "ok": False,
+            "error": "secret_store_io_failed",
+        }, result_file)
+        return 1
     except Exception:
         _emit_secret_store_self_test_result({
             "ok": False,
