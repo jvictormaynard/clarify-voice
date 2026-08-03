@@ -149,8 +149,11 @@ jobs:
         run: |
           $resultFile = Join-Path $env:RUNNER_TEMP "clarifyvoice-secret-store-self-test.json"
           Remove-Item $resultFile -Force -ErrorAction SilentlyContinue
-          & .\dist\ClarifyVoice.exe secret-store-self-test --result-file $resultFile
-          $selfTestExitCode = $LASTEXITCODE
+          $executable = (Resolve-Path .\dist\ClarifyVoice.exe).Path
+          $selfTest = Start-Process -FilePath $executable `
+            -ArgumentList @('secret-store-self-test', '--result-file', $resultFile) `
+            -Wait -PassThru
+          $selfTestExitCode = $selfTest.ExitCode
           if (-not (Test-Path $resultFile -PathType Leaf)) {
             throw "Packaged secret-store self-test did not write its result file (exit code $selfTestExitCode)."
           }
