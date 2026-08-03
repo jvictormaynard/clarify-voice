@@ -97,8 +97,11 @@ credential backend without touching the developer profile:
 
 The command writes non-production markers to a temporary directory, creates a
 fresh store instance to verify restart reads, then deletes every entry. It
-prints only a JSON success flag and provider names; a non-zero exit means the
-packaged backend is unavailable or failed its read-back/delete checks.
+prints only a JSON success flag and provider names when stdout is available.
+Because the release executable is a `--windowed` PyInstaller package, CI uses
+`secret-store-self-test --result-file <runner-temp-file>` and validates that
+file plus the exit code. A non-zero exit means the packaged backend is
+unavailable or failed its read-back/delete checks.
 
 Headless orchestration tests live in `tests/test_workflows.py`. They exercise
 dictation, rewrite, translation, overlap prevention, focus-safe target capture,

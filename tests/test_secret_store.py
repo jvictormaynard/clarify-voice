@@ -160,6 +160,24 @@ class SecretStoreContractTests(unittest.TestCase):
             payload["providers"], ["gemini", "openai", "groq"])
         self.assertNotIn("clarifyvoice-self-test", output.getvalue())
 
+    def test_packaged_cli_self_test_can_write_windowed_result_file(self):
+        import app
+
+        with tempfile.TemporaryDirectory() as directory:
+            result_file = Path(directory) / "result.json"
+            output = StringIO()
+            with redirect_stdout(output):
+                result = app._run_cli([
+                    "secret-store-self-test", "--result-file", str(result_file),
+                ])
+
+            self.assertEqual(result, 0)
+            self.assertEqual(output.getvalue(), "")
+            payload = json.loads(result_file.read_text(encoding="utf-8"))
+            self.assertTrue(payload["ok"])
+            self.assertNotIn("clarifyvoice-self-test", result_file.read_text(
+                encoding="utf-8"))
+
     def test_windows_factory_is_lazy_when_dpapi_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             store = create_secret_store(directory, system="Windows")

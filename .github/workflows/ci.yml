@@ -147,11 +147,16 @@ jobs:
       - name: Validate packaged secret store
         shell: pwsh
         run: |
-          $output = & .\dist\ClarifyVoice.exe secret-store-self-test
+          $resultFile = Join-Path $env:RUNNER_TEMP "clarifyvoice-secret-store-self-test.json"
+          Remove-Item $resultFile -Force -ErrorAction SilentlyContinue
+          & .\dist\ClarifyVoice.exe secret-store-self-test --result-file $resultFile
           if ($LASTEXITCODE -ne 0) {
-            throw "Packaged secret-store self-test failed: $output"
+            throw "Packaged secret-store self-test failed."
           }
-          $result = $output | ConvertFrom-Json
+          if (-not (Test-Path $resultFile -PathType Leaf)) {
+            throw "Packaged secret-store self-test did not write its result file."
+          }
+          $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
           if (-not $result.ok) {
             throw "Packaged secret-store self-test reported failure."
           }
@@ -159,6 +164,7 @@ jobs:
           if ($providers.Count -ne 3 -or ($providers -join ",") -cne "gemini,openai,groq") {
             throw "Packaged secret-store self-test did not cover all providers."
           }
+          Remove-Item $resultFile -Force
 
       - name: Test install, upgrade, repair, rollback, and uninstall
         shell: pwsh
