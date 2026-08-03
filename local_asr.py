@@ -811,6 +811,15 @@ class LocalASRInstaller:
                 child = Path(entry.path)
                 if preserve_marker and entry.name == ROOT_MARKER:
                     continue
+                # ``DirEntry.is_dir(follow_symlinks=False)`` is not enough on
+                # Windows: directory junctions and other reparse points can
+                # still be reported as ordinary directories.  Inspect every
+                # child before deciding whether to recurse, and fail closed
+                # when the attribute cannot be determined.
+                reparse = _reparse_state(child)
+                if reparse is not False:
+                    raise LocalASRError(
+                        "Refusing symlinked or unverifiable local-ASR asset path")
                 if entry.is_dir(follow_symlinks=False):
                     cls._remove_tree(child, cancel_event)
                 else:

@@ -375,6 +375,32 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertTrue(installer.remove(cancel_event=cancel_event))
             self.assertFalse(fixture.root.exists())
 
+    def test_cancellable_remove_refuses_reparse_child_before_recursing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer.install()
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            protected = outside / "must-stay.txt"
+            protected.write_text("outside asset root", encoding="utf-8")
+            junction = fixture.root / "junction"
+            junction.mkdir()
+            (junction / "inside.txt").write_text("owned", encoding="utf-8")
+
+            def reparse_state(path):
+                return True if Path(path) == junction else False
+
+            with patch.object(
+                    local_asr, "_reparse_state", side_effect=reparse_state):
+                with self.assertRaises(local_asr.LocalASRError) as raised:
+                    installer.remove(cancel_event=threading.Event())
+
+            self.assertIn("symlinked or unverifiable", str(raised.exception))
+            self.assertTrue((fixture.root / local_asr.ROOT_MARKER).exists())
+            self.assertTrue(protected.exists())
+            self.assertTrue((junction / "inside.txt").exists())
+
     def test_install_refuses_nonempty_unowned_custom_root(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)
