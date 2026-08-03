@@ -2,7 +2,7 @@ import threading
 import time
 import unittest
 
-from local_asr import LocalASRCancelledError
+from local_asr import LocalASRCancelledError, LocalASRError
 from local_asr_product import (
     LocalASRProductController,
     format_requirements,
@@ -114,6 +114,19 @@ class LocalASRProductControllerTests(unittest.TestCase):
         controller.cancel()
         self.wait_for(lambda: controller.state.status == "cancelled")
         self.assertTrue(installer.cancel_seen.is_set())
+        self.assertFalse(controller.busy)
+
+    def test_unsupported_platform_rejects_install_before_download(self):
+        installer = FakeInstaller()
+        installer.platform_supported = lambda: False
+        controller = LocalASRProductController(installer)
+
+        with self.assertRaises(LocalASRError):
+            controller.install_async()
+
+        self.assertEqual(installer.install_calls, 0)
+        self.assertEqual(controller.state.status, "error")
+        self.assertIn("Windows x64", controller.state.detail)
         self.assertFalse(controller.busy)
 
     def test_remove_is_explicit_and_reports_not_installed(self):

@@ -453,6 +453,13 @@ class LocalASRInstaller:
     def requirements(self) -> dict:
         return dict(self.manifest["requirements"])
 
+    @staticmethod
+    def platform_supported() -> bool:
+        """Return whether the published sidecar can run on this host."""
+        if platform.system().strip().casefold() != "windows":
+            return False
+        return platform.machine().strip().casefold() in {"amd64", "x86_64"}
+
     def _expected_installed_files(self):
         for entry in self.manifest["extracted_files"]:
             yield (
@@ -833,7 +840,8 @@ class LocalASRInstaller:
             self._assert_owned_root()
             if cancel_event is not None and cancel_event.is_set():
                 raise LocalASRCancelledError("Local ASR installation was cancelled")
-            existing = self.status()
+            existing = (self.status(cancel_check=cancel_event.is_set)
+                        if cancel_event is not None else self.status())
             if existing["state"] == "installed":
                 self._report(callback, "complete", 1, 1)
                 return existing

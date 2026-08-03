@@ -165,8 +165,38 @@ class LocalASRProductController:
             ))
             return cancel_event
 
+    def _unsupported_platform_detail(self) -> str:
+        checker = getattr(self.installer, "platform_supported", None)
+        if not callable(checker):
+            # Lightweight test doubles and future installers may own their
+            # platform contract; absence of the optional hook preserves that
+            # interface instead of guessing from the host process.
+            return ""
+        try:
+            supported = bool(checker())
+        except Exception:
+            supported = False
+        if supported:
+            return ""
+        return (
+            "Local ASR installation requires the published Windows x64 "
+            "runtime; no download was started on this host."
+        )
+
     def install_async(self) -> None:
         """Start an explicitly authorized install in a background worker."""
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                raise LocalASRError("A local-ASR asset operation is already running")
+        unsupported = self._unsupported_platform_detail()
+        if unsupported:
+            self._publish(LocalASRProductState(
+                status="error",
+                detail=unsupported,
+                requirements=dict(self._state.requirements or
+                                  self.installer.requirements()),
+            ))
+            raise LocalASRError(unsupported)
         cancel_event = self._begin("installing")
 
         def progress(stage: str, current: int, total: int) -> None:
