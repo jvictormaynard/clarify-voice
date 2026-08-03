@@ -860,6 +860,14 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(app.APP_CONFIG, previous)
         save.assert_called_once_with(None)
 
+    @patch("app._save_app_config", side_effect=OSError("config unavailable"))
+    def test_local_refinement_opt_in_save_failure_rolls_back(self, save):
+        app.APP_CONFIG["local_asr_cloud_refinement"] = False
+
+        self.assertFalse(app._persist_local_asr_cloud_refinement(True))
+        self.assertFalse(app.APP_CONFIG["local_asr_cloud_refinement"])
+        save.assert_called_once_with(None)
+
     @patch("app.PROVIDER_REGISTRY.shutdown", side_effect=RuntimeError("cleanup"))
     @patch("app.call_transcription_provider", return_value="[Error: local failure]")
     def test_cli_local_transcription_cleanup_preserves_exit_code(

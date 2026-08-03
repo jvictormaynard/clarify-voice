@@ -746,6 +746,19 @@ def _persist_cloud_selection_before_local_removal(
     return True
 
 
+def _persist_local_asr_cloud_refinement(
+        enabled: bool, repositories=None) -> bool:
+    """Persist the local-ASR cloud-refinement opt-in atomically in memory."""
+    previous = bool(APP_CONFIG.get("local_asr_cloud_refinement", False))
+    APP_CONFIG["local_asr_cloud_refinement"] = bool(enabled)
+    try:
+        _save_app_config(repositories)
+    except OSError:
+        APP_CONFIG["local_asr_cloud_refinement"] = previous
+        return False
+    return True
+
+
 def _apply_settings_transaction(
         selected, selected_refinement, audio_options, text_options, model_keys,
         autostart_enabled, repositories=None, registry=None):
@@ -8243,11 +8256,16 @@ class App(ctk.CTk):
                 deactivate_buttons[provider] = remove_button
 
                 def apply_local_preference():
-                    APP_CONFIG["local_asr_cloud_refinement"] = bool(
-                        refinement_switch.get())
-                    try:
-                        _save_app_config(self.repositories)
-                    except OSError as error:
+                    requested = bool(refinement_switch.get())
+                    if not _persist_local_asr_cloud_refinement(
+                            requested, self.repositories):
+                        previous = bool(APP_CONFIG.get(
+                            "local_asr_cloud_refinement", False))
+                        if previous:
+                            refinement_switch.select()
+                        else:
+                            refinement_switch.deselect()
+                        error = "Could not save local-ASR refinement setting"
                         message.configure(text=f"Could not save setting: {error}")
                         return
                     refresh_dirty_state()
