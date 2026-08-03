@@ -110,8 +110,8 @@ function ConvertTo-ValidMeasurement {
         $Row.PSObject.Properties.Name -contains $_ -and
         -not [string]::IsNullOrWhiteSpace([string]$Row.$_)
     })
-    if ($presentHashes.Count -gt 0 -and $presentHashes.Count -ne $hashProperties.Count) {
-        throw "Measurement in $Path must include all artifact hash fields together."
+    if ($presentHashes.Count -ne $hashProperties.Count) {
+        throw "Measurement in $Path must include all three nonblank artifact hash fields."
     }
     foreach ($hashProperty in $presentHashes) {
         $Row.$hashProperty = ConvertTo-CanonicalSha256 ([string]$Row.$hashProperty) $hashProperty $Path
@@ -163,10 +163,10 @@ if ($rows.Count -eq 0) { throw "No valid measurement rows were provided." }
 $hashRows = @($rows | Where-Object {
     $_.PSObject.Properties.Name -contains "ArtifactManifestSHA256"
 })
+if ($hashRows.Count -ne $rows.Count) {
+    throw "Every measurement must include all three nonblank artifact hash fields."
+}
 if ($hashRows.Count -gt 0) {
-    if ($hashRows.Count -ne $rows.Count) {
-        throw "All measurements must include artifact hash fields when any row does."
-    }
     $manifestHashes = @($hashRows | Select-Object -ExpandProperty ArtifactManifestSHA256 -Unique)
     if ($manifestHashes.Count -ne 1) {
         throw "Measurements must use a single artifact manifest digest."

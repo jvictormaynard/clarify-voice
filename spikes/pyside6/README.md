@@ -70,7 +70,7 @@ rejects failed launches or non-positive/non-numeric metrics before counting
 samples, parses process/window/thread counts as positive invariant integers,
 normalizes round spellings and timestamp-form boot IDs before counting them,
 rejects malformed or ambiguous boot IDs/host IDs, rejects mixed-host inputs,
-validates the executable/manifest SHA-256 fields when present,
+requires all three nonblank executable/manifest SHA-256 fields,
 requires one manifest digest for the imported dataset and one executable hash
 per target, and requires the executable hash to equal the manifest's expected
 artifact hash,

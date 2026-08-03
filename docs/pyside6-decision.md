@@ -41,10 +41,10 @@ counting them, rejects malformed or ambiguous boot IDs/host IDs, rejects
 mixed-host input, excludes its own output on reruns, rejects fewer than three
 independent post-reboot rounds per target, and reports medians for cold-start
 observations, working set/private memory, process count, thread count, and
-package size. When artifact hash columns are present, it validates all three
-SHA-256 fields together and rejects malformed or partially edited rows. A
-single manifest digest and one executable hash per target are required across
-the imported dataset, so rounds cannot silently mix separate builds. A failed
+package size. Every measurement row must contain all three nonblank SHA-256
+fields; malformed, partially edited, or hashless rows are rejected. A single
+manifest digest and one executable hash per target are required across the
+imported dataset, so rounds cannot silently mix separate builds. A failed
 launch is never silently converted into a zero or discarded as an outlier.
 The executable hash and the manifest's expected artifact hash must also be
 identical for each target; a forged pair is rejected before medians are

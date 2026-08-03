@@ -82,7 +82,8 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("ConvertTo-CanonicalBootId", aggregate)
         self.assertIn("ConvertTo-CanonicalSha256", aggregate)
         self.assertIn("ExecutableSHA256", aggregate)
-        self.assertIn("all artifact hash fields together", aggregate)
+        self.assertIn("all three nonblank artifact hash fields", aggregate)
+        self.assertIn("Every measurement must include all three nonblank artifact hash fields", aggregate)
         self.assertIn("single artifact manifest digest", aggregate)
         self.assertIn("one executable artifact hash", aggregate)
         self.assertIn("executable and manifest artifact hashes must match", aggregate)
@@ -104,6 +105,8 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertTrue((FIXTURES / "invalid_mixed_hosts.csv").is_file())
         self.assertTrue((FIXTURES / "invalid_host_id.csv").is_file())
         self.assertTrue((FIXTURES / "invalid_host_missing.csv").is_file())
+        self.assertTrue((FIXTURES / "invalid_hash_missing.csv").is_file())
+        self.assertTrue((FIXTURES / "invalid_hash_mismatch.csv").is_file())
         for fixture in FIXTURES.glob("invalid_*_process_id.csv"):
             self.assertTrue(fixture.is_file())
         for name in (
@@ -167,6 +170,12 @@ class PySide6SpikeTests(unittest.TestCase):
             missing_host = run_aggregate([FIXTURES / "invalid_host_missing.csv"])
             self.assertNotEqual(missing_host.returncode, 0)
             self.assertIn("HostId", missing_host.stdout + missing_host.stderr)
+            missing_hashes = run_aggregate([FIXTURES / "invalid_hash_missing.csv"])
+            self.assertNotEqual(missing_hashes.returncode, 0)
+            self.assertIn("three nonblank", missing_hashes.stdout + missing_hashes.stderr)
+            mismatched_hashes = run_aggregate([FIXTURES / "invalid_hash_mismatch.csv"])
+            self.assertNotEqual(mismatched_hashes.returncode, 0)
+            self.assertIn("hashes must match", mismatched_hashes.stdout + mismatched_hashes.stderr)
             for malformed in sorted(FIXTURES.glob("invalid_*_process_id.csv")) + sorted(
                 FIXTURES.glob("invalid_*_process_count.csv")
             ) + sorted(FIXTURES.glob("invalid_*_thread_count.csv")):
