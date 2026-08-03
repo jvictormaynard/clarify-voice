@@ -178,6 +178,18 @@ class SecretStoreContractTests(unittest.TestCase):
             self.assertNotIn("clarifyvoice-self-test", result_file.read_text(
                 encoding="utf-8"))
 
+    def test_packaged_cli_self_test_succeeds_without_stdout(self):
+        import app
+
+        original_stdout = app.sys.stdout
+        try:
+            app.sys.stdout = None
+            result = app._run_cli(["secret-store-self-test"])
+        finally:
+            app.sys.stdout = original_stdout
+
+        self.assertEqual(result, 0)
+
     def test_windows_factory_is_lazy_when_dpapi_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             store = create_secret_store(directory, system="Windows")

@@ -8335,6 +8335,12 @@ def _emit_secret_store_self_test_result(
             return True
         except OSError:
             return False
+    if sys.stdout is None:
+        # PyInstaller's ``--windowed`` bootloader intentionally has no
+        # console stream. A caller that did not request a result file still
+        # gets the process exit status without turning a successful backend
+        # check into an output-related failure.
+        return True
     print(json.dumps(payload, ensure_ascii=False))
     return True
 
