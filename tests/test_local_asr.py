@@ -358,6 +358,23 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertFalse(installer.executable_path.exists())
             self.assertFalse(installer.model_path.exists())
 
+    def test_cancellable_remove_preserves_owned_root_when_cancelled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            installer.install()
+            cancel_event = threading.Event()
+            cancel_event.set()
+
+            with self.assertRaises(local_asr.LocalASRCancelledError):
+                installer.remove(cancel_event=cancel_event)
+
+            self.assertTrue(fixture.root.exists())
+            self.assertTrue((fixture.root / local_asr.ROOT_MARKER).exists())
+            cancel_event.clear()
+            self.assertTrue(installer.remove(cancel_event=cancel_event))
+            self.assertFalse(fixture.root.exists())
+
     def test_install_refuses_nonempty_unowned_custom_root(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)

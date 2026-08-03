@@ -2783,6 +2783,30 @@ class WindowFadeTests(unittest.TestCase):
 
 
 class UsageStatisticsTests(unittest.TestCase):
+    def test_local_asr_opted_out_refinement_is_not_accounted(self):
+        original = app.APP_CONFIG.copy()
+        try:
+            app.APP_CONFIG.update({
+                "transcription_provider": "local_asr",
+                "local_asr_model": "ggml-small",
+                "ui_mode": "prompt",
+                "local_asr_cloud_refinement": False,
+                "refinement_provider": "openai",
+                "refinement_model": "gpt-4o-mini",
+            })
+
+            context = app._recording_usage_context("prompt")
+            event = app._build_recording_usage_event(
+                context, 60, "A local transcript")
+
+            self.assertEqual(context["refinement_provider"], "")
+            self.assertEqual(context["refinement_model"], "")
+            self.assertEqual(len(event["models"]), 1)
+            self.assertEqual(event["models"][0]["provider"], "local_asr")
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original)
+
     def test_recording_event_tracks_models_cost_and_no_transcript(self):
         event = app._build_recording_usage_event({
             "provider": "openai",

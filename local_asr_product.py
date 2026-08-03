@@ -53,16 +53,27 @@ class LocalASRProductController:
         self,
         installer: LocalASRInstaller | None = None,
         *,
+        backend=None,
         listener: StateListener | None = None,
     ) -> None:
         self.installer = installer or LocalASRInstaller()
+        self.backend = backend
         self._listeners: list[StateListener] = []
         if listener is not None:
             self._listeners.append(listener)
         self._lock = threading.RLock()
         self._cancel_event: threading.Event | None = None
         self._worker: threading.Thread | None = None
-        self._state = self._state_from_status(self.installer.status())
+        try:
+            requirements = dict(self.installer.requirements())
+        except Exception:
+            requirements = {}
+        self._state = LocalASRProductState(
+            status="checking",
+            stage="checking",
+            detail="Checking the installed local-ASR assets…",
+            requirements=requirements,
+        )
 
     @staticmethod
     def _state_from_status(status: dict) -> LocalASRProductState:
@@ -107,6 +118,36 @@ class LocalASRProductController:
         state = self._state_from_status(self.installer.status())
         self._publish(state)
         return state
+
+    def refresh_async(self) -> bool:
+        """Verify installed assets away from the Tk/startup thread."""
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                return False
+
+        def run() -> None:
+            try:
+                state = self._state_from_status(self.installer.status())
+            except (LocalASRError, OSError) as error:
+                state = LocalASRProductState(
+                    status="error",
+                    detail=self._actionable_error(error),
+                    requirements=self.installer.requirements(),
+                )
+            finally:
+                with self._lock:
+                    if self._worker is threading.current_thread():
+                        self._worker = None
+            self._publish(state)
+
+        worker = threading.Thread(
+            target=run, name="ClarifyVoiceLocalASRStatus", daemon=True)
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                return False
+            self._worker = worker
+        worker.start()
+        return True
 
     def _begin(self, operation: str) -> threading.Event:
         with self._lock:
@@ -176,7 +217,13 @@ class LocalASRProductController:
             try:
                 if cancel_event.is_set():
                     raise LocalASRCancelledError("Local ASR removal was cancelled")
-                self.installer.remove()
+                backend = self.backend
+                stop = getattr(backend, "stop", None)
+                if callable(stop):
+                    stop()
+                if cancel_event.is_set():
+                    raise LocalASRCancelledError("Local ASR removal was cancelled")
+                self.installer.remove(cancel_event=cancel_event)
             except LocalASRCancelledError as error:
                 self._publish(LocalASRProductState(
                     status="cancelled",

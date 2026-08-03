@@ -20,13 +20,18 @@ class FakeInstaller:
         self.install_calls = 0
         self.remove_calls = 0
         self.cancel_seen = threading.Event()
+        self.remove_started = threading.Event()
+        self.remove_cancel_seen = threading.Event()
+        self.block_remove = False
         self.release = threading.Event()
         self._status = "not_installed"
+        self.status_calls = 0
 
     def requirements(self):
         return dict(self.requirements_value)
 
     def status(self):
+        self.status_calls += 1
         return {
             "state": self._status,
             "detail": "not installed" if self._status == "not_installed" else "ready",
@@ -44,10 +49,24 @@ class FakeInstaller:
         self._status = "installed"
         return self.status()
 
-    def remove(self):
+    def remove(self, cancel_event=None):
         self.remove_calls += 1
+        if self.block_remove:
+            self.remove_started.set()
+            while not self.release.wait(0.01):
+                if cancel_event is not None and cancel_event.is_set():
+                    self.remove_cancel_seen.set()
+                    raise LocalASRCancelledError("cancelled")
         self._status = "not_installed"
         return True
+
+
+class FakeBackend:
+    def __init__(self):
+        self.stop_calls = 0
+
+    def stop(self):
+        self.stop_calls += 1
 
 
 class LocalASRProductControllerTests(unittest.TestCase):
@@ -65,7 +84,13 @@ class LocalASRProductControllerTests(unittest.TestCase):
         controller = LocalASRProductController(installer, listener=states.append)
 
         self.assertEqual(installer.install_calls, 0)
-        self.assertEqual(controller.state.status, "not_installed")
+        self.assertEqual(installer.status_calls, 0)
+        self.assertEqual(controller.state.status, "checking")
+        controller.refresh_async()
+        self.wait_for(
+            lambda: controller.state.status == "not_installed"
+            and not controller.busy)
+        self.assertEqual(installer.status_calls, 1)
         controller.install_async()
         self.wait_for(lambda: installer.install_calls == 1)
         self.assertEqual(controller.state.status, "installing")
@@ -87,10 +112,25 @@ class LocalASRProductControllerTests(unittest.TestCase):
     def test_remove_is_explicit_and_reports_not_installed(self):
         installer = FakeInstaller()
         installer._status = "installed"
-        controller = LocalASRProductController(installer)
+        backend = FakeBackend()
+        controller = LocalASRProductController(installer, backend=backend)
         controller.remove_async()
         self.wait_for(lambda: controller.state.status == "not_installed")
         self.assertEqual(installer.remove_calls, 1)
+        self.assertEqual(backend.stop_calls, 1)
+
+    def test_remove_cancellation_reaches_installer(self):
+        installer = FakeInstaller()
+        installer._status = "installed"
+        installer.block_remove = True
+        controller = LocalASRProductController(
+            installer, backend=FakeBackend())
+        controller.remove_async()
+        self.wait_for(lambda: installer.remove_started.is_set())
+        controller.cancel()
+        self.wait_for(lambda: controller.state.status == "cancelled")
+        self.assertTrue(installer.remove_cancel_seen.is_set())
+        self.assertFalse(controller.busy)
 
     def test_requirement_summary_is_human_readable(self):
         summary = format_requirements({

@@ -765,6 +765,54 @@ class LocalASRInstaller:
             "Cannot roll back the invalid local-ASR installation; "
             "retry removal.")
 
+    @staticmethod
+    def _raise_remove_cancelled(cancel_event: threading.Event | None) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise LocalASRCancelledError("Local ASR removal was cancelled")
+
+    @classmethod
+    def _remove_tree(
+        cls,
+        path: Path,
+        cancel_event: threading.Event | None,
+        *,
+        preserve_marker: bool = False,
+    ) -> None:
+        """Delete an owned tree while observing the user's cancel request.
+
+        ``shutil.rmtree`` is retained for internal rollback and the legacy
+        non-cancellable API.  Explicit product removal uses this bounded walk
+        so cancellation is checked between every asset and before the final
+        ownership marker is removed.  Leaving the marker in place on a
+        cancelled partial removal keeps a retry safe and recoverable.
+        """
+
+        cls._raise_remove_cancelled(cancel_event)
+        try:
+            if path.is_symlink() or not path.is_dir():
+                path.unlink(missing_ok=True)
+                return
+            with os.scandir(path) as entries:
+                children = tuple(entries)
+            for entry in children:
+                cls._raise_remove_cancelled(cancel_event)
+                child = Path(entry.path)
+                if preserve_marker and entry.name == ROOT_MARKER:
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    cls._remove_tree(child, cancel_event)
+                else:
+                    child.unlink(missing_ok=True)
+            cls._raise_remove_cancelled(cancel_event)
+            if preserve_marker:
+                marker = path / ROOT_MARKER
+                marker.unlink(missing_ok=True)
+            path.rmdir()
+        except LocalASRCancelledError:
+            raise
+        except FileNotFoundError:
+            return
+
     def install(
         self,
         callback: ProgressCallback | None = None,
@@ -863,16 +911,23 @@ class LocalASRInstaller:
                 shutil.rmtree(staging, ignore_errors=True)
                 raise
 
-    def remove(self) -> bool:
+    def remove(self, cancel_event: threading.Event | None = None) -> bool:
+        self._raise_remove_cancelled(cancel_event)
         lock = self._acquire_install_lock()
         with lock:
             if not self.root.exists():
                 return False
             self._assert_owned_root()
+            self._raise_remove_cancelled(cancel_event)
             try:
                 cleanup_recorded_sidecar(
                     self.process_record_path, self.executable_path, self.root)
-                shutil.rmtree(self.root)
+                self._raise_remove_cancelled(cancel_event)
+                if cancel_event is None:
+                    shutil.rmtree(self.root)
+                else:
+                    self._remove_tree(
+                        self.root, cancel_event, preserve_marker=True)
                 if self.root.exists():
                     raise LocalASRError(
                         "Cannot remove local-ASR assets completely; retry removal.")

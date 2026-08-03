@@ -282,22 +282,26 @@ def _estimated_text_cost(provider: str, model: str, input_chars: int,
     return ((input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000, True)
 
 
-def _recording_usage_context() -> dict:
+def _recording_usage_context(mode: str | None = None) -> dict:
     provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
     try:
         model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
     except ProviderError:
         provider = "gemini"
         model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
+    effective_mode = str(mode if mode is not None else APP_CONFIG.get(
+        "ui_mode", "prompt"))
     context = {
         "provider": provider,
         "model": model,
-        "mode": str(APP_CONFIG.get("ui_mode", "prompt")),
+        "mode": effective_mode,
         "refinement_provider": "",
         "refinement_model": "",
     }
     if (context["mode"] == "prompt" and not PROVIDER_REGISTRY.supports(
-            provider, ProviderCapability.MULTIMODAL_AUDIO)):
+            provider, ProviderCapability.MULTIMODAL_AUDIO)
+            and (provider != LOCAL_ASR_PROVIDER_ID
+                 or bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))):
         context["refinement_provider"] = str(APP_CONFIG.get(
             "refinement_provider", ""))
         context["refinement_model"] = str(APP_CONFIG.get(
@@ -3519,9 +3523,7 @@ class AppWorkflowClipboard:
 class AppWorkflowConfig:
     @staticmethod
     def recording_usage_context(mode):
-        context = _recording_usage_context()
-        context["mode"] = mode
-        return context
+        return _recording_usage_context(mode)
 
 
 class AppWorkflowStatistics:
@@ -4541,7 +4543,7 @@ class App(ctk.CTk):
         local_backend = getattr(local_adapter, "backend", None)
         local_installer = getattr(local_backend, "installer", None)
         self._local_asr_product = LocalASRProductController(
-            installer=local_installer)
+            installer=local_installer, backend=local_backend)
         self.app_state = "ready"
         self.mode = str(APP_CONFIG.get("ui_mode", "prompt"))
         self.lang = str(APP_CONFIG.get("ui_language", "en"))
@@ -4598,6 +4600,10 @@ class App(ctk.CTk):
             AppWorkflowScheduler(self),
         )
         self._workflow_service.subscribe(self._on_workflow_state)
+        # Installed local-ASR verification hashes the published model and
+        # runtime. Keep that disk work off the Tk/startup thread; settings
+        # receives a checking state and then the verified result.
+        self._local_asr_product.refresh_async()
         self.bind("<Escape>", self._on_escape)
         if not IS_WIN and keyboard is not None:
             keyboard.add_hotkey("alt+l", self._recording_hotkey)
@@ -6182,8 +6188,7 @@ class App(ctk.CTk):
         self._recording_session = session
         self._recorder_start_finished = session.start_finished
         self._rec_start = session.started_at
-        self._recording_usage = _recording_usage_context()
-        self._recording_usage["mode"] = self.mode
+        self._recording_usage = _recording_usage_context(self.mode)
         session.usage_context = self._recording_usage
         self._set_state("recording")
         def start():
@@ -7521,6 +7526,8 @@ class App(ctk.CTk):
                 return "Downloading…", "#b9a66b"
             if provider == LOCAL_ASR_PROVIDER_ID and status == "removing":
                 return "Removing…", "#b9a66b"
+            if provider == LOCAL_ASR_PROVIDER_ID and status == "checking":
+                return "Checking…", "#b9a66b"
             if provider == LOCAL_ASR_PROVIDER_ID and status == "cancelled":
                 return "Cancelled", "#d3a46f"
             if provider == LOCAL_ASR_PROVIDER_ID and status == "error":
@@ -8027,12 +8034,15 @@ class App(ctk.CTk):
             if provider == LOCAL_ASR_PROVIDER_ID:
                 widgets = local_detail_widgets.get(provider)
                 if widgets is not None:
-                    busy = state[provider]["status"] in ("installing", "removing")
+                    busy = state[provider]["status"] in (
+                        "checking", "installing", "removing")
+                    cancellable = state[provider]["status"] in (
+                        "installing", "removing")
                     installed = state[provider]["status"] == "active"
                     widgets["install"].configure(
                         state="disabled" if busy or installed else "normal")
                     widgets["cancel"].configure(
-                        state="normal" if busy else "disabled")
+                        state="normal" if cancellable else "disabled")
                     widgets["remove"].configure(
                         state="normal" if installed and not busy else "disabled")
                 if provider in detail_status_labels:
@@ -8231,17 +8241,22 @@ class App(ctk.CTk):
                     message.configure(text=product_state.detail or "")
                     progress.configure(
                         mode="indeterminate"
-                        if product_state.status in ("installing", "removing")
+                        if product_state.status in (
+                            "checking", "installing", "removing")
                         else "determinate")
-                    if product_state.status in ("installing", "removing"):
+                    if product_state.status in (
+                            "checking", "installing", "removing"):
                         progress.start()
                     else:
                         progress.stop()
                         progress.set(product_state.fraction)
-                    busy = product_state.status in ("installing", "removing")
+                    busy = product_state.status in (
+                        "checking", "installing", "removing")
+                    cancellable = product_state.status in ("installing", "removing")
                     install_button.configure(
                         state="disabled" if busy or status_value == "active" else "normal")
-                    cancel_button.configure(state="normal" if busy else "disabled")
+                    cancel_button.configure(
+                        state="normal" if cancellable else "disabled")
                     remove_button.configure(
                         state="disabled" if busy or status_value != "active" else "normal")
                     refresh_provider_ui(provider)
