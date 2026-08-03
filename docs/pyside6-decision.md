@@ -16,18 +16,22 @@ The fake workflow covers the idle surface, recording/processing/success pill, re
 
 ## Evidence protocol
 
-The comparable-build protocol is `spikes/pyside6/package.ps1`; it installs the
-locked Windows runtime requirements plus the optional spike dependency into one
-disposable environment, then packages the current CustomTkinter entry point and
-the PySide6 prototype as separate one-file windowed executables with identical
-PyInstaller switches. The script writes `build-environment.txt` and
+The comparable-build protocol is `spikes/pyside6/package.ps1`; it first refuses
+a dirty or untracked repository tree, then installs the locked Windows runtime
+requirements plus the optional spike dependency into one disposable
+environment. It packages the current CustomTkinter entry point and the PySide6
+prototype as separate one-file windowed executables with identical PyInstaller
+switches. The script writes `build-environment.txt` and
 `artifacts-manifest.json` containing the commit, dependency-file hashes, tool
 versions, package sizes, and SHA-256 hashes. This makes a later CSV row
 auditable against the exact binaries that were measured. The manifest is
 evidence metadata only; it is not a release attestation.
 
-`spikes/pyside6/benchmark.ps1` measures one target per invocation and records
-its Windows boot identifier plus a stable, non-reversible `HostId`: the
+`spikes/pyside6/benchmark.ps1` requires that manifest, verifies the selected
+executable hash against its target entry before launching, and records the
+executable SHA-256, expected manifest artifact SHA-256, and manifest SHA-256 in
+every measurement row. It then records its Windows boot identifier plus a
+stable, non-reversible `HostId`: the
 lowercase `sha256:` plus 64-hex-character SHA-256 digest of the Windows
 registry `MachineGuid` (the raw identifier is never written).
 `spikes/pyside6/aggregate.ps1` rejects failed launches or invalid metrics before
@@ -37,8 +41,10 @@ counting them, rejects malformed or ambiguous boot IDs/host IDs, rejects
 mixed-host input, excludes its own output on reruns, rejects fewer than three
 independent post-reboot rounds per target, and reports medians for cold-start
 observations, working set/private memory, process count, thread count, and
-package size. A failed launch is never silently converted into a zero or
-discarded as an outlier.
+package size. When artifact hash columns are present, it validates all three
+SHA-256 fields together and rejects malformed or partially edited rows. A
+failed launch is never silently converted into a zero or discarded as an
+outlier.
 
 The protocol intentionally has no fixed target order: run only one target after
 each reboot, alternate which target is first across at least three rounds, and

@@ -20,6 +20,7 @@ SHA-256 digest intended only to prove that both targets used the same machine.
 | Antivirus/Defender state | |
 | HostId from CSV rows | |
 | Artifact manifest SHA-256 | |
+| Source tree status | clean (required) |
 | Operator/date | |
 
 The same physical Windows 10/11 machine must be used for every row. Record
@@ -38,15 +39,20 @@ powershell -ExecutionPolicy Bypass -File spikes\pyside6\package.ps1
 powershell -ExecutionPolicy Bypass -File spikes\pyside6\benchmark.ps1 `
   -Target CustomTkinter `
   -Executable spikes\pyside6\artifacts\customtkinter\ClarifyVoice-customtkinter.exe `
+  -ArtifactManifest spikes\pyside6\artifacts\artifacts-manifest.json `
   -RunId round-1-ctk -Round 1 -OutputCsv measurements\round-1-ctk.csv
 
 # Round 2: PySide6 first, then reboot before CustomTkinter.
 powershell -ExecutionPolicy Bypass -File spikes\pyside6\benchmark.ps1 `
   -Target PySide6 `
   -Executable spikes\pyside6\artifacts\pyside6\ClarifyVoice-pyside6.exe `
+  -ArtifactManifest spikes\pyside6\artifacts\artifacts-manifest.json `
   -RunId round-2-qt -Round 2 -OutputCsv measurements\round-2-qt.csv
 ```
 
+Each row includes the executable SHA-256, the expected manifest artifact
+SHA-256, and the manifest SHA-256. `benchmark.ps1` verifies these values before
+launching, so replacing either the executable or the manifest fails closed.
 Repeat until every target has at least three distinct `BootId` values and
 three distinct logical `Round` values. Attach the individual CSV files and
 the generated `artifacts-manifest.json`, then run:
@@ -101,6 +107,8 @@ missing access rather than claiming a pass.
       explicitly recorded as pending.
 - [ ] The artifact/environment manifest is attached and matches the tested
       commit.
+- [ ] `package.ps1` was run from a clean tree and every CSV row contains the
+      executable, expected manifest-artifact, and manifest SHA-256 values.
 - [ ] Licensing/redistribution review is recorded in `docs/pyside6-decision.md`.
 
 The source recommendation remains **defer** until this record is complete. A

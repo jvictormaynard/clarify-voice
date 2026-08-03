@@ -75,6 +75,15 @@ function ConvertTo-CanonicalHostId {
     return $Value.ToLowerInvariant()
 }
 
+function ConvertTo-CanonicalSha256 {
+    param([string]$Value, [string]$Metric, [string]$Path)
+
+    if ($Value -cnotmatch "^[0-9a-fA-F]{64}$") {
+        throw "Rejected invalid SHA-256 $Metric in $Path."
+    }
+    return $Value.ToLowerInvariant()
+}
+
 function ConvertTo-ValidMeasurement {
     param([object]$Row, [string]$Path)
 
@@ -92,6 +101,21 @@ function ConvertTo-ValidMeasurement {
     }
     $Row.BootId = ConvertTo-CanonicalBootId ([string]$Row.BootId) $Path
     $Row.HostId = ConvertTo-CanonicalHostId ([string]$Row.HostId) $Path
+    $hashProperties = @(
+        "ExecutableSHA256",
+        "ArtifactManifestSHA256",
+        "ManifestArtifactSHA256"
+    )
+    $presentHashes = @($hashProperties | Where-Object {
+        $Row.PSObject.Properties.Name -contains $_ -and
+        -not [string]::IsNullOrWhiteSpace([string]$Row.$_)
+    })
+    if ($presentHashes.Count -gt 0 -and $presentHashes.Count -ne $hashProperties.Count) {
+        throw "Measurement in $Path must include all artifact hash fields together."
+    }
+    foreach ($hashProperty in $presentHashes) {
+        $Row.$hashProperty = ConvertTo-CanonicalSha256 ([string]$Row.$hashProperty) $hashProperty $Path
+    }
     $round = 0
     $integerStyle = [System.Globalization.NumberStyles]::Integer
     $invariant = [System.Globalization.CultureInfo]::InvariantCulture

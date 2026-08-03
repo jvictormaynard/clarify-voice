@@ -48,6 +48,11 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("WindowProcessId", source)
         self.assertIn("finally", source)
         self.assertIn("$process.HasExited", source)
+        self.assertIn("ArtifactManifest", source)
+        self.assertIn("ExecutableSHA256", source)
+        self.assertIn("ManifestArtifactSHA256", source)
+        self.assertIn("ConvertFrom-Json", source)
+        self.assertIn("Executable hash does not match the artifact manifest", source)
 
     def test_measurement_protocol_has_no_fixed_target_order(self):
         benchmark = (SPIKE / "benchmark.ps1").read_text(encoding="utf-8")
@@ -75,6 +80,9 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("MainWindowSeen is not true", aggregate)
         self.assertIn("ConvertTo-PositiveInteger", aggregate)
         self.assertIn("ConvertTo-CanonicalBootId", aggregate)
+        self.assertIn("ConvertTo-CanonicalSha256", aggregate)
+        self.assertIn("ExecutableSHA256", aggregate)
+        self.assertIn("all artifact hash fields together", aggregate)
         self.assertIn("$Row.BootId = ConvertTo-CanonicalBootId", aggregate)
         self.assertIn("$Value -cnotmatch $pattern", aggregate)
         self.assertIn('$zone -ceq "Z"', aggregate)
@@ -230,6 +238,8 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("build-environment.txt", package)
         self.assertIn("artifacts-manifest.json", package)
         self.assertIn("Get-FileHash", package)
+        self.assertIn("status --porcelain --untracked-files=all", package)
+        self.assertIn("Refusing to package a dirty working tree", package)
 
     def test_production_requirements_do_not_gain_optional_qt_dependency(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")

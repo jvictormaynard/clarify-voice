@@ -13,6 +13,19 @@ Set-StrictMode -Version Latest
 $spikeRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path (Join-Path $spikeRoot "../..")).Path
 
+$gitStatus = @(& git -C $repoRoot status --porcelain --untracked-files=all)
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not inspect the repository working tree before packaging."
+}
+$dirtyEntries = @($gitStatus | Where-Object {
+    -not [string]::IsNullOrWhiteSpace([string]$_)
+})
+if ($dirtyEntries.Count -gt 0) {
+    $preview = ($dirtyEntries | Select-Object -First 8) -join "; "
+    if ($dirtyEntries.Count -gt 8) { $preview += "; ..." }
+    throw "Refusing to package a dirty working tree. Commit or stash source changes first: $preview"
+}
+
 function Resolve-RepoPath {
     param([string]$Path)
     $candidate = if ([System.IO.Path]::IsPathRooted($Path)) {

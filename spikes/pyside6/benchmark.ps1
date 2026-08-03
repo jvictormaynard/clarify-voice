@@ -4,6 +4,7 @@ param(
     [ValidateSet("CustomTkinter", "PySide6")]
     [string]$Target,
     [Parameter(Mandatory = $true)] [string]$Executable,
+    [Parameter(Mandatory = $true)] [string]$ArtifactManifest,
     [Parameter(Mandatory = $true)] [string]$RunId,
     [Parameter(Mandatory = $true)] [ValidateRange(1, 10)] [int]$Round,
     [string]$OutputCsv = "measurements-windows.csv"
@@ -73,11 +74,51 @@ function Get-HostId {
     }
 }
 
-function Measure-Executable {
+function Get-Sha256 {
     param([string]$Path)
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Read-ManifestArtifact {
+    param([string]$ManifestPath, [string]$Target, [string]$ExecutablePath)
+
+    if (-not (Test-Path -LiteralPath $ManifestPath)) {
+        throw "Missing artifact manifest: $ManifestPath"
+    }
+    $resolvedManifest = (Resolve-Path -LiteralPath $ManifestPath).Path
+    try {
+        $manifest = Get-Content -Raw -LiteralPath $resolvedManifest | ConvertFrom-Json
+    } catch {
+        throw "Could not parse artifact manifest: $resolvedManifest"
+    }
+    $matches = @($manifest.Artifacts | Where-Object { [string]$_.Target -ceq $Target })
+    if ($matches.Count -ne 1) {
+        throw "Artifact manifest must contain exactly one $Target artifact."
+    }
+    $expected = ([string]$matches[0].SHA256).ToLowerInvariant()
+    if ($expected -cnotmatch "^[0-9a-f]{64}$") {
+        throw "Artifact manifest contains an invalid SHA-256 for $Target."
+    }
+    $actual = Get-Sha256 $ExecutablePath
+    if ($actual -cne $expected) {
+        throw "Executable hash does not match the artifact manifest for $Target."
+    }
+    return [pscustomobject]@{
+        Path = $resolvedManifest
+        ManifestSHA256 = Get-Sha256 $resolvedManifest
+        ExpectedSHA256 = $expected
+    }
+}
+
+function Measure-Executable {
+    param([string]$Path, [object]$ManifestArtifact)
     if (-not (Test-Path $Path)) { throw "Missing executable: $Path" }
     $resolved = (Resolve-Path $Path).Path
     $sizeMb = [math]::Round((Get-Item $resolved).Length / 1MB, 2)
+    $executableSha256 = Get-Sha256 $resolved
+    if ($executableSha256 -cne [string]$ManifestArtifact.ExpectedSHA256) {
+        throw "Executable changed after manifest validation; refusing to launch."
+    }
     $process = $null
     try {
         $watch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -107,6 +148,9 @@ function Measure-Executable {
             BootId = Get-BootId
             HostId = Get-HostId
             Executable = $resolved
+            ExecutableSHA256 = $executableSha256
+            ArtifactManifestSHA256 = $ManifestArtifact.ManifestSHA256
+            ManifestArtifactSHA256 = $ManifestArtifact.ExpectedSHA256
             ColdStartMs = $coldStartMs
             MainWindowSeen = $mainWindowSeen
             WindowProcessId = $windowProcessId
@@ -129,7 +173,8 @@ function Measure-Executable {
     }
 }
 
-$result = Measure-Executable $Executable
+$manifestArtifact = Read-ManifestArtifact $ArtifactManifest $Target $Executable
+$result = Measure-Executable $Executable $manifestArtifact
 $destination = if ([System.IO.Path]::IsPathRooted($OutputCsv)) { $OutputCsv } else { Join-Path (Get-Location) $OutputCsv }
 $parent = Split-Path -Parent $destination
 if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
