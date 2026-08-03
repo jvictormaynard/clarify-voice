@@ -156,11 +156,15 @@ class LocalASRProductControllerTests(unittest.TestCase):
     def test_requirement_summary_is_human_readable(self):
         summary = format_requirements({
             "platform": "Windows x64",
+            "compute": "CPU-only; AVX support",
+            "runtime": "Microsoft Visual C++ 2015-2022 Redistributable (x64)",
             "memory_bytes": 852_000_000,
             "disk_bytes": 510_000_000,
             "download_bytes": 495_584_068,
         })
         self.assertIn("Windows x64", summary)
+        self.assertIn("AVX support", summary)
+        self.assertIn("Visual C++", summary)
         self.assertIn("MiB", summary)
         self.assertIn("download", summary)
 

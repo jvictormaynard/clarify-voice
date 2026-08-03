@@ -7,9 +7,10 @@ in-memory audio snapshot. The app registers the local provider at startup but
 does not download assets or start a process. Users must open Settings →
 Providers → Local Whisper and explicitly choose **Download local ASR**.
 
-The install view displays platform, memory, disk, and download requirements,
-streams byte progress, verifies every digest before extraction, and exposes
-cancel/retry/remove actions. Failed operations retain an actionable message;
+The install view displays platform, CPU/compute, runtime, memory, disk, and
+download requirements, streams byte progress, verifies every digest before
+extraction, and exposes cancel/retry/remove actions. Failed operations retain
+an actionable message;
 they never switch to a cloud provider. The sidecar and model live outside the
 one-file app and can be removed from the same view.
 

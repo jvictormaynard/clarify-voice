@@ -330,10 +330,26 @@ def format_requirement_bytes(value: int) -> str:
 
 
 def format_requirements(requirements: dict | None) -> str:
+    """Render every manifest prerequisite shown before an install begins.
+
+    ``compute`` and ``runtime`` are deliberately included alongside the byte
+    budgets.  They describe prerequisites that cannot be inferred from a
+    download size and let a user decide whether the published sidecar can run
+    before authorizing the network request.
+    """
     values = requirements or {}
-    return (
-        f"{values.get('platform', 'Windows x64')} · "
-        f"{format_requirement_bytes(values.get('memory_bytes', 0))} RAM · "
-        f"{format_requirement_bytes(values.get('disk_bytes', 0))} free disk · "
-        f"{format_requirement_bytes(values.get('download_bytes', 0))} download"
-    )
+    lines = [
+        f"Platform: {values.get('platform', 'Windows x64')}",
+    ]
+    compute = str(values.get("compute", "")).strip()
+    if compute:
+        lines.append(f"CPU: {compute}")
+    runtime = str(values.get("runtime", "")).strip()
+    if runtime:
+        lines.append(f"Runtime: {runtime}")
+    lines.extend((
+        f"Memory: {format_requirement_bytes(values.get('memory_bytes', 0))} RAM",
+        f"Disk: {format_requirement_bytes(values.get('disk_bytes', 0))} free disk",
+        f"Download: {format_requirement_bytes(values.get('download_bytes', 0))} download",
+    ))
+    return "\n".join(lines)
