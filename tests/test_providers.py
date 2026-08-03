@@ -816,6 +816,20 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(config["ui_mode"], "transcription")
         self.assertEqual(config["ui_language"], "pt")
 
+    def test_local_asr_onboarding_waits_for_async_verification(self):
+        config = {
+            "transcription_provider": "local_asr",
+            "local_asr_api_key": "",
+        }
+        product = SimpleNamespace(
+            state=SimpleNamespace(status="checking"))
+
+        self.assertIsNone(app._settings_onboarding_decision(config, product))
+        product.state.status = "installed"
+        self.assertFalse(app._settings_onboarding_decision(config, product))
+        product.state.status = "not_installed"
+        self.assertTrue(app._settings_onboarding_decision(config, product))
+
     def test_all_supported_interface_languages_are_accepted(self):
         for language in app.SUPPORTED_LANGUAGES:
             with self.subTest(language=language), tempfile.TemporaryDirectory() as directory:

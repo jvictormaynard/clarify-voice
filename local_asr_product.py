@@ -218,6 +218,9 @@ class LocalASRProductController:
                 if cancel_event.is_set():
                     raise LocalASRCancelledError("Local ASR removal was cancelled")
                 backend = self.backend
+                cancel_backend = getattr(backend, "cancel", None)
+                if callable(cancel_backend):
+                    cancel_backend()
                 stop = getattr(backend, "stop", None)
                 if callable(stop):
                     stop()

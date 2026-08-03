@@ -1,6 +1,7 @@
 """ClarifyVoice – voice transcription with Gemini, OpenAI, or Groq."""
 
 import argparse
+from collections.abc import Mapping
 import json
 import math
 import ntpath
@@ -8734,6 +8735,18 @@ def _run_cli(argv: list[str]) -> int:
     return 0
 
 
+def _settings_onboarding_decision(config: Mapping[str, object], product) -> bool | None:
+    """Return whether startup should open Settings, or wait for local verify."""
+    provider = str(config.get("transcription_provider", "gemini"))
+    if provider == LOCAL_ASR_PROVIDER_ID:
+        status = getattr(getattr(product, "state", None), "status", "")
+        if status == "checking":
+            return None
+        if status == "installed":
+            return False
+    return not str(config.get(f"{provider}_api_key", "")).strip()
+
+
 if __name__ == "__main__":
     start_hidden = sys.argv[1:] == ["--hidden"]
     if len(sys.argv) > 1 and not start_hidden:
@@ -8747,12 +8760,16 @@ if __name__ == "__main__":
     app._single_instance_guard = instance_guard
     instance_guard.start_activation_listener(
         lambda: app.after(0, app._show_if_hidden))
-    selected_key = APP_CONFIG.get(
-        f"{APP_CONFIG.get('transcription_provider', 'gemini')}_api_key", "")
-    local_ready = (
-        APP_CONFIG.get("transcription_provider") == LOCAL_ASR_PROVIDER_ID
-        and getattr(app, "_local_asr_product", None) is not None
-        and app._local_asr_product.state.status == "installed")
-    if not start_hidden and not str(selected_key).strip() and not local_ready:
-        app.after(300, app._open_settings)
+    if not start_hidden:
+        def open_settings_if_needed():
+            if getattr(app, "_closing", False):
+                return
+            decision = _settings_onboarding_decision(
+                APP_CONFIG, getattr(app, "_local_asr_product", None))
+            if decision is None:
+                app.after(100, open_settings_if_needed)
+            elif decision:
+                app._open_settings()
+
+        app.after(300, open_settings_if_needed)
     app.mainloop()

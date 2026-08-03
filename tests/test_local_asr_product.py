@@ -63,10 +63,17 @@ class FakeInstaller:
 
 class FakeBackend:
     def __init__(self):
+        self.events = []
         self.stop_calls = 0
+        self.cancel_calls = 0
+
+    def cancel(self):
+        self.cancel_calls += 1
+        self.events.append("cancel")
 
     def stop(self):
         self.stop_calls += 1
+        self.events.append("stop")
 
 
 class LocalASRProductControllerTests(unittest.TestCase):
@@ -118,6 +125,7 @@ class LocalASRProductControllerTests(unittest.TestCase):
         self.wait_for(lambda: controller.state.status == "not_installed")
         self.assertEqual(installer.remove_calls, 1)
         self.assertEqual(backend.stop_calls, 1)
+        self.assertEqual(backend.events, ["cancel", "stop"])
 
     def test_remove_cancellation_reaches_installer(self):
         installer = FakeInstaller()
