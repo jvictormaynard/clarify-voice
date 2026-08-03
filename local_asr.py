@@ -506,9 +506,9 @@ class LocalASRInstaller:
                     f"Integrity check failed for {path.name}. Remove and reinstall Local ASR.")
         return self.install_dir
 
-    def status(self) -> dict:
+    def status(self, cancel_check: Callable[[], bool] | None = None) -> dict:
         try:
-            self.verify()
+            self.verify(cancel_check=cancel_check)
         except LocalASRInstallRequiredError as error:
             state = "not_installed"
             detail = str(error)
@@ -770,6 +770,11 @@ class LocalASRInstaller:
         if cancel_event is not None and cancel_event.is_set():
             raise LocalASRCancelledError("Local ASR removal was cancelled")
 
+    @staticmethod
+    def _raise_install_cancelled(cancel_event: threading.Event | None) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise LocalASRCancelledError("Local ASR installation was cancelled")
+
     @classmethod
     def _remove_tree(
         cls,
@@ -894,7 +899,10 @@ class LocalASRInstaller:
                         "Cannot publish local-ASR installation; "
                         "retry the install.") from error
                 try:
-                    result = self.status()
+                    self._raise_install_cancelled(cancel_event)
+                    result = (self.status(cancel_check=cancel_event.is_set)
+                              if cancel_event is not None else self.status())
+                    self._raise_install_cancelled(cancel_event)
                     if result["state"] != "installed":
                         raise LocalASRIntegrityError(result["detail"])
                 except LocalASRError as error:

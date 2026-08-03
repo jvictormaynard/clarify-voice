@@ -488,6 +488,30 @@ class LocalASRInstallerTests(unittest.TestCase):
             self.assertFalse(installer.executable_path.exists())
             self.assertFalse(list(fixture.root.glob(".install-*")))
 
+    def test_install_cancellation_reaches_post_publish_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(directory)
+            installer, _session = fixture.installer()
+            cancel_event = threading.Event()
+            original_sha256 = local_asr._sha256
+
+            def cancel_when_published_model_is_hashed(
+                    path, *args, cancel_check=None, **kwargs):
+                if Path(path) == installer.model_path:
+                    cancel_event.set()
+                return original_sha256(
+                    path, *args, cancel_check=cancel_check, **kwargs)
+
+            with patch.object(
+                    local_asr, "_sha256",
+                    side_effect=cancel_when_published_model_is_hashed):
+                with self.assertRaises(local_asr.LocalASRCancelledError):
+                    installer.install(cancel_event=cancel_event)
+
+            self.assertFalse(installer.install_dir.exists())
+            self.assertFalse(installer.executable_path.exists())
+            self.assertFalse(installer.model_path.exists())
+
     def test_install_reports_typed_post_publish_rollback_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = InstallerFixture(directory)

@@ -714,6 +714,38 @@ def _apply_selected_models(selected, selected_refinement, audio_options,
         APP_CONFIG["refinement_model"] = selected_refinement["model"]
 
 
+def _persist_cloud_selection_before_local_removal(
+        selected: Mapping[str, object], active_options, model_keys,
+        repositories=None) -> bool:
+    """Persist a valid cloud route before deleting the local-ASR assets.
+
+    Settings keeps model picks in a draft while the window is open.  Removing
+    the local installation is different: if the persisted route still points
+    at ``local_asr``, the next recording would select files that no longer
+    exist when the user closes Settings without pressing Apply.  Only an
+    active, non-local choice may cross this boundary, and a failed save must
+    leave the in-memory configuration untouched.
+    """
+    provider = str(selected.get("provider", "")).strip().lower()
+    model = str(selected.get("model", "")).strip()
+    if (not provider or provider == LOCAL_ASR_PROVIDER_ID
+            or (provider, model) not in tuple(active_options)):
+        return False
+    model_key = model_keys.get(provider)
+    if not model_key:
+        return False
+    previous_config = APP_CONFIG.copy()
+    APP_CONFIG["transcription_provider"] = provider
+    APP_CONFIG[model_key] = _canonical_audio_model(provider, model)
+    try:
+        _save_app_config(repositories)
+    except OSError:
+        APP_CONFIG.clear()
+        APP_CONFIG.update(previous_config)
+        return False
+    return True
+
+
 def _apply_settings_transaction(
         selected, selected_refinement, audio_options, text_options, model_keys,
         autostart_enabled, repositories=None, registry=None):
@@ -8285,7 +8317,21 @@ class App(ctk.CTk):
                         local_product.cancel()
 
                 def remove_local():
-                    if selected["provider"] == provider:
+                    persisted_provider = str(APP_CONFIG.get(
+                        "transcription_provider", "gemini")).strip().lower()
+                    if persisted_provider == provider:
+                        if not _persist_cloud_selection_before_local_removal(
+                                selected, active_options(), model_keys,
+                                self.repositories):
+                            message.configure(
+                                text=("Select an active cloud provider before removing "
+                                      "the local assets, then try again."))
+                            return
+                        # The cloud route is now durable even if the user
+                        # closes Settings without pressing Apply.
+                        saved_settings["transcription"] = (
+                            selected["provider"], selected["model"])
+                    elif selected["provider"] == provider:
                         message.configure(
                             text=("Select a cloud provider explicitly before removing "
                                   "the active local provider."))
@@ -8653,6 +8699,18 @@ def _run_secret_store_self_test(result_file: str | None = None) -> int:
     return 0
 
 
+def _shutdown_cli_transcription_provider(provider: str) -> None:
+    """Release a local sidecar without changing the CLI result code."""
+    if str(provider).strip().lower() != LOCAL_ASR_PROVIDER_ID:
+        return
+    try:
+        PROVIDER_REGISTRY.shutdown()
+    except Exception:
+        # A transcription result or typed provider error is more useful than
+        # masking it with best-effort process cleanup during CLI teardown.
+        pass
+
+
 def _run_cli(argv: list[str]) -> int:
     parser = _build_cli_parser()
     args = parser.parse_args(argv)
@@ -8665,12 +8723,14 @@ def _run_cli(argv: list[str]) -> int:
         return 0
 
     if args.command == "headless-transcribe-stdin":
+        provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
         raw_audio = sys.stdin.buffer.read()
         if not raw_audio:
             print(json.dumps({
                 "ok": False,
                 "error": "no_audio_stdin",
             }, ensure_ascii=False))
+            _shutdown_cli_transcription_provider(provider)
             return 1
 
         temp_path = DATA_DIR / f"headless_stdin_{int(time.time() * 1000)}.wav"
@@ -8687,6 +8747,7 @@ def _run_cli(argv: list[str]) -> int:
                 temp_path.unlink(missing_ok=True)
             except Exception:
                 pass
+            _shutdown_cli_transcription_provider(provider)
 
         if text.startswith("[Error"):
             print(json.dumps({
@@ -8714,7 +8775,11 @@ def _run_cli(argv: list[str]) -> int:
         }, ensure_ascii=False))
         return 1
 
-    text = call_transcription_provider(audio_path, args.mode, args.lang)
+    provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
+    try:
+        text = call_transcription_provider(audio_path, args.mode, args.lang)
+    finally:
+        _shutdown_cli_transcription_provider(provider)
     if text.startswith("[Error"):
         print(json.dumps({
             "ok": False,

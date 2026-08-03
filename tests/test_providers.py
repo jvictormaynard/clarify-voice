@@ -1,3 +1,4 @@
+import io
 import json
 import inspect
 import os
@@ -829,6 +830,65 @@ class ProviderTests(unittest.TestCase):
         self.assertFalse(app._settings_onboarding_decision(config, product))
         product.state.status = "not_installed"
         self.assertTrue(app._settings_onboarding_decision(config, product))
+
+    @patch("app._save_app_config")
+    def test_local_removal_persists_valid_cloud_route(self, save):
+        app.APP_CONFIG["transcription_provider"] = "local_asr"
+        selected = {"provider": "openai", "model": "whisper-1"}
+        repositories = object()
+
+        self.assertTrue(app._persist_cloud_selection_before_local_removal(
+            selected,
+            [("openai", "whisper-1")],
+            {"openai": "openai_audio_model"},
+            repositories,
+        ))
+        self.assertEqual(app.APP_CONFIG["transcription_provider"], "openai")
+        self.assertEqual(app.APP_CONFIG["openai_audio_model"], "whisper-1")
+        save.assert_called_once_with(repositories)
+
+    @patch("app._save_app_config", side_effect=OSError("config unavailable"))
+    def test_local_removal_cloud_route_save_failure_rolls_back(self, save):
+        app.APP_CONFIG["transcription_provider"] = "local_asr"
+        previous = app.APP_CONFIG.copy()
+
+        self.assertFalse(app._persist_cloud_selection_before_local_removal(
+            {"provider": "openai", "model": "whisper-1"},
+            [("openai", "whisper-1")],
+            {"openai": "openai_audio_model"},
+        ))
+        self.assertEqual(app.APP_CONFIG, previous)
+        save.assert_called_once_with(None)
+
+    @patch("app.PROVIDER_REGISTRY.shutdown", side_effect=RuntimeError("cleanup"))
+    @patch("app.call_transcription_provider", return_value="[Error: local failure]")
+    def test_cli_local_transcription_cleanup_preserves_exit_code(
+            self, transcribe, shutdown):
+        app.APP_CONFIG["transcription_provider"] = "local_asr"
+        with patch.object(app.sys, "stdout", io.StringIO()):
+            result = app._run_cli([
+                "transcribe", "--file", str(self.audio_path),
+            ])
+
+        self.assertEqual(result, 1)
+        transcribe.assert_called_once()
+        shutdown.assert_called_once_with()
+
+    @patch("app.PROVIDER_REGISTRY.shutdown")
+    @patch("app.call_transcription_provider", return_value="local text")
+    def test_headless_local_transcription_shuts_down_registry(
+            self, transcribe, shutdown):
+        app.APP_CONFIG["transcription_provider"] = "local_asr"
+        fake_stdin = type("FakeStdin", (), {
+            "buffer": io.BytesIO(b"pcm16"),
+        })()
+        with patch.object(app.sys, "stdin", fake_stdin), \
+                patch.object(app.sys, "stdout", io.StringIO()):
+            result = app._run_cli(["headless-transcribe-stdin"])
+
+        self.assertEqual(result, 0)
+        transcribe.assert_called_once()
+        shutdown.assert_called_once_with()
 
     def test_all_supported_interface_languages_are_accepted(self):
         for language in app.SUPPORTED_LANGUAGES:
