@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -294,6 +295,26 @@ class HistoryStoreTests(unittest.TestCase):
             )
             persisted = Path(store.path).read_text(encoding="utf-8")
             self.assertNotIn("<redacted>" * 2, persisted)
+
+    def test_unmatched_long_escape_run_does_not_trigger_quadratic_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            diagnostic = "provider diagnostic: " + ("\\" * 6400)
+            started = time.monotonic()
+            store.add(
+                status="error",
+                error=diagnostic,
+                record_id="unmatched-long-escape-run",
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 2.0)
+            self.assertEqual(store.list_records()[0].error, diagnostic)
 
     def test_three_layer_serialized_mapping_redacts_credentials(self):
         with tempfile.TemporaryDirectory() as directory:

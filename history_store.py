@@ -105,11 +105,13 @@ _SENSITIVE_FIELD_PATTERN = re.compile(
 # Keep the escapes intact while replacing the value so the resulting error
 # remains readable and, more importantly, never persists the credential. The
 # backslash runs are intentionally unbounded for nested JSON serialization.
-_SENSITIVE_ESCAPED_FIELD_PREFIX_PATTERN = re.compile(
-    r"(?is)(\\*['\"]?(?:authorization|bearer|api[_ -]?key|access[_ -]?token|"
-    r"client[_ -]?secret|credential|password|secret|token)"
-    r"\\*['\"]?\s*[:=]\s*(?:[a-z]+\s+)?)"
-    r"(\\*['\"])")
+# Search only bounded sensitive names here; the surrounding delimiters and
+# arbitrary escape runs are consumed by the linear scanner below. This avoids
+# retrying an unbounded \\* from every position in an unmatched run.
+_SENSITIVE_FIELD_NAME_PATTERN = re.compile(
+    r"(?i)authorization|bearer|api[_ -]?key|access[_ -]?token|"
+    r"client[_ -]?secret|credential|password|secret|token"
+)
 _SENSITIVE_BEARER_PATTERN = re.compile(r"(?i)(bearer)\s+([^\s,;&]+)")
 _SENSITIVE_QUERY_PATTERN = re.compile(
     r"(?i)([?&](?:api[_-]?key|access[_-]?token|token)=)[^&#\s]+")
@@ -160,28 +162,68 @@ def _escaped_field_value_end(
     return None
 
 
+def _escaped_field_opening(
+    value: str,
+    match: re.Match[str],
+) -> tuple[int, int] | None:
+    """Find an assignment's opening quote after a bounded field-name match."""
+
+    field_name = match.group(0).lower()
+    index = match.end()
+    length = len(value)
+    while index < length and value[index] in "\\'\"\t\r\n ":
+        index += 1
+    if index >= length or value[index] not in ":=":
+        return None
+    index += 1
+    while index < length and value[index].isspace():
+        index += 1
+
+    if field_name in {"authorization", "bearer"}:
+        scheme_start = index
+        while index < length and value[index].isalpha():
+            index += 1
+        if index > scheme_start and index < length and value[index].isspace():
+            while index < length and value[index].isspace():
+                index += 1
+        else:
+            index = scheme_start
+
+    opening_start = index
+    while index < length and value[index] == "\\":
+        index += 1
+    if index >= length or value[index] not in "'\"":
+        return None
+    return opening_start, index + 1
+
+
 def _redact_escaped_fields(value: str) -> str:
     """Redact sensitive values in escaped/doubly serialized mappings.
 
-    Only the bounded key/prefix is matched by regex; the value is consumed by
-    the linear scanner above.  This keeps malformed provider error strings
-    from triggering catastrophic backtracking while preserving the original
-    escaped representation for valid values.
+    The bounded sensitive-name regex advances monotonically. Delimiters and
+    arbitrary escape runs are validated and consumed by the linear scanners,
+    so unmatched backslash runs cannot cause quadratic regex retries.
     """
 
     pieces: list[str] = []
     cursor = 0
     search_at = 0
     while True:
-        match = _SENSITIVE_ESCAPED_FIELD_PREFIX_PATTERN.search(value, search_at)
+        match = _SENSITIVE_FIELD_NAME_PATTERN.search(value, search_at)
         if match is None:
             pieces.append(value[cursor:])
             return "".join(pieces)
 
+        opening = _escaped_field_opening(value, match)
+        if opening is None:
+            search_at = match.end()
+            continue
+        opening_start, opening_end = opening
+        quote = value[opening_start:opening_end]
+        end = _escaped_field_value_end(value, opening_end, quote)
+        prefix = value[match.start():opening_start]
+        replacement = f"{prefix}{quote}<redacted>"
         pieces.append(value[cursor:match.start()])
-        quote = match.group(2)
-        end = _escaped_field_value_end(value, match.end(), quote)
-        replacement = f"{match.group(1)}{quote}<redacted>"
         if end is None:
             # A truncated credential is still sensitive; redact through EOF
             # instead of preserving the untrusted tail or retrying a regex.
