@@ -61,6 +61,7 @@ class HotkeySettingsTests(unittest.TestCase):
         self.assertEqual(settings.definition(HotkeyAction.RECORDING).display, "Alt+L")
         self.assertEqual(settings.definition(HotkeyAction.REWRITE).display, "Alt+K")
         self.assertEqual(settings.activation_mode, ActivationMode.TOGGLE)
+        self.assertNotIn(HotkeyAction.VOICE_TRANSLATION, settings.hotkeys)
 
     def test_flat_pre_release_bindings_are_migrated(self):
         settings = HotkeySettings.from_mapping({
@@ -123,6 +124,19 @@ class HotkeySettingsTests(unittest.TestCase):
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_legacy_settings_skip_new_voice_binding_during_strict_registration(self):
+        settings = HotkeySettings.from_mapping({"ui_language": "pt"})
+        user32 = _User32(fail_keys={ord("V")})
+
+        registered = register_global_hotkeys(user32, 1, settings, strict=True)
+
+        self.assertEqual(
+            registered,
+            {0x5101, 0x5102, 0x5103, 0x5104},
+        )
+        self.assertNotIn(0x5106, registered)
+        self.assertEqual(len(user32.registered), 4)
+
     def test_strict_registration_cleans_up_partial_set(self):
         user32 = _User32(fail_keys={ord("T")})
 

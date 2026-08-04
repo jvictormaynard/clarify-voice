@@ -174,6 +174,16 @@ DEFAULT_HOTKEYS: dict[HotkeyAction, HotkeyDefinition] = {
     HotkeyAction.VISIBILITY: HotkeyDefinition(frozenset({"alt"}), "R"),
 }
 
+# The voice-translation binding was added after the original four-action
+# configuration.  Keep this migration baseline separate so an old config can
+# remain four-action without trying to claim a new global key during startup.
+# Fresh defaults still use ``DEFAULT_HOTKEYS`` and therefore include Alt+V.
+_LEGACY_DEFAULT_HOTKEYS: dict[HotkeyAction, HotkeyDefinition] = {
+    action: definition
+    for action, definition in DEFAULT_HOTKEYS.items()
+    if action is not HotkeyAction.VOICE_TRANSLATION
+}
+
 
 def _action(value: Any) -> HotkeyAction | None:
     if isinstance(value, HotkeyAction):
@@ -196,8 +206,20 @@ def _action(value: Any) -> HotkeyAction | None:
 def validate_hotkeys(
     values: Mapping[Any, Any],
 ) -> dict[HotkeyAction, HotkeyDefinition]:
-    """Normalise all four actions and reject duplicate combinations."""
-    normalised = dict(DEFAULT_HOTKEYS)
+    """Normalise bindings and reject duplicate combinations.
+
+    Omitted actions normally receive their defaults.  The one exception is
+    the post-release voice action: it is included only when the input
+    explicitly declares it, allowing legacy installations to migrate without
+    registering a new global shortcut unexpectedly.
+    """
+    includes_voice = any(
+        _action(raw_action) is HotkeyAction.VOICE_TRANSLATION
+        for raw_action in values
+    )
+    normalised = dict(
+        DEFAULT_HOTKEYS if includes_voice else _LEGACY_DEFAULT_HOTKEYS
+    )
     for raw_action, raw_definition in values.items():
         action = _action(raw_action)
         if action is None:
@@ -268,12 +290,17 @@ class HotkeySettings:
                     parsed[action] = value[key]
                     break
         mode = value.get("activation_mode", value.get("recording_activation_mode", "toggle"))
+        defaults = (
+            DEFAULT_HOTKEYS
+            if HotkeyAction.VOICE_TRANSLATION in parsed
+            else _LEGACY_DEFAULT_HOTKEYS
+        )
         try:
-            return cls(parsed or DEFAULT_HOTKEYS, mode)
+            return cls(parsed or defaults, mode)
         except HotkeyValidationError:
             # One bad entry must not prevent startup. Invalid entries are
             # replaced individually with the migration-safe default.
-            repaired: dict[HotkeyAction, HotkeyDefinition] = dict(DEFAULT_HOTKEYS)
+            repaired: dict[HotkeyAction, HotkeyDefinition] = dict(defaults)
             if isinstance(bindings, Mapping):
                 for action, definition in bindings.items():
                     parsed_action = _action(action)

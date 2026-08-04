@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import repositories
+from hotkey_config import HotkeyAction
 from provider_adapters import OpenAICompatibleAdapter
 from provider_registry import build_provider_registry
 from provider_types import ProviderCapability, ProviderMetadata
@@ -424,6 +425,25 @@ class ConfigurationRepositoryTests(unittest.TestCase):
         self.assertEqual(config.openai.audio_model, "whisper-1")
         self.assertEqual(config.gemini.text_model, "")
         self.assertFalse(hasattr(config, "unknown_future_setting"))
+
+    def test_legacy_config_does_not_gain_voice_hotkey_on_upgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "transcription_provider": "openai",
+                "ui_language": "en",
+            }), encoding="utf-8")
+
+            config = LocalConfigRepository(path).load()
+
+        self.assertNotIn(HotkeyAction.VOICE_TRANSLATION, config.hotkeys.hotkeys)
+
+    def test_first_run_defaults_include_voice_hotkey(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = LocalConfigRepository(
+                Path(directory) / "config.json").load()
+
+        self.assertIn(HotkeyAction.VOICE_TRANSLATION, config.hotkeys.hotkeys)
 
     def test_invalid_values_fall_back_without_crashing(self):
         with tempfile.TemporaryDirectory() as directory:

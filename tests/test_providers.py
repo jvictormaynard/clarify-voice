@@ -478,6 +478,29 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(kwargs["headers"], {"x-goog-api-key": "gemini-key"})
 
     @patch("app.PROVIDER_HTTP.session.post")
+    def test_cloud_transcription_prompt_resolves_regional_source_language(self, post):
+        app.APP_CONFIG.update({
+            "gemini_api_key": "gemini-key",
+            "gemini_base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "gemini_model": "gemini-2.5-flash",
+        })
+        post.return_value = FakeResponse({
+            "candidates": [{"content": {"parts": [{"text": "texto"}]}}]
+        })
+
+        self.assertEqual(
+            app.call_gemini(self.audio_path, "transcription", "pt-BR"),
+            "texto",
+        )
+        instruction = post.call_args.kwargs["json"]["systemInstruction"]["parts"][0]["text"]
+        self.assertIn("Brazilian Portuguese", instruction)
+        self.assertNotIn("English", instruction)
+
+    def test_language_display_name_preserves_unknown_valid_bcp47_tag(self):
+        self.assertEqual(app._language_display_name("de-DE"), "German")
+        self.assertEqual(app._language_display_name("fr-FR"), "fr-FR")
+
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_gemini_custom_proxy_uses_bearer_and_v1beta(self, post):
         app.APP_CONFIG.update({
             "gemini_api_key": "proxy-key",

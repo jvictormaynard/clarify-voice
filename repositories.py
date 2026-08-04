@@ -270,9 +270,28 @@ class AppConfig:
                     or history_retention_days < 0):
                 history_retention_days = 30
 
-        supplied_hotkeys = (
-            values.get("hotkeys") if isinstance(values, Mapping) else None)
-        hotkey_payload = supplied_hotkeys if supplied_hotkeys is not None else source
+        if isinstance(values, Mapping) and values:
+            if "hotkeys" in values and values.get("hotkeys") is not None:
+                hotkey_payload = values.get("hotkeys")
+            else:
+                # A persisted pre-voice config has no nested binding object.
+                # Read only its legacy flat fields so environment defaults do
+                # not silently introduce Alt+V during an upgrade.
+                hotkey_payload = {
+                    key: values[key]
+                    for key in (
+                        "recording_hotkey",
+                        "rewrite_hotkey",
+                        "translation_hotkey",
+                        "toggle_visibility",
+                        "recording_activation_mode",
+                    )
+                    if key in values
+                }
+        else:
+            # No payload means a first run: the defaults intentionally include
+            # the new voice-translation binding.
+            hotkey_payload = source
         hotkeys = HotkeySettings.from_mapping(hotkey_payload)
         # A short-lived pre-release spelling used the activation mode at the
         # top level. Keep accepting it while writing the versioned nested
@@ -1072,6 +1091,12 @@ class LocalConfigRepository(ConfigRepository):
             migrated = migrate_config_payload(raw)
             raw_mapping = raw if isinstance(raw, Mapping) else {}
             runtime = self._load_runtime_mapping(raw_mapping, migrated)
+            if not raw_mapping:
+                # ``_load_runtime_mapping`` adds environment/secret fields to
+                # a first-run payload, which would otherwise look like an old
+                # config to the migration boundary above.  Keep the explicit
+                # fresh-install defaults marker in that case.
+                runtime["hotkeys"] = self.defaults.get("hotkeys")
             return AppConfig.from_mapping(runtime, self.defaults)
 
     def _model_from_mapping(

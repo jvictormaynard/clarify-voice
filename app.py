@@ -2439,6 +2439,26 @@ LANG_NAMES = {
     "ru": "Russian",
 }
 
+
+def _language_display_name(value: str) -> str:
+    """Return a safe prompt label for a BCP-47 language selection.
+
+    The provider route accepts regional/script tags (for example ``pt-BR``),
+    while the prompt catalogue intentionally keeps only a small set of base
+    names.  Resolve known tags through their base subtag and preserve an
+    unknown-but-valid tag instead of silently instructing the provider to use
+    English.
+    """
+    text = str(value or "").strip().replace("_", "-")
+    if not text:
+        return "English"
+    key = text.casefold()
+    direct = LANG_NAMES.get(key)
+    if direct:
+        return direct
+    base = key.split("-", 1)[0]
+    return LANG_NAMES.get(base, text)
+
 STRINGS = {
     "en": {
         "ready": "Ready", "processing": "Processing\u2026", "too_short": "Too short",
@@ -3310,7 +3330,7 @@ def _call_provider_audio(
         language_label = (
             "the detected source language"
             if str(lang).strip().casefold() in ("", "auto")
-            else LANG_NAMES.get(lang, "English")
+            else _language_display_name(lang)
         )
         instruction = (
             TRANSCRIPTION_INSTRUCTION if mode == "transcription" else PROMPT_INSTRUCTION
@@ -3437,7 +3457,7 @@ def _rewrite_with_provider(
             language=lang,
             instruction=(instruction or _workflow_instruction(
                 TRANSCRIPT_REWRITE_INSTRUCTION.format(
-                    lang=LANG_NAMES.get(lang, "English")), route.prompt)),
+                    lang=_language_display_name(lang)), route.prompt)),
             source_message=(source_message or _source_text_message(transcript)),
             temperature=temperature,
         )
