@@ -319,7 +319,9 @@ class AppConfig:
         except (ProviderError, ValueError):
             pass
 
-        workflow_mapping = workflow_values if isinstance(workflow_values, Mapping) else {}
+        workflow_mapping = (
+            workflow_values if isinstance(workflow_values, Mapping) else {}
+        )
         effective_transcription_provider = (
             workflows.transcription.provider_id
             if "transcription" in workflow_mapping else provider
@@ -388,6 +390,82 @@ class AppConfig:
         values = self.to_mapping()
         values.pop("schema_version", None)
         return values
+
+    def synchronize_legacy_routes(
+        self,
+        legacy_config: "AppConfig",
+        changed_keys: set[str],
+    ) -> "AppConfig":
+        """Reflect changed flat UI fields without erasing custom routes.
+
+        The legacy desktop surface edits a mapping in place and does not yet
+        know about ``workflows``.  Repository saves pass the previous on-disk
+        flat values to this method, so a route is synchronized only when the
+        corresponding flat value actually changed.  A typed ``AppConfig``
+        save remains authoritative for fully independent workflow routes.
+        """
+        workflows = self.workflows
+        selection = self.selection
+        selected_audio_key = PROVIDER_REGISTRY.describe(
+            legacy_config.selection.transcription_provider).audio_model_key
+        if {"transcription_provider", selected_audio_key} & changed_keys:
+            current = workflows.transcription
+            workflows = workflows.with_route(
+                WorkflowScope.TRANSCRIPTION,
+                replace(
+                    current,
+                    provider_id=legacy_config.workflow(
+                        WorkflowScope.TRANSCRIPTION).provider_id,
+                    model_id=legacy_config.workflow(
+                        WorkflowScope.TRANSCRIPTION).model_id,
+                ),
+            )
+            selection = replace(
+                selection,
+                transcription_provider=(
+                    legacy_config.selection.transcription_provider),
+            )
+        if {"refinement_provider", "refinement_model"} & changed_keys:
+            previous_shared = workflows.refinement
+            legacy_route = legacy_config.workflow(WorkflowScope.REFINEMENT)
+            for scope in (
+                    WorkflowScope.REFINEMENT.value,
+                    WorkflowScope.REWRITE.value,
+                    WorkflowScope.TRANSLATION.value,
+                    WorkflowScope.LOCAL_ASR_REFINEMENT.value):
+                current = workflows[scope]
+                if (current.provider_id == previous_shared.provider_id
+                        and current.model_id == previous_shared.model_id):
+                    workflows = workflows.with_route(
+                        scope,
+                        replace(
+                            current,
+                            provider_id=legacy_route.provider_id,
+                            model_id=legacy_route.model_id,
+                        ),
+                    )
+            selection = replace(
+                selection,
+                refinement_provider=legacy_config.selection.refinement_provider,
+                refinement_model=legacy_config.selection.refinement_model,
+            )
+        if "local_asr_cloud_refinement" in changed_keys:
+            workflows = workflows.with_route(
+                WorkflowScope.LOCAL_ASR_REFINEMENT,
+                replace(
+                    workflows.local_asr_refinement,
+                    enabled=legacy_config.local_asr_cloud_refinement,
+                ),
+            )
+        return replace(
+            self,
+            selection=selection,
+            workflows=workflows,
+            local_asr_cloud_refinement=(
+                legacy_config.local_asr_cloud_refinement
+                if "local_asr_cloud_refinement" in changed_keys
+                else self.local_asr_cloud_refinement),
+        )
 
     def workflow(self, scope: WorkflowScope | str) -> WorkflowRoute:
         return self.workflows.route(scope)
@@ -793,6 +871,29 @@ class LocalConfigRepository(ConfigRepository):
                         f"with supported version {CONFIG_SCHEMA_VERSION}")
                 model = AppConfig.from_mapping(config, self.defaults)
                 supplied_keys = set(config)
+                legacy_workflow_keys = {
+                    "transcription_provider",
+                    "refinement_provider",
+                    "refinement_model",
+                    "local_asr_cloud_refinement",
+                }
+                legacy_workflow_keys.update(
+                    metadata.audio_model_key
+                    for metadata in PROVIDER_REGISTRY.metadata
+                )
+                changed_keys = {
+                    key for key in legacy_workflow_keys
+                    if key in config
+                    and config.get(key) != current_payload.get(key)
+                }
+                if changed_keys:
+                    legacy_values = dict(current_payload)
+                    legacy_values.update(dict(config))
+                    legacy_values.pop("workflows", None)
+                    legacy_model = AppConfig.from_mapping(
+                        legacy_values, self.defaults)
+                    model = model.synchronize_legacy_routes(
+                        legacy_model, changed_keys)
 
             values = model.to_mapping()
             changes: dict[str, str] = {}

@@ -93,6 +93,58 @@ class WorkflowConfigurationTests(unittest.TestCase):
         self.assertNotIn("prompt", json.dumps(public))
         self.assertNotIn("api_key", json.dumps(public))
 
+    def test_legacy_flat_settings_save_updates_nested_compatibility_routes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            repository.save({
+                "transcription_provider": "openai",
+                "openai_audio_model": "whisper-1",
+                "refinement_provider": "openai",
+                "refinement_model": "gpt-4o-mini",
+            })
+            independent = repository.load().to_legacy_mapping()
+            independent["workflows"]["translation"] = {
+                "provider_id": "groq",
+                "model_id": "llama-3.3-70b-versatile",
+                "prompt": "translate independently",
+            }
+            repository.save(independent)
+            unrelated = repository.load().to_legacy_mapping()
+            unrelated["autostart"] = True
+            repository.save(unrelated)
+            self.assertEqual(
+                repository.load().workflow(WorkflowScope.TRANSLATION).provider_id,
+                "groq",
+            )
+
+            legacy = repository.load().to_legacy_mapping()
+            legacy.update({
+                "transcription_provider": "groq",
+                "groq_audio_model": "whisper-large-v3",
+                "refinement_provider": "groq",
+                "refinement_model": "llama-3.3-70b-versatile",
+                "local_asr_cloud_refinement": True,
+            })
+            repository.save(legacy)
+
+            loaded = repository.load()
+            self.assertEqual(
+                loaded.workflow(WorkflowScope.TRANSCRIPTION).provider_id,
+                "groq",
+            )
+            self.assertEqual(
+                loaded.workflow(WorkflowScope.REFINEMENT).model_id,
+                "llama-3.3-70b-versatile",
+            )
+            self.assertEqual(
+                loaded.workflow(WorkflowScope.REWRITE).provider_id,
+                "groq",
+            )
+            self.assertTrue(loaded.workflow(
+                WorkflowScope.LOCAL_ASR_REFINEMENT).enabled)
+
     def test_registry_applies_endpoint_override_before_adapter_work(self):
         connection = ProviderConnection("test-key", "https://api.example/v1")
         routed = PROVIDER_REGISTRY.connection_for_route(

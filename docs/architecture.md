@@ -275,6 +275,10 @@ Secret-store read-back or file-write failure restores the prior secret and
 leaves the prior configuration recoverable. `reset_workflow` and
 `test_workflow` provide UI-independent reset and capability-test operations;
 neither operation sends transcript/prompt content to diagnostics.
+Until the existing UI is migrated to typed routes, legacy flat saves compare
+against the previous on-disk flat values and synchronize only the routes whose
+legacy fields changed; independent custom workflow routes therefore survive an
+unrelated settings save.
 
 ### `dictionary_snippets.py`
 
