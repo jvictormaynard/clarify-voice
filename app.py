@@ -34,6 +34,20 @@ from provider_http import (
     localized_error_message,
 )
 from provider_registry import PROVIDER_HTTP, PROVIDER_REGISTRY
+from audio_file_batch import (
+    AudioBatchConfigurationError,
+    AudioFileBatchService,
+    AudioFileResult,
+    AudioFileStatus,
+    FileTranscriptionSelection,
+    RegistryAudioTranscriptionGateway,
+    SUPPORTED_AUDIO_EXTENSIONS,
+)
+from audio_file_batch_ui import (
+    AudioFileImportController,
+    audio_import_provider_options,
+    deduplicate_audio_paths,
+)
 from provider_types import (
     ProviderCapability,
     ProviderConnection,
@@ -2491,6 +2505,43 @@ STRINGS = {
         "workflow_reset_done": "Route reset to defaults.",
         "workflow_reset_failed": "Reset failed: {error}",
         "apply": "Apply", "save": "Save", "cancel": "Cancel",
+        "audio_import_button": "Files",
+        "audio_import_title": "Transcribe local files",
+        "audio_import_subtitle": "Choose one local audio file or a finite batch, then select the route and language before starting.",
+        "audio_import_route": "Route",
+        "audio_import_local": "Local",
+        "audio_import_cloud": "Cloud",
+        "audio_import_provider": "Provider",
+        "audio_import_model": "Model",
+        "audio_import_language": "Language",
+        "audio_import_language_invalid": "Choose a supported language.",
+        "audio_import_route_provider_mismatch": "The selected provider does not match the local/cloud route.",
+        "audio_import_route_disabled": "The transcription route is disabled in Settings.",
+        "audio_import_missing_key": "Configure a cloud API key for {provider} in Settings before starting.",
+        "audio_import_files": "Files",
+        "audio_import_select": "Choose files",
+        "audio_import_supported": "Supported audio",
+        "audio_import_all_files": "All files",
+        "audio_import_dnd_hint": "The picker supports one file or a finite batch. Drag-and-drop is a separate follow-up; originals are never deleted.",
+        "audio_import_no_files": "Choose at least one local audio file.",
+        "audio_import_no_provider": "No provider available",
+        "audio_import_no_model": "Choose an audio model.",
+        "audio_import_ready": "Ready to select local audio files.",
+        "audio_import_start": "Start batch",
+        "audio_import_cancel": "Cancel",
+        "audio_import_retry": "Retry failed",
+        "audio_import_close": "Close",
+        "audio_import_running": "Transcribing selected files…",
+        "audio_import_cancel_requested": "Cancellation requested; active work will finish cooperatively.",
+        "audio_import_retry_hint": "Some files failed. Review the errors or retry failed files.",
+        "audio_import_complete": "Batch complete. Successful results remain visible; originals were not modified.",
+        "audio_import_summary": "{total} file(s) · {succeeded} succeeded · {failed} failed · {cancelled} cancelled · {processing} processing · {pending} pending",
+        "audio_import_pending": "Pending",
+        "audio_import_processing": "Processing…",
+        "audio_import_succeeded": "Succeeded",
+        "audio_import_failed": "Failed",
+        "audio_import_cancelled": "Cancelled",
+        "audio_import_error": "Audio file failed.",
     },
     "pt": {
         "ready": "Pronto", "processing": "Processando\u2026", "too_short": "Muito curto",
@@ -2563,6 +2614,43 @@ STRINGS = {
         "workflow_reset_done": "Rota redefinida para os padrões.",
         "workflow_reset_failed": "Falha ao redefinir: {error}",
         "apply": "Aplicar", "save": "Salvar", "cancel": "Cancelar",
+        "audio_import_button": "Arquivos",
+        "audio_import_title": "Transcrever arquivos locais",
+        "audio_import_subtitle": "Escolha um arquivo de áudio local ou um lote finito e selecione rota e idioma antes de iniciar.",
+        "audio_import_route": "Rota",
+        "audio_import_local": "Local",
+        "audio_import_cloud": "Nuvem",
+        "audio_import_provider": "Provedor",
+        "audio_import_model": "Modelo",
+        "audio_import_language": "Idioma",
+        "audio_import_language_invalid": "Escolha um idioma compatível.",
+        "audio_import_route_provider_mismatch": "O provedor selecionado não corresponde à rota local/nuvem.",
+        "audio_import_route_disabled": "A rota de transcrição está desativada nas Configurações.",
+        "audio_import_missing_key": "Configure uma chave de API de nuvem para {provider} nas Configurações antes de iniciar.",
+        "audio_import_files": "Arquivos",
+        "audio_import_select": "Escolher arquivos",
+        "audio_import_supported": "Áudio compatível",
+        "audio_import_all_files": "Todos os arquivos",
+        "audio_import_dnd_hint": "O seletor aceita um arquivo ou um lote finito. Arrastar e soltar fica para um follow-up; os originais nunca são apagados.",
+        "audio_import_no_files": "Escolha pelo menos um arquivo de áudio local.",
+        "audio_import_no_provider": "Nenhum provedor disponível",
+        "audio_import_no_model": "Escolha um modelo de áudio.",
+        "audio_import_ready": "Pronto para selecionar arquivos de áudio locais.",
+        "audio_import_start": "Iniciar lote",
+        "audio_import_cancel": "Cancelar",
+        "audio_import_retry": "Repetir falhos",
+        "audio_import_close": "Fechar",
+        "audio_import_running": "Transcrevendo os arquivos selecionados…",
+        "audio_import_cancel_requested": "Cancelamento solicitado; o trabalho ativo terminará cooperativamente.",
+        "audio_import_retry_hint": "Alguns arquivos falharam. Revise os erros ou repita os falhos.",
+        "audio_import_complete": "Lote concluído. Os resultados bem-sucedidos continuam visíveis; os originais não foram alterados.",
+        "audio_import_summary": "{total} arquivo(s) · {succeeded} concluído(s) · {failed} falho(s) · {cancelled} cancelado(s) · {processing} processando · {pending} pendente(s)",
+        "audio_import_pending": "Pendente",
+        "audio_import_processing": "Processando…",
+        "audio_import_succeeded": "Concluído",
+        "audio_import_failed": "Falhou",
+        "audio_import_cancelled": "Cancelado",
+        "audio_import_error": "Falha no arquivo de áudio.",
     },
     "es": {
         "ready": "Listo", "processing": "Procesando…", "too_short": "Demasiado corto",
@@ -3010,6 +3098,20 @@ for _locale in STRINGS:
     if _locale != "en":
         STRINGS[_locale].update(_HISTORY_FALLBACKS)
 del _locale, _HISTORY_FALLBACKS
+
+# The import window is intentionally available in every supported locale. Keep
+# English as the safe fallback for locales whose copy is not yet reviewed,
+# while preserving the maintained Portuguese catalog above.
+_AUDIO_IMPORT_FALLBACKS = {
+    key: value for key, value in STRINGS["en"].items()
+    if key.startswith("audio_import_")
+}
+for _locale in STRINGS:
+    if _locale != "en":
+        for _key, _value in _AUDIO_IMPORT_FALLBACKS.items():
+            STRINGS[_locale].setdefault(_key, _value)
+del _locale, _AUDIO_IMPORT_FALLBACKS
+del _key, _value
 
 def _provider_url(base_url: str, version: str, endpoint: str) -> str:
     """Compatibility facade for the centralized adapter URL normalizer."""
@@ -5705,6 +5807,10 @@ class App(ctk.CTk):
             self._clarify_transparent_color = TRANSPARENT
 
         self.recorder = Recorder()
+        self._audio_file_batch_service = AudioFileBatchService(
+            RegistryAudioTranscriptionGateway(PROVIDER_REGISTRY))
+        self._audio_file_import_controller = None
+        self._audio_file_import_window = None
         local_adapter = PROVIDER_REGISTRY.adapter(LOCAL_ASR_PROVIDER_ID)
         local_backend = getattr(local_adapter, "backend", None)
         local_installer = getattr(local_backend, "installer", None)
@@ -5931,6 +6037,9 @@ class App(ctk.CTk):
         if not getattr(self, "_recording_shutdown", False):
             self._recording_shutdown = True
             self._shutdown_recording(SESSION_SHUTDOWN_JOIN_SECONDS)
+        audio_import = getattr(self, "_audio_file_import_controller", None)
+        if audio_import is not None:
+            audio_import.cancel()
         product = getattr(self, "_local_asr_product", None)
         if product is not None:
             product.shutdown(timeout=SESSION_SHUTDOWN_JOIN_SECONDS)
@@ -6029,6 +6138,13 @@ class App(ctk.CTk):
             fg_color="#151515", hover_color="#222222", text_color=DIM,
             font=ctk.CTkFont(size=11), command=self._toggle_mode)
         self.mode_btn.pack(side="left", padx=(0, 4))
+
+        self.file_btn = ctk.CTkButton(
+            right, text=self._t("audio_import_button"), width=48, height=26,
+            corner_radius=13, fg_color="#151515", hover_color="#222222",
+            text_color=DIM, font=ctk.CTkFont(size=10),
+            command=self._open_audio_file_import)
+        self.file_btn.pack(side="left", padx=(0, 4))
 
         self.gear_btn = ctk.CTkButton(right, text="\u2630", width=26, height=26, corner_radius=13,
             fg_color="transparent", hover_color="#151515", text_color="#444444",
@@ -7767,6 +7883,518 @@ class App(ctk.CTk):
             self._set_state(
                 "ready", after_ready=lambda: self._show_result(text))
         self._show_success_then(finish)
+
+    # -- Local audio-file import --
+    def _audio_file_import_selection(
+            self, provider_id: str, model: str, language: str,
+            execution: str) -> FileTranscriptionSelection:
+        """Build an explicit, non-persisted route for the import window."""
+        provider_id = str(provider_id or "").strip().lower()
+        model = str(model or "").strip()
+        language = str(language or "").strip().lower()
+        execution = str(execution or "").strip().lower()
+        if not provider_id:
+            raise ValueError(self._t("audio_import_no_provider"))
+        if not model:
+            raise ValueError(self._t("audio_import_no_model"))
+        if language not in SUPPORTED_LANGUAGES:
+            raise ValueError(self._t("audio_import_language_invalid"))
+        options = audio_import_provider_options(PROVIDER_REGISTRY, execution)
+        if provider_id not in {option.provider_id for option in options}:
+            raise ValueError(self._t("audio_import_route_provider_mismatch"))
+
+        current_route = _workflow_route(WorkflowScope.TRANSCRIPTION)
+        if (provider_id == current_route.provider_id
+                and not current_route.enabled):
+            raise ValueError(self._t("audio_import_route_disabled"))
+        route = replace(
+            current_route,
+            provider_id=provider_id,
+            model_id=model,
+            # A custom endpoint belongs to the route's original provider. Do
+            # not carry it over when the picker explicitly changes provider.
+            custom_endpoint=(
+                current_route.custom_endpoint
+                if provider_id == current_route.provider_id else ""),
+            enabled=True,
+            independent=True,
+        )
+        connection = _provider_connection(provider_id, route)
+        if execution == "cloud" and not connection.api_key:
+            try:
+                display_name = PROVIDER_REGISTRY.describe(provider_id).display_name
+            except ProviderError:
+                display_name = provider_id
+            raise ValueError(
+                self._t("audio_import_missing_key").format(provider=display_name))
+        return FileTranscriptionSelection(
+            provider_id=provider_id,
+            model=model,
+            language=language,
+            mode="transcription",
+            connection=connection,
+            instruction=TRANSCRIPTION_INSTRUCTION.format(
+                lang=LANG_NAMES.get(language, "English")),
+            prompt="Transcribe this audio.",
+            temperature=0.0,
+        )
+
+    def _open_audio_file_import(self):
+        """Open the bounded local file-picker and batch progress surface."""
+        if (getattr(self, "_audio_file_import_window", None) is not None
+                and self._audio_file_import_window.winfo_exists()):
+            self._audio_file_import_window.focus()
+            return
+        if filedialog is None or not hasattr(ctk, "CTkToplevel"):
+            return
+
+        win = ctk.CTkToplevel(self)
+        self._audio_file_import_window = win
+        win.title(self._t("audio_import_title"))
+        win.geometry("760x700")
+        win.minsize(660, 620)
+        win.configure(fg_color="#080808")
+        win.transient(self)
+
+        closed = {"value": False}
+        selected_paths: list[Path] = []
+        paths_dirty = {"value": True}
+        poll_job = {"id": None}
+        provider_display_to_id: dict[str, str] = {}
+        route_display_to_id = {
+            self._t("audio_import_local"): "local",
+            self._t("audio_import_cloud"): "cloud",
+        }
+
+        outer = ctk.CTkFrame(win, fg_color="#0b0b0b", corner_radius=16)
+        outer.pack(fill="both", expand=True, padx=14, pady=14)
+        header = ctk.CTkFrame(outer, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(18, 4))
+        ctk.CTkLabel(
+            header, text=self._t("audio_import_title"), text_color=TEXT,
+            font=ctk.CTkFont(size=20, weight="bold"), anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            outer, text=self._t("audio_import_subtitle"), text_color=DIM,
+            font=ctk.CTkFont(size=11), anchor="w", justify="left",
+            wraplength=680,
+        ).pack(fill="x", padx=20, pady=(0, 12))
+
+        route_frame = ctk.CTkFrame(outer, fg_color="#111111", corner_radius=12)
+        route_frame.pack(fill="x", padx=16, pady=(0, 10))
+        route_grid = ctk.CTkFrame(route_frame, fg_color="transparent")
+        route_grid.pack(fill="x", padx=12, pady=12)
+        route_grid.grid_columnconfigure(1, weight=1)
+        route_grid.grid_columnconfigure(3, weight=1)
+        route_grid.grid_columnconfigure(4, weight=1)
+
+        current_route = _workflow_route(WorkflowScope.TRANSCRIPTION)
+        initial_execution = (
+            "local" if current_route.provider_id == LOCAL_ASR_PROVIDER_ID
+            else "cloud")
+        initial_route_label = next(
+            label for label, value in route_display_to_id.items()
+            if value == initial_execution)
+        ctk.CTkLabel(
+            route_grid, text=self._t("audio_import_route"), text_color=DIM,
+            font=ctk.CTkFont(size=11), anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 8))
+        route_menu = ctk.CTkOptionMenu(
+            route_grid, values=list(route_display_to_id), width=150, height=30,
+            corner_radius=10, fg_color="#171717", button_color="#292929",
+            button_hover_color="#353535", dropdown_fg_color="#111111",
+            dropdown_hover_color="#252525", text_color=TEXT,
+            font=ctk.CTkFont(size=11), dropdown_font=ctk.CTkFont(size=11),
+        )
+        route_menu.set(initial_route_label)
+        route_menu.grid(row=0, column=1, sticky="ew", padx=(0, 16), pady=(0, 8))
+        ctk.CTkLabel(
+            route_grid, text=self._t("audio_import_provider"), text_color=DIM,
+            font=ctk.CTkFont(size=11), anchor="w",
+        ).grid(row=0, column=2, sticky="w", padx=(0, 8), pady=(0, 8))
+        provider_menu = ctk.CTkOptionMenu(
+            route_grid, values=[self._t("audio_import_no_provider")],
+            width=190, height=30, corner_radius=10, fg_color="#171717",
+            button_color="#292929", button_hover_color="#353535",
+            dropdown_fg_color="#111111", dropdown_hover_color="#252525",
+            text_color=TEXT, font=ctk.CTkFont(size=11),
+            dropdown_font=ctk.CTkFont(size=11),
+        )
+        provider_menu.grid(row=0, column=3, sticky="ew", pady=(0, 8))
+
+        ctk.CTkLabel(
+            route_grid, text=self._t("audio_import_model"), text_color=DIM,
+            font=ctk.CTkFont(size=11), anchor="w",
+        ).grid(row=1, column=0, sticky="w", padx=(0, 8))
+        model_menu = ctk.CTkComboBox(
+            route_grid, values=[""], height=30, corner_radius=10,
+            fg_color="#050505", border_color=BORDER, border_width=1,
+            button_color="#292929", button_hover_color="#353535",
+            dropdown_fg_color="#111111", text_color=TEXT,
+            font=ctk.CTkFont(size=11), dropdown_font=ctk.CTkFont(size=11),
+        )
+        model_menu.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(0, 16))
+        ctk.CTkLabel(
+            route_grid, text=self._t("audio_import_language"), text_color=DIM,
+            font=ctk.CTkFont(size=11), anchor="w",
+        ).grid(row=1, column=3, sticky="w", padx=(0, 8))
+        language_menu = ctk.CTkOptionMenu(
+            route_grid, values=list(SUPPORTED_LANGUAGES), width=110, height=30,
+            corner_radius=10, fg_color="#171717", button_color="#292929",
+            button_hover_color="#353535", dropdown_fg_color="#111111",
+            dropdown_hover_color="#252525", text_color=TEXT,
+            font=ctk.CTkFont(size=11), dropdown_font=ctk.CTkFont(size=11),
+        )
+        language_menu.set(self.lang if self.lang in SUPPORTED_LANGUAGES else "en")
+        language_menu.grid(row=1, column=4, sticky="ew")
+
+        selection_feedback = ctk.CTkLabel(
+            outer, text="", text_color="#d98f8f", font=ctk.CTkFont(size=10),
+            anchor="w", justify="left", wraplength=680,
+        )
+        selection_feedback.pack(fill="x", padx=20, pady=(0, 8))
+
+        files_header = ctk.CTkFrame(outer, fg_color="transparent")
+        files_header.pack(fill="x", padx=16, pady=(0, 6))
+        ctk.CTkLabel(
+            files_header, text=self._t("audio_import_files"), text_color=TEXT,
+            font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
+        ).pack(side="left")
+        select_button = ctk.CTkButton(
+            files_header, text=self._t("audio_import_select"), width=130,
+            height=28, corner_radius=14, fg_color="#202020",
+            hover_color="#303030", text_color=TEXT,
+        )
+        select_button.pack(side="right")
+        file_hint = ctk.CTkLabel(
+            outer, text=self._t("audio_import_dnd_hint"), text_color="#555555",
+            font=ctk.CTkFont(size=10), anchor="w", justify="left",
+            wraplength=680,
+        )
+        file_hint.pack(fill="x", padx=20, pady=(0, 6))
+
+        file_list = ctk.CTkScrollableFrame(
+            outer, fg_color="#050505", corner_radius=10, height=150,
+        )
+        file_list.pack(fill="x", padx=16, pady=(0, 10))
+        file_rows: dict[Path, tuple[object, object]] = {}
+
+        summary_label = ctk.CTkLabel(
+            outer, text=self._t("audio_import_ready"), text_color=DIM,
+            font=ctk.CTkFont(size=11), anchor="w", justify="left",
+            wraplength=680,
+        )
+        summary_label.pack(fill="x", padx=20, pady=(0, 5))
+        result_box = ctk.CTkTextbox(
+            outer, fg_color="#050505", text_color="#cccccc",
+            font=ctk.CTkFont(size=11), corner_radius=10,
+            border_width=1, border_color=BORDER, wrap="word", height=180,
+        )
+        result_box.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        result_box.configure(state="disabled")
+
+        actions = ctk.CTkFrame(outer, fg_color="transparent")
+        actions.pack(fill="x", padx=16, pady=(0, 16))
+        start_button = ctk.CTkButton(
+            actions, text=self._t("audio_import_start"), width=124, height=32,
+            corner_radius=16, fg_color="#f5f5f5", hover_color="#d9d9d9",
+            text_color="#050505",
+        )
+        start_button.pack(side="left")
+        cancel_button = ctk.CTkButton(
+            actions, text=self._t("audio_import_cancel"), width=110, height=32,
+            corner_radius=16, fg_color="#262626", hover_color="#383838",
+            text_color=TEXT, state="disabled",
+        )
+        cancel_button.pack(side="left", padx=(8, 0))
+        retry_button = ctk.CTkButton(
+            actions, text=self._t("audio_import_retry"), width=110, height=32,
+            corner_radius=16, fg_color="#262626", hover_color="#383838",
+            text_color=TEXT, state="disabled",
+        )
+        retry_button.pack(side="left", padx=(8, 0))
+        close_button = ctk.CTkButton(
+            actions, text=self._t("audio_import_close"), width=92, height=32,
+            corner_radius=16, fg_color="transparent", hover_color="#1c1c1c",
+            text_color=DIM,
+        )
+        close_button.pack(side="right")
+
+        def set_feedback(text: str, *, error: bool = True):
+            selection_feedback.configure(
+                text=str(text or ""), text_color="#d98f8f" if error else DIM)
+
+        def provider_id_from_menu() -> str:
+            return provider_display_to_id.get(provider_menu.get(), "")
+
+        def current_execution() -> str:
+            return route_display_to_id.get(route_menu.get(), "")
+
+        def refresh_models(*_args):
+            provider_id = provider_id_from_menu()
+            if not provider_id:
+                model_menu.configure(values=[""])
+                model_menu.set("")
+                return
+            route = _workflow_route(WorkflowScope.TRANSCRIPTION)
+            candidates = []
+            if route.provider_id == provider_id:
+                candidates.append(route.model_id)
+            try:
+                candidates.extend((
+                    PROVIDER_REGISTRY.audio_model_from_legacy(
+                        provider_id, APP_CONFIG),
+                    PROVIDER_REGISTRY.describe(provider_id).default_audio_model,
+                ))
+            except ProviderError:
+                pass
+            values = tuple(dict.fromkeys(
+                str(value).strip() for value in candidates if str(value).strip()))
+            model_menu.configure(values=list(values or ("",)))
+            model_menu.set(values[0] if values else "")
+
+        def refresh_providers(*_args):
+            execution = current_execution()
+            options = audio_import_provider_options(PROVIDER_REGISTRY, execution)
+            provider_display_to_id.clear()
+            values = []
+            for option in options:
+                display = f"{option.display_name} · {execution}"
+                provider_display_to_id[display] = option.provider_id
+                values.append(display)
+            if not values:
+                values = [self._t("audio_import_no_provider")]
+            provider_menu.configure(values=values)
+            desired_provider = (
+                current_route.provider_id
+                if current_route.provider_id in provider_display_to_id.values()
+                else next(iter(provider_display_to_id.values()), ""))
+            desired_display = next(
+                (display for display, provider_id in provider_display_to_id.items()
+                 if provider_id == desired_provider),
+                values[0],
+            )
+            provider_menu.set(desired_display)
+            refresh_models()
+
+        def render_paths(paths: tuple[Path, ...]):
+            file_rows.clear()
+            for child in file_list.winfo_children():
+                child.destroy()
+            if not paths:
+                ctk.CTkLabel(
+                    file_list, text=self._t("audio_import_no_files"),
+                    text_color="#555555", font=ctk.CTkFont(size=11), anchor="w",
+                ).pack(fill="x", padx=8, pady=8)
+                return
+            for path in paths:
+                row = ctk.CTkFrame(file_list, fg_color="transparent")
+                row.pack(fill="x", padx=4, pady=2)
+                row.grid_columnconfigure(0, weight=1)
+                name = ctk.CTkLabel(
+                    row, text=path.name, text_color=TEXT,
+                    font=ctk.CTkFont(size=11), anchor="w",
+                )
+                name.grid(row=0, column=0, sticky="ew")
+                status = ctk.CTkLabel(
+                    row, text=self._t("audio_import_pending"), text_color=DIM,
+                    font=ctk.CTkFont(size=10), anchor="e",
+                )
+                status.grid(row=0, column=1, sticky="e", padx=(8, 0))
+                detail = ctk.CTkLabel(
+                    row, text=str(path), text_color="#555555",
+                    font=ctk.CTkFont(size=9), anchor="w",
+                )
+                detail.grid(row=1, column=0, columnspan=2, sticky="ew")
+                file_rows[path] = (status, detail)
+
+        def render_snapshot(items: tuple[AudioFileResult, ...] | None = None):
+            if items is None:
+                items = tuple(
+                    AudioFileResult(path, AudioFileStatus.PENDING)
+                    for path in selected_paths)
+            for item in items:
+                row = file_rows.get(item.path)
+                if row is None:
+                    continue
+                status_label, detail_label = row
+                status_key = f"audio_import_{item.status.value}"
+                status_label.configure(
+                    text=self._t(status_key),
+                    text_color={
+                        AudioFileStatus.SUCCEEDED: "#9fd69f",
+                        AudioFileStatus.FAILED: "#d98f8f",
+                        AudioFileStatus.CANCELLED: "#d6b77d",
+                        AudioFileStatus.PROCESSING: TEXT,
+                        AudioFileStatus.PENDING: DIM,
+                    }[item.status],
+                )
+                if item.status is AudioFileStatus.FAILED:
+                    detail_label.configure(text=item.error or self._t("audio_import_error"),
+                                            text_color="#d98f8f")
+                elif item.status is AudioFileStatus.CANCELLED:
+                    detail_label.configure(text=item.error or self._t("audio_import_cancelled"),
+                                            text_color="#d6b77d")
+                elif item.status is AudioFileStatus.SUCCEEDED:
+                    detail_label.configure(text=str(item.path), text_color="#555555")
+                else:
+                    detail_label.configure(text=str(item.path), text_color="#555555")
+
+            succeeded = sum(item.status is AudioFileStatus.SUCCEEDED for item in items)
+            failed = sum(item.status is AudioFileStatus.FAILED for item in items)
+            cancelled = sum(item.status is AudioFileStatus.CANCELLED for item in items)
+            processing = sum(item.status is AudioFileStatus.PROCESSING for item in items)
+            pending = sum(item.status is AudioFileStatus.PENDING for item in items)
+            summary_label.configure(text=self._t("audio_import_summary").format(
+                total=len(items), succeeded=succeeded, failed=failed,
+                cancelled=cancelled, processing=processing, pending=pending))
+            lines = []
+            for item in items:
+                label = self._t(f"audio_import_{item.status.value}")
+                lines.append(f"{label}: {item.path.name}")
+                if item.status is AudioFileStatus.SUCCEEDED and item.text:
+                    text = item.text
+                    if len(text) > 6000:
+                        text = text[:6000] + "\n…"
+                    lines.append(text)
+                elif item.error:
+                    lines.append(item.error)
+                lines.append("")
+            result_box.configure(state="normal")
+            result_box.delete("1.0", "end")
+            result_box.insert("1.0", "\n".join(lines))
+            result_box.configure(state="disabled")
+
+        def set_running(running: bool):
+            state = "disabled" if running else "normal"
+            for widget in (select_button, route_menu, provider_menu,
+                           model_menu, language_menu):
+                widget.configure(state=state)
+            start_button.configure(state=state)
+            cancel_button.configure(state="normal" if running else "disabled")
+            retry_button.configure(
+                state=("disabled" if running or paths_dirty["value"]
+                       or not controller.failed_paths else "normal"))
+
+        def deliver_update(_item):
+            if closed["value"]:
+                return
+            try:
+                win.after(0, lambda: render_snapshot(controller.snapshot()))
+            except tk.TclError:
+                pass
+
+        controller = AudioFileImportController(
+            self._audio_file_batch_service, on_update=deliver_update)
+        self._audio_file_import_controller = controller
+
+        def poll():
+            poll_job["id"] = None
+            if closed["value"] or not win.winfo_exists():
+                return
+            if controller.done:
+                render_snapshot(controller.snapshot())
+                set_running(False)
+                if controller.failed_paths:
+                    set_feedback(self._t("audio_import_retry_hint"), error=False)
+                else:
+                    set_feedback(self._t("audio_import_complete"), error=False)
+                return
+            poll_job["id"] = win.after(100, poll)
+
+        def choose_files():
+            if controller.running:
+                return
+            patterns = " ".join(
+                f"*{extension}" for extension in sorted(SUPPORTED_AUDIO_EXTENSIONS))
+            picked = filedialog.askopenfilenames(
+                parent=win,
+                title=self._t("audio_import_select"),
+                filetypes=[
+                    (self._t("audio_import_supported"), patterns),
+                    (self._t("audio_import_all_files"), "*.*"),
+                ],
+            )
+            if not picked:
+                return
+            selected_paths[:] = deduplicate_audio_paths(picked)
+            paths_dirty["value"] = True
+            render_paths(tuple(selected_paths))
+            render_snapshot()
+            set_feedback(self._t("audio_import_ready"), error=False)
+            set_running(False)
+
+        def start_import():
+            if controller.running:
+                return
+            if not selected_paths:
+                set_feedback(self._t("audio_import_no_files"))
+                return
+            try:
+                selection = self._audio_file_import_selection(
+                    provider_id_from_menu(), model_menu.get(),
+                    language_menu.get(), current_execution())
+                controller.start(tuple(selected_paths), selection)
+            except (AudioBatchConfigurationError, RuntimeError, ValueError) as error:
+                set_feedback(str(error))
+                return
+            paths_dirty["value"] = False
+            render_snapshot(controller.snapshot())
+            set_running(True)
+            set_feedback(self._t("audio_import_running"), error=False)
+            poll()
+
+        def cancel_import():
+            if controller.cancel():
+                set_feedback(self._t("audio_import_cancel_requested"), error=False)
+
+        def retry_import():
+            if paths_dirty["value"] or controller.running:
+                return
+            try:
+                selection = self._audio_file_import_selection(
+                    provider_id_from_menu(), model_menu.get(),
+                    language_menu.get(), current_execution())
+                controller.retry_failed(selection)
+            except (AudioBatchConfigurationError, RuntimeError, ValueError) as error:
+                set_feedback(str(error))
+                return
+            set_running(True)
+            set_feedback(self._t("audio_import_running"), error=False)
+            poll()
+
+        def close_import():
+            closed["value"] = True
+            if poll_job["id"] is not None:
+                try:
+                    win.after_cancel(poll_job["id"])
+                except tk.TclError:
+                    pass
+            controller.cancel()
+            if self._audio_file_import_controller is controller:
+                self._audio_file_import_controller = None
+            if self._audio_file_import_window is win:
+                self._audio_file_import_window = None
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        route_menu.configure(command=refresh_providers)
+        provider_menu.configure(command=refresh_models)
+        select_button.configure(command=choose_files)
+        start_button.configure(command=start_import)
+        cancel_button.configure(command=cancel_import)
+        retry_button.configure(command=retry_import)
+        close_button.configure(command=close_import)
+        render_paths(())
+        refresh_providers()
+        set_running(False)
+        win.protocol("WM_DELETE_WINDOW", close_import)
+        _configure_windows_tool_window(win)
+        _fade_in_window(win)
+        win.lift()
+        win.focus()
 
     # -- Settings --
     def _open_settings_legacy(self):

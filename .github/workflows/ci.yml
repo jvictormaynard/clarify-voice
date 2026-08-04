@@ -89,7 +89,7 @@ jobs:
           secret_store.py update_security.py version.py windows_clipboard.py
           windows_hotkeys.py provider_types.py provider_adapters.py provider_http.py
           provider_registry.py scripts/create_release_manifest.py tests
-          local_asr.py audio_file_batch.py history_store.py scripts/local_asr_harness.py
+          local_asr.py audio_file_batch.py audio_file_batch_ui.py history_store.py scripts/local_asr_harness.py
 
   package:
     name: Package Windows executable
