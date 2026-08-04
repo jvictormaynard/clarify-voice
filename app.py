@@ -3886,6 +3886,11 @@ class Recorder:
             selection = None
             self.microphone_inventory = None
             self.microphone_selection = None
+            if microphone is not None:
+                # An explicit endpoint cannot be honored without an
+                # inventory.  Do not silently replace it with SoX's default.
+                raise MicrophoneUnavailableError(
+                    "No safe microphone input is available")
         if not self._controls_override:
             self.controls = _recording_controls()
         with self._lifecycle_lock:

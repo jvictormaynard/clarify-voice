@@ -363,6 +363,26 @@ class RecordingSessionTests(unittest.TestCase):
                 recorder.boundary_reason, RecordingBoundaryReason.MAX_DURATION)
             recorder.stop()
 
+    def test_explicit_microphone_requires_an_inventory(self):
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process) as popen, patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"):
+            recorder = app.Recorder(controls=app.RecordingControls())
+            with self.assertRaises(app.MicrophoneUnavailableError):
+                recorder.start(
+                    Path(directory) / "recording.wav",
+                    microphone="mic-v1-explicit",
+                )
+
+            popen.assert_not_called()
+            self.assertIsNone(recorder.microphone_inventory)
+            self.assertIsNone(recorder.microphone_selection)
+
     def test_raw_input_stream_failure_still_enforces_max_duration(self):
         controls = app.RecordingControls(max_duration_seconds=5, warning_seconds=1)
         clock = FakeBoundaryClock()
