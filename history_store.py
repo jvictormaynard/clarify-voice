@@ -483,6 +483,25 @@ class HistoryStore:
                 ordering = 0.0
             temporary_payloads.append((ordering, candidate.name, candidate, payload))
 
+        # A parseable snapshot in a schema this executable understands but
+        # with invalid structure or records is not a recovery source.  Drop
+        # it rather than retaining transcript data indefinitely after the
+        # valid primary has been retained/rewritten. Future-schema snapshots
+        # are deliberately excluded and remain available to a newer build.
+        supported_temporary = [
+            item for item in temporary_payloads
+            if _version(item[3].get(
+                "schema_version", item[3].get("version")))
+            <= HISTORY_SCHEMA_VERSION
+        ]
+        for item in supported_temporary:
+            if not _is_recoverable_snapshot(item[3]):
+                self._remove_best_effort(item[2])
+        supported_temporary = [
+            item for item in supported_temporary
+            if _is_recoverable_snapshot(item[3])
+        ]
+
         if current is not None:
             current_version = _version(
                 current.get("schema_version", current.get("version")))
@@ -502,10 +521,6 @@ class HistoryStore:
             # between flushing the new snapshot and ``os.replace``. Recover it
             # when its mtime proves it is newer; an older leftover is from a
             # failed/retried write and the committed primary wins.
-            supported_temporary = [
-                item for item in temporary_payloads
-                if _is_recoverable_snapshot(item[3])
-            ]
             if not supported_temporary:
                 return current
             try:
@@ -542,10 +557,6 @@ class HistoryStore:
                 raise HistoryStoreError(
                     "The history file is unreadable or corrupt")
             return None
-        supported_temporary = [
-            item for item in temporary_payloads
-            if _is_recoverable_snapshot(item[3])
-        ]
         # Prefer a snapshot this executable understands. Unknown/future
         # snapshots remain untouched so a newer executable can recover them.
         if supported_temporary:
