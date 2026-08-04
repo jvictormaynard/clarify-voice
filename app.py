@@ -376,7 +376,18 @@ def _history_path_for_repositories(repositories=None) -> Path:
     """Keep injected test/profile repositories isolated from the real profile."""
 
     active = repositories or APP_REPOSITORIES
-    config_path = Path(getattr(active.config, "path", CONFIG_PATH))
+    explicit_history_path = getattr(active, "history_path", None)
+    if explicit_history_path is None:
+        config_path_value = getattr(active.config, "path", None)
+        if config_path_value is None:
+            raise ValueError(
+                "Pathless config repositories require an explicit history_path"
+            )
+        config_path = Path(config_path_value)
+    else:
+        config_path = Path(explicit_history_path)
+    if explicit_history_path is not None:
+        return config_path
     if config_path == Path(CONFIG_PATH):
         return HISTORY_PATH
     return config_path.with_name("history.json")
@@ -10444,9 +10455,13 @@ class App(ctk.CTk):
                     history_retention_days=_history_retention_days(
                         retention_values.get(retention_menu.get(),
                                              DEFAULT_RETENTION_DAYS)))
+                # Apply privacy-sensitive history changes immediately after
+                # persistence. A subsequent route refresh may fail while
+                # reading an adapter, but that must never leave a disabled
+                # live store recording text until the next restart.
+                self._configure_history_store()
                 workflow_controller.reload()
                 load_workflow_form(workflow_scope_state["scope"])
-                self._configure_history_store()
                 history_records()
             except (OSError, ValueError, ProviderError):
                 return

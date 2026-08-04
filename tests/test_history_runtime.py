@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import app
 from history_store import HistoryStore
-from repositories import AppConfig
+from repositories import AppConfig, ApplicationRepositories
 from workflows import WorkflowKind, WorkflowPhase, WorkflowState
 
 
@@ -90,6 +90,18 @@ class HistoryRuntimeTests(unittest.TestCase):
                 ),
             )
             self.assertFalse(path.exists())
+
+    def test_pathless_injected_repository_requires_explicit_history_path(self):
+        pathless = SimpleNamespace()
+        with self.assertRaises(ValueError):
+            app._history_path_for_repositories(
+                ApplicationRepositories(config=pathless, usage_stats=pathless))
+
+        with tempfile.TemporaryDirectory() as directory:
+            expected = Path(directory) / "isolated-history.json"
+            bundle = ApplicationRepositories(
+                config=pathless, usage_stats=pathless, history_path=expected)
+            self.assertEqual(app._history_path_for_repositories(bundle), expected)
 
 
 if __name__ == "__main__":

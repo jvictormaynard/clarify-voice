@@ -86,6 +86,12 @@ focus-safe source target after completion, so silently replaying a record would
 be unsafe. The page labels this boundary rather than pretending that retry is
 available.
 
+The normal profile stores `history.json` beside `config.json`. Injected
+repository bundles use that same profile-relative rule only when their config
+adapter exposes a local `path`; a pathless adapter must set
+`ApplicationRepositories.history_path` explicitly, otherwise startup fails
+closed instead of writing transcripts to the production profile.
+
 ## Follow-up needed for #53
 
 Packaged Windows acceptance remains: verify the installed Settings path,

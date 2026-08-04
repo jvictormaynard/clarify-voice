@@ -1416,3 +1416,8 @@ JsonUsageStatsRepository = LocalUsageStatsRepository
 class ApplicationRepositories:
     config: ConfigRepository
     usage_stats: UsageStatsRepository
+    # Optional per-profile transcript location.  ConfigRepository is an
+    # intentionally small interface and does not require a filesystem path;
+    # callers using a pathless adapter must provide this explicitly before the
+    # desktop can construct its opt-in HistoryStore.
+    history_path: Path | None = None
