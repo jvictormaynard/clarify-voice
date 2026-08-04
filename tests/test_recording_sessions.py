@@ -710,6 +710,7 @@ class RecordingSessionTests(unittest.TestCase):
                 self.assertTrue(session.wait_for_shutdown(1))
 
             if cleanup.call_count != 1:
+                print("target cleanup path:", path)
                 print("unexpected cleanup calls:", cleanup.call_args_list)
             self.assertEqual(cleanup.call_count, 1)
             self.assertFalse(path.exists())
