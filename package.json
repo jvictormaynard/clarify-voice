@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "test": "python3 -m unittest discover -s tests -v",
-    "check": "python3 -m compileall -q app.py repositories.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py local_asr_product.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests",
+    "check": "python3 -m compileall -q app.py repositories.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py local_asr_product.py dictionary_snippets.py microphone_controls.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests",
     "build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build.ps1",
     "installer": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-installer.ps1",
     "setup": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup.ps1 -Dev",
