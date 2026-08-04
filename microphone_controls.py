@@ -22,7 +22,7 @@ backend, Tk, or secret-storage imports.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import math
@@ -363,12 +363,6 @@ class MicrophoneInventory:
             # not expose endpoints that would resolve to one another when
             # host APIs share that name; they remain visible in the snapshot
             # but are explicitly non-selectable for Settings and Recorder.
-            devices = tuple(
-                replace(device, available=False)
-                if device.usable and device.name.casefold() in ambiguous_names
-                else device
-                for device in devices
-            )
             object.__setattr__(
                 self, "error_code", self.error_code or "ambiguous_name")
         default_id = self.default_id
@@ -425,7 +419,19 @@ class MicrophoneInventory:
 
     @property
     def available_devices(self) -> tuple[MicrophoneDevice, ...]:
-        return tuple(device for device in self.devices if device.usable)
+        ambiguous_names = self._ambiguous_names()
+        return tuple(
+            device for device in self.devices
+            if device.usable and device.name.casefold() not in ambiguous_names
+        )
+
+    def _ambiguous_names(self) -> frozenset[str]:
+        counts: dict[str, int] = {}
+        for device in self.devices:
+            if device.usable:
+                name = device.name.casefold()
+                counts[name] = counts.get(name, 0) + 1
+        return frozenset(name for name, count in counts.items() if count > 1)
 
     def _default_device(self) -> MicrophoneDevice | None:
         if not self.default_id:
@@ -440,11 +446,16 @@ class MicrophoneInventory:
         """Resolve a saved preference without silently choosing an arbitrary device."""
 
         requested = str(requested_id).strip() if requested_id else None
+        ambiguous_names = self._ambiguous_names()
         matches = tuple(
             device for device in self.devices
             if requested and device.stable_id == requested
         )
-        if len(matches) == 1 and matches[0].usable:
+        if (
+            len(matches) == 1
+            and matches[0].usable
+            and matches[0].name.casefold() not in ambiguous_names
+        ):
             return MicrophoneSelection(
                 MicrophoneSelectionState.SELECTED,
                 matches[0], requested, "requested_device_available")
@@ -543,6 +554,23 @@ class SoundDeviceMicrophoneInventory:
                             record["host_api"] = host_name
                     normalized_records.append(record)
                 records = tuple(normalized_records)
+            indexed_records = []
+            for index, record in enumerate(records):
+                if not isinstance(record, Mapping):
+                    indexed_records.append(record)
+                    continue
+                record = dict(record)
+                has_backend_index = any(
+                    key in record and record[key] is not None
+                    for key in ("backend_index", "index", "device_index")
+                )
+                if not has_backend_index:
+                    # ``query_devices`` returns the complete PortAudio list;
+                    # its query position is the backend handle when a fake or
+                    # wrapper omitted the explicit index field.
+                    record["index"] = index
+                indexed_records.append(record)
+            records = tuple(indexed_records)
             default = getattr(getattr(self._sounddevice, "default", None), "device", None)
             default_index = None
             if isinstance(default, (tuple, list)):

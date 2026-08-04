@@ -152,14 +152,41 @@ class MicrophoneControlsTests(unittest.TestCase):
         first, second = inventory.devices
 
         self.assertNotEqual(first.stable_id, second.stable_id)
-        self.assertFalse(first.available)
-        self.assertFalse(second.available)
+        # The physical endpoints remain usable for the system-default route,
+        # but ambiguous display names are hidden from explicit selection.
+        self.assertTrue(first.available)
+        self.assertTrue(second.available)
         self.assertEqual(inventory.available_devices, ())
 
         selection = inventory.resolve(first.stable_id)
         self.assertEqual(selection.state, MicrophoneSelectionState.UNAVAILABLE)
         self.assertFalse(selection.can_record)
         self.assertIsNone(selection.device)
+
+    def test_duplicate_default_name_keeps_system_default_route(self):
+        inventory = MicrophoneInventory.from_records(
+            [
+                {
+                    "name": "Shared headset",
+                    "host_api": "Windows WASAPI",
+                    "native_id": "wasapi-headset",
+                    "is_default": True,
+                    "max_input_channels": 1,
+                },
+                {
+                    "name": "Shared headset",
+                    "host_api": "MME",
+                    "native_id": "mme-headset",
+                    "max_input_channels": 1,
+                },
+            ]
+        )
+
+        selection = inventory.resolve()
+        self.assertEqual(selection.state, MicrophoneSelectionState.DEFAULT)
+        self.assertTrue(selection.can_record)
+        self.assertEqual(selection.device.name, "Shared headset")
+        self.assertEqual(inventory.available_devices, ())
 
     def test_missing_default_is_explicitly_unavailable_not_arbitrary(self):
         inventory = MicrophoneInventory.from_records([
@@ -201,7 +228,25 @@ class MicrophoneControlsTests(unittest.TestCase):
         )
         inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
         self.assertEqual(inventory.default_id, inventory.devices[1].stable_id)
+        self.assertEqual(
+            [device.backend_index for device in inventory.devices], [0, 1])
         self.assertNotIn("index", inventory.devices[1].to_mapping())
+
+    def test_sounddevice_adapter_assigns_query_index_when_record_omits_it(self):
+        fake = SimpleNamespace(
+            query_devices=lambda: [
+                {"name": "Other", "max_input_channels": 1},
+                {"name": "Selected", "max_input_channels": 1},
+            ],
+            default=SimpleNamespace(device=(0, -1)),
+        )
+
+        inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
+
+        self.assertEqual(
+            [device.backend_index for device in inventory.devices], [0, 1])
+        selected = inventory.resolve(inventory.devices[1].stable_id)
+        self.assertEqual(selected.device.backend_index, 1)
 
     def test_sounddevice_adapter_accepts_pair_like_default(self):
         class InputOutputPair:
