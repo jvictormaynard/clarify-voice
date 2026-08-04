@@ -47,6 +47,7 @@ from dictionary_snippets import (
     DictionarySnippetService,
     LocalDictionarySnippetsRepository,
 )
+from dictionary_settings import DictionarySettingsController
 from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
 from local_asr_product import (
     LocalASRProductController,
@@ -108,9 +109,10 @@ from workflows import (
 
 try:
     import tkinter as tk
-    from tkinter import messagebox
+    from tkinter import filedialog, messagebox
 except Exception:
     tk = None
+    filedialog = None
     messagebox = None
 
 try:
@@ -213,6 +215,7 @@ APP_REPOSITORIES = ApplicationRepositories(
 DICTIONARY_SERVICE = DictionarySnippetService(
     LocalDictionarySnippetsRepository(DICTIONARY_PATH)
 )
+DICTIONARY_SETTINGS = DictionarySettingsController(DICTIONARY_SERVICE)
 
 SUPPORTED_LANGUAGES = ("en", "pt", "es", "de", "ru")
 LANGUAGE_FLAGS = {
@@ -1867,6 +1870,37 @@ STRINGS = {
         "settings": "Settings", "provider": "Provider:",
         "settings_section": "Settings", "models_section": "Models",
         "providers_section": "Providers", "statistics_section": "Statistics",
+        "dictionary_section": "Dictionary",
+        "dictionary_title": "Dictionary & snippets",
+        "dictionary_subtitle": "Keep vocabulary and text expansions on this device.",
+        "dictionary_search": "Search terms, triggers, aliases, or replacements",
+        "dictionary_add_term": "+ Dictionary term",
+        "dictionary_add_snippet": "+ Snippet",
+        "dictionary_empty": "No entries match your search.",
+        "dictionary_term": "Term",
+        "dictionary_pronunciation": "Pronunciation (optional)",
+        "dictionary_aliases": "Aliases (comma separated)",
+        "dictionary_trigger": "Trigger",
+        "dictionary_replacement": "Replacement",
+        "dictionary_enabled": "Enabled",
+        "dictionary_case_sensitive": "Case sensitive",
+        "dictionary_edit": "Edit",
+        "dictionary_delete": "Delete",
+        "dictionary_reset": "Reset all",
+        "dictionary_reset_confirm": "Reset all dictionary terms and snippets?",
+        "dictionary_preview": "Preview snippet expansion",
+        "dictionary_preview_input": "Sample text",
+        "dictionary_preview_output": "Expanded text",
+        "dictionary_preview_button": "Preview",
+        "dictionary_import": "Import",
+        "dictionary_export": "Export",
+        "dictionary_saved": "Saved locally.",
+        "dictionary_deleted": "Deleted.",
+        "dictionary_reset_done": "Dictionary and snippets reset.",
+        "dictionary_imported": "Imported and saved locally.",
+        "dictionary_exported": "Exported.",
+        "dictionary_error": "Could not save: {error}",
+        "dictionary_file": "Dictionary JSON",
         "statistics_title": "Usage overview",
         "statistics_subtitle": "Local totals from successful ClarifyVoice actions",
         "stat_recordings": "Recordings", "stat_recording_time": "Recording time",
@@ -2154,6 +2188,95 @@ STRINGS = {
         "apply": "Применить", "save": "Сохранить", "cancel": "Отмена",
     },
 }
+
+# Keep the Settings catalog complete in every supported locale.  These labels
+# are separate from provider/runtime strings so adding a profile page cannot
+# silently make the language switcher expose raw translation keys.
+_DICTIONARY_TRANSLATIONS = {
+    "pt": {
+        "dictionary_section": "Dicionário", "dictionary_title": "Dicionário e snippets",
+        "dictionary_subtitle": "Mantenha vocabulário e expansões de texto neste dispositivo.",
+        "dictionary_search": "Pesquisar termos, gatilhos, aliases ou substituições",
+        "dictionary_add_term": "+ Termo do dicionário", "dictionary_add_snippet": "+ Snippet",
+        "dictionary_empty": "Nenhum item corresponde à busca.", "dictionary_term": "Termo",
+        "dictionary_pronunciation": "Pronúncia (opcional)",
+        "dictionary_aliases": "Aliases (separados por vírgula)", "dictionary_trigger": "Gatilho",
+        "dictionary_replacement": "Substituição", "dictionary_enabled": "Ativo",
+        "dictionary_case_sensitive": "Diferenciar maiúsculas", "dictionary_edit": "Editar",
+        "dictionary_delete": "Excluir", "dictionary_reset": "Redefinir tudo",
+        "dictionary_reset_confirm": "Redefinir todos os termos e snippets?",
+        "dictionary_preview": "Prévia da expansão de snippets", "dictionary_preview_input": "Texto de exemplo",
+        "dictionary_preview_output": "Texto expandido", "dictionary_preview_button": "Visualizar",
+        "dictionary_import": "Importar", "dictionary_export": "Exportar",
+        "dictionary_saved": "Salvo localmente.", "dictionary_deleted": "Excluído.",
+        "dictionary_reset_done": "Dicionário e snippets redefinidos.",
+        "dictionary_imported": "Importado e salvo localmente.", "dictionary_exported": "Exportado.",
+        "dictionary_error": "Não foi possível salvar: {error}", "dictionary_file": "JSON do dicionário",
+    },
+    "es": {
+        "dictionary_section": "Diccionario", "dictionary_title": "Diccionario y snippets",
+        "dictionary_subtitle": "Mantén el vocabulario y las expansiones de texto en este dispositivo.",
+        "dictionary_search": "Buscar términos, activadores, alias o reemplazos",
+        "dictionary_add_term": "+ Término del diccionario", "dictionary_add_snippet": "+ Snippet",
+        "dictionary_empty": "Ningún elemento coincide con la búsqueda.", "dictionary_term": "Término",
+        "dictionary_pronunciation": "Pronunciación (opcional)",
+        "dictionary_aliases": "Alias (separados por comas)", "dictionary_trigger": "Activador",
+        "dictionary_replacement": "Reemplazo", "dictionary_enabled": "Activado",
+        "dictionary_case_sensitive": "Distinguir mayúsculas", "dictionary_edit": "Editar",
+        "dictionary_delete": "Eliminar", "dictionary_reset": "Restablecer todo",
+        "dictionary_reset_confirm": "¿Restablecer todos los términos y snippets?",
+        "dictionary_preview": "Vista previa de la expansión", "dictionary_preview_input": "Texto de ejemplo",
+        "dictionary_preview_output": "Texto expandido", "dictionary_preview_button": "Vista previa",
+        "dictionary_import": "Importar", "dictionary_export": "Exportar",
+        "dictionary_saved": "Guardado localmente.", "dictionary_deleted": "Eliminado.",
+        "dictionary_reset_done": "Diccionario y snippets restablecidos.",
+        "dictionary_imported": "Importado y guardado localmente.", "dictionary_exported": "Exportado.",
+        "dictionary_error": "No se pudo guardar: {error}", "dictionary_file": "JSON del diccionario",
+    },
+    "de": {
+        "dictionary_section": "Wörterbuch", "dictionary_title": "Wörterbuch und Snippets",
+        "dictionary_subtitle": "Vokabular und Texterweiterungen auf diesem Gerät verwalten.",
+        "dictionary_search": "Begriffe, Auslöser, Aliase oder Ersetzungen suchen",
+        "dictionary_add_term": "+ Wörterbuchbegriff", "dictionary_add_snippet": "+ Snippet",
+        "dictionary_empty": "Keine Einträge entsprechen der Suche.", "dictionary_term": "Begriff",
+        "dictionary_pronunciation": "Aussprache (optional)",
+        "dictionary_aliases": "Aliase (durch Kommas getrennt)", "dictionary_trigger": "Auslöser",
+        "dictionary_replacement": "Ersetzung", "dictionary_enabled": "Aktiviert",
+        "dictionary_case_sensitive": "Groß-/Kleinschreibung beachten", "dictionary_edit": "Bearbeiten",
+        "dictionary_delete": "Löschen", "dictionary_reset": "Alles zurücksetzen",
+        "dictionary_reset_confirm": "Alle Wörterbuchbegriffe und Snippets zurücksetzen?",
+        "dictionary_preview": "Vorschau der Snippet-Erweiterung", "dictionary_preview_input": "Beispieltext",
+        "dictionary_preview_output": "Erweiterter Text", "dictionary_preview_button": "Vorschau",
+        "dictionary_import": "Importieren", "dictionary_export": "Exportieren",
+        "dictionary_saved": "Lokal gespeichert.", "dictionary_deleted": "Gelöscht.",
+        "dictionary_reset_done": "Wörterbuch und Snippets zurückgesetzt.",
+        "dictionary_imported": "Importiert und lokal gespeichert.", "dictionary_exported": "Exportiert.",
+        "dictionary_error": "Speichern nicht möglich: {error}", "dictionary_file": "Wörterbuch-JSON",
+    },
+    "ru": {
+        "dictionary_section": "Словарь", "dictionary_title": "Словарь и сниппеты",
+        "dictionary_subtitle": "Храните словарь и текстовые подстановки на этом устройстве.",
+        "dictionary_search": "Поиск терминов, триггеров, псевдонимов или замен",
+        "dictionary_add_term": "+ Термин словаря", "dictionary_add_snippet": "+ Сниппет",
+        "dictionary_empty": "Нет элементов, соответствующих поиску.", "dictionary_term": "Термин",
+        "dictionary_pronunciation": "Произношение (необязательно)",
+        "dictionary_aliases": "Псевдонимы (через запятую)", "dictionary_trigger": "Триггер",
+        "dictionary_replacement": "Замена", "dictionary_enabled": "Включён",
+        "dictionary_case_sensitive": "Учитывать регистр", "dictionary_edit": "Изменить",
+        "dictionary_delete": "Удалить", "dictionary_reset": "Сбросить всё",
+        "dictionary_reset_confirm": "Сбросить все термины словаря и сниппеты?",
+        "dictionary_preview": "Предпросмотр подстановки", "dictionary_preview_input": "Пример текста",
+        "dictionary_preview_output": "Результат", "dictionary_preview_button": "Предпросмотр",
+        "dictionary_import": "Импорт", "dictionary_export": "Экспорт",
+        "dictionary_saved": "Сохранено локально.", "dictionary_deleted": "Удалено.",
+        "dictionary_reset_done": "Словарь и сниппеты сброшены.",
+        "dictionary_imported": "Импортировано и сохранено локально.", "dictionary_exported": "Экспортировано.",
+        "dictionary_error": "Не удалось сохранить: {error}", "dictionary_file": "JSON словаря",
+    },
+}
+for _locale, _translations in _DICTIONARY_TRANSLATIONS.items():
+    STRINGS[_locale].update(_translations)
+del _locale, _translations, _DICTIONARY_TRANSLATIONS
 
 def _provider_url(base_url: str, version: str, endpoint: str) -> str:
     """Compatibility facade for the centralized adapter URL normalizer."""
@@ -5525,7 +5648,8 @@ class App(ctk.CTk):
         self._save_ui_preferences()
 
     def _t(self, key):
-        return STRINGS.get(self.lang, STRINGS["en"]).get(key, key)
+        language_strings = STRINGS.get(self.lang, STRINGS["en"])
+        return language_strings.get(key, STRINGS["en"].get(key, key))
 
     def _toggle_lang(self):
         self.lang = _next_language(self.lang)
@@ -7704,6 +7828,7 @@ class App(ctk.CTk):
             "models": ctk.CTkFrame(content, fg_color="transparent"),
             "statistics": ctk.CTkFrame(content, fg_color="transparent"),
             "settings": ctk.CTkFrame(content, fg_color="transparent"),
+            "dictionary": ctk.CTkFrame(content, fg_color="transparent"),
             "providers": ctk.CTkFrame(content, fg_color="transparent"),
         }
         detail_pages = {
@@ -8067,6 +8192,376 @@ class App(ctk.CTk):
                 f"{self._t('stat_rewrites')}: {summary['rewrites']}",
                 f"{self._t('stat_translations')}: {summary['translations']}",
             )))
+
+        # Dictionary and snippets are a local profile, independent from
+        # provider credentials and usage statistics.  The controller keeps
+        # this page's callbacks free of persistence and validation details.
+        dictionary_controller = DICTIONARY_SETTINGS
+        dictionary_inner = ctk.CTkFrame(
+            pages["dictionary"], fg_color="transparent")
+        dictionary_inner.pack(fill="both", expand=True, padx=22, pady=18)
+        ctk.CTkLabel(dictionary_inner, text=self._t("dictionary_title"),
+            text_color=TEXT, font=font_title, anchor="w").pack(fill="x")
+        ctk.CTkLabel(dictionary_inner, text=self._t("dictionary_subtitle"),
+            text_color=DIM, font=font_label, anchor="w", justify="left",
+            wraplength=430).pack(fill="x", pady=(1, 10))
+
+        dictionary_toolbar = ctk.CTkFrame(
+            dictionary_inner, fg_color="transparent")
+        dictionary_toolbar.pack(fill="x")
+        dictionary_search = ctk.CTkEntry(
+            dictionary_toolbar, height=32, corner_radius=10,
+            fg_color="#050505", text_color=TEXT, border_color=BORDER,
+            border_width=1, font=font_body,
+            placeholder_text=self._t("dictionary_search"))
+        dictionary_search.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(
+            dictionary_toolbar, text=self._t("dictionary_add_term"), width=112,
+            height=32, corner_radius=16, fg_color="#242424",
+            hover_color="#303030", text_color=TEXT, font=font_caption,
+            command=lambda: open_dictionary_editor("dictionary")).pack(
+                side="left", padx=2)
+        ctk.CTkButton(
+            dictionary_toolbar, text=self._t("dictionary_add_snippet"), width=92,
+            height=32, corner_radius=16, fg_color="#242424",
+            hover_color="#303030", text_color=TEXT, font=font_caption,
+            command=lambda: open_dictionary_editor("snippet")).pack(
+                side="left", padx=2)
+
+        dictionary_rows = ctk.CTkScrollableFrame(
+            dictionary_inner, fg_color="#111111", corner_radius=11,
+            border_width=1, border_color="#252525",
+            scrollbar_button_color="#303030",
+            scrollbar_button_hover_color="#444444")
+        dictionary_rows.pack(fill="both", expand=True, pady=(9, 7))
+
+        dictionary_status = ctk.CTkLabel(
+            dictionary_inner, text="", text_color=DIM, font=font_caption,
+            anchor="w", justify="left", wraplength=430)
+        dictionary_status.pack(fill="x", pady=(0, 5))
+
+        preview_section = ctk.CTkFrame(
+            dictionary_inner, fg_color="#111111", corner_radius=11,
+            border_width=1, border_color="#252525")
+        preview_section.pack(fill="x", pady=(0, 1))
+        ctk.CTkLabel(preview_section, text=self._t("dictionary_preview"),
+            text_color=TEXT, font=font_body, anchor="w").pack(
+                side="left", padx=(12, 5), pady=(8, 4))
+        preview_button = ctk.CTkButton(
+            preview_section, text=self._t("dictionary_preview_button"),
+            width=78, height=26, corner_radius=13, fg_color="#242424",
+            hover_color="#303030", text_color=TEXT, font=font_caption)
+        preview_button.pack(side="right", padx=10, pady=(6, 4))
+        ctk.CTkLabel(dictionary_inner, text=self._t("dictionary_preview_input"),
+            text_color=DIM, font=font_caption, anchor="w").pack(
+                fill="x", pady=(5, 0))
+        preview_input = ctk.CTkTextbox(
+            dictionary_inner, height=48, fg_color="#050505", text_color=TEXT,
+            border_width=1, border_color=BORDER, font=font_body,
+            wrap="word")
+        preview_input.pack(fill="x", pady=(3, 3))
+        preview_input.insert("1.0", ";meet")
+        ctk.CTkLabel(dictionary_inner, text=self._t("dictionary_preview_output"),
+            text_color=DIM, font=font_caption, anchor="w").pack(fill="x")
+        preview_output = ctk.CTkTextbox(
+            dictionary_inner, height=48, fg_color="#050505", text_color=TEXT,
+            border_width=1, border_color=BORDER, font=font_body,
+            wrap="word")
+        preview_output.pack(fill="x", pady=(3, 0))
+        preview_output.configure(state="disabled")
+
+        def _set_preview_output(value):
+            preview_output.configure(state="normal")
+            preview_output.delete("1.0", "end")
+            preview_output.insert("1.0", value)
+            preview_output.configure(state="disabled")
+
+        def preview_dictionary():
+            try:
+                _set_preview_output(dictionary_controller.preview(
+                    preview_input.get("1.0", "end-1c")))
+                dictionary_status.configure(text="")
+            except (TypeError, ValueError, OSError) as error:
+                dictionary_status.configure(
+                    text=self._t("dictionary_error").format(error=error),
+                    text_color="#d17878")
+
+        preview_button.configure(command=preview_dictionary)
+
+        def dictionary_error(error):
+            dictionary_status.configure(
+                text=self._t("dictionary_error").format(error=error),
+                text_color="#d17878")
+
+        def delete_dictionary_item(item):
+            confirmed = True
+            if messagebox is not None:
+                confirmed = messagebox.askyesno(
+                    self._t("dictionary_delete"),
+                    f"{self._t('dictionary_delete')} {item.label}?",
+                    parent=win)
+            if not confirmed:
+                return
+            try:
+                if item.kind == "dictionary":
+                    dictionary_controller.delete_dictionary(item.index)
+                else:
+                    dictionary_controller.delete_snippet(item.index)
+            except (IndexError, ValueError, OSError) as error:
+                dictionary_error(error)
+                return
+            dictionary_status.configure(
+                text=self._t("dictionary_deleted"), text_color="#69c58a")
+            render_dictionary_rows()
+
+        def render_dictionary_rows(_event=None):
+            for child in dictionary_rows.winfo_children():
+                child.destroy()
+            items = dictionary_controller.search(dictionary_search.get())
+            if not items:
+                ctk.CTkLabel(dictionary_rows,
+                    text=self._t("dictionary_empty"), text_color=DIM,
+                    font=font_label, anchor="w").pack(
+                        fill="x", padx=12, pady=14)
+                return
+            for item in items:
+                row = ctk.CTkFrame(
+                    dictionary_rows, height=46, corner_radius=9,
+                    fg_color="#151515")
+                row.pack(fill="x", padx=4, pady=2)
+                row.pack_propagate(False)
+                label_frame = ctk.CTkFrame(row, fg_color="transparent")
+                label_frame.pack(side="left", fill="both", expand=True,
+                    padx=(10, 4), pady=3)
+                kind_label = (self._t("dictionary_term")
+                              if item.kind == "dictionary"
+                              else self._t("dictionary_trigger"))
+                ctk.CTkLabel(label_frame,
+                    text=f"{item.label}  ·  {kind_label}", text_color=TEXT,
+                    font=font_label, anchor="w").pack(fill="x")
+                if item.detail:
+                    ctk.CTkLabel(label_frame, text=item.detail,
+                        text_color="#777777", font=font_caption, anchor="w",
+                        wraplength=255).pack(fill="x")
+                state_text = (self._t("dictionary_enabled")
+                              if item.enabled else "Disabled")
+                ctk.CTkLabel(row, text=state_text, text_color="#69c58a"
+                    if item.enabled else "#777777", font=font_caption,
+                    width=54).pack(side="left", padx=(0, 3))
+                ctk.CTkButton(row, text=self._t("dictionary_edit"), width=44,
+                    height=25, corner_radius=12, fg_color="transparent",
+                    hover_color="#292929", text_color=DIM,
+                    font=font_caption,
+                    command=lambda current=item: open_dictionary_editor(
+                        current.kind, current.index)).pack(side="left", padx=1)
+                ctk.CTkButton(row, text=self._t("dictionary_delete"), width=52,
+                    height=25, corner_radius=12, fg_color="transparent",
+                    hover_color="#321e1e", text_color="#b67b7b",
+                    font=font_caption,
+                    command=lambda current=item: delete_dictionary_item(
+                        current)).pack(side="left", padx=(1, 5))
+
+        dictionary_search.bind("<KeyRelease>", render_dictionary_rows)
+
+        def open_dictionary_editor(kind, index=None):
+            state = dictionary_controller.state
+            current = None
+            if index is not None:
+                current = (state.dictionary[index] if kind == "dictionary"
+                           else state.snippets[index])
+            editor = ctk.CTkToplevel(win)
+            editor.title(self._t("dictionary_edit") if index is not None
+                         else (self._t("dictionary_add_term")
+                               if kind == "dictionary"
+                               else self._t("dictionary_add_snippet")))
+            editor.geometry("455x410" if kind == "snippet" else "455x330")
+            editor.configure(fg_color=CARD)
+            editor.transient(win)
+            editor.grab_set()
+            editor.lift()
+            editor.focus_force()
+            form = ctk.CTkFrame(editor, fg_color="transparent")
+            form.pack(fill="both", expand=True, padx=18, pady=16)
+            fields = {}
+
+            def add_entry(name, label, value=""):
+                ctk.CTkLabel(form, text=label, text_color=DIM,
+                    font=font_label, anchor="w").pack(fill="x", pady=(0, 3))
+                entry = ctk.CTkEntry(
+                    form, height=30, corner_radius=9, fg_color="#050505",
+                    text_color=TEXT, border_color=BORDER, border_width=1,
+                    font=font_body)
+                entry.pack(fill="x", pady=(0, 8))
+                if value:
+                    entry.insert(0, value)
+                fields[name] = entry
+                return entry
+
+            if kind == "dictionary":
+                add_entry("term", self._t("dictionary_term"),
+                    current.term if current else "")
+                add_entry("pronunciation", self._t("dictionary_pronunciation"),
+                    current.pronunciation if current else "")
+                add_entry("aliases", self._t("dictionary_aliases"),
+                    ", ".join(current.aliases) if current else "")
+            else:
+                add_entry("trigger", self._t("dictionary_trigger"),
+                    current.trigger if current else "")
+                ctk.CTkLabel(form, text=self._t("dictionary_replacement"),
+                    text_color=DIM, font=font_label, anchor="w").pack(
+                        fill="x", pady=(0, 3))
+                replacement = ctk.CTkTextbox(
+                    form, height=105, fg_color="#050505", text_color=TEXT,
+                    border_width=1, border_color=BORDER, font=font_body,
+                    wrap="word")
+                replacement.pack(fill="x", pady=(0, 8))
+                if current:
+                    replacement.insert("1.0", current.replacement)
+                fields["replacement"] = replacement
+            enabled = ctk.CTkSwitch(
+                form, text=self._t("dictionary_enabled"), height=24,
+                switch_width=36, switch_height=18, corner_radius=9,
+                border_width=1, fg_color="#171717", progress_color="#e7e7e7",
+                button_color="#777777", text_color=TEXT, font=font_label)
+            enabled.pack(fill="x", pady=(1, 4))
+            if current is None or current.enabled:
+                enabled.select()
+            else:
+                enabled.deselect()
+            case_sensitive = None
+            if kind == "snippet":
+                case_sensitive = ctk.CTkSwitch(
+                    form, text=self._t("dictionary_case_sensitive"), height=24,
+                    switch_width=36, switch_height=18, corner_radius=9,
+                    border_width=1, fg_color="#171717", progress_color="#e7e7e7",
+                    button_color="#777777", text_color=TEXT, font=font_label)
+                case_sensitive.pack(fill="x", pady=(0, 4))
+                if current and current.case_sensitive:
+                    case_sensitive.select()
+            error_label = ctk.CTkLabel(
+                form, text="", text_color="#d17878", font=font_caption,
+                anchor="w", justify="left", wraplength=410)
+            error_label.pack(fill="x", pady=(3, 4))
+            actions = ctk.CTkFrame(form, fg_color="transparent")
+            actions.pack(fill="x")
+            ctk.CTkButton(
+                actions, text=self._t("cancel"), width=85, height=30,
+                corner_radius=15, fg_color="transparent", hover_color="#292929",
+                text_color=DIM, font=font_label,
+                command=editor.destroy).pack(side="right", padx=(6, 0))
+
+            def save_dictionary_item():
+                try:
+                    if kind == "dictionary":
+                        aliases = tuple(alias.strip() for alias in fields["aliases"].get().split(",")
+                                        if alias.strip())
+                        values = {
+                            "term": fields["term"].get(),
+                            "pronunciation": fields["pronunciation"].get(),
+                            "aliases": aliases,
+                            "enabled": bool(enabled.get()),
+                        }
+                        if index is None:
+                            dictionary_controller.add_dictionary(**values)
+                        else:
+                            dictionary_controller.update_dictionary(index, **values)
+                    else:
+                        values = {
+                            "trigger": fields["trigger"].get(),
+                            "replacement": fields["replacement"].get("1.0", "end-1c"),
+                            "enabled": bool(enabled.get()),
+                            "case_sensitive": bool(case_sensitive.get()),
+                        }
+                        if index is None:
+                            dictionary_controller.add_snippet(**values)
+                        else:
+                            dictionary_controller.update_snippet(index, **values)
+                except (IndexError, OSError, ValueError) as error:
+                    error_label.configure(text=self._t("dictionary_error").format(
+                        error=error))
+                    return
+                editor.destroy()
+                dictionary_status.configure(
+                    text=self._t("dictionary_saved"), text_color="#69c58a")
+                render_dictionary_rows()
+
+            ctk.CTkButton(
+                actions, text=self._t("save"), width=85, height=30,
+                corner_radius=15, fg_color="#ededed", hover_color="#ffffff",
+                text_color="#050505", font=font_label,
+                command=save_dictionary_item).pack(side="right")
+            editor.bind("<Escape>", lambda _event: editor.destroy())
+
+        def reset_dictionary():
+            if messagebox is not None and not messagebox.askyesno(
+                    self._t("dictionary_reset"),
+                    self._t("dictionary_reset_confirm"), parent=win):
+                return
+            try:
+                dictionary_controller.reset()
+            except (OSError, ValueError) as error:
+                dictionary_error(error)
+                return
+            dictionary_status.configure(
+                text=self._t("dictionary_reset_done"), text_color="#69c58a")
+            render_dictionary_rows()
+
+        def export_dictionary():
+            if filedialog is None:
+                return
+            destination = filedialog.asksaveasfilename(
+                parent=win, title=self._t("dictionary_export"),
+                defaultextension=".json",
+                filetypes=[(self._t("dictionary_file"), "*.json"),
+                           ("All files", "*.*")])
+            if not destination:
+                return
+            try:
+                dictionary_controller.export_to(destination)
+            except (OSError, ValueError) as error:
+                dictionary_error(error)
+                return
+            dictionary_status.configure(
+                text=self._t("dictionary_exported"), text_color="#69c58a")
+
+        def import_dictionary():
+            if filedialog is None:
+                return
+            source = filedialog.askopenfilename(
+                parent=win, title=self._t("dictionary_import"),
+                filetypes=[(self._t("dictionary_file"), "*.json"),
+                           ("All files", "*.*")])
+            if not source:
+                return
+            try:
+                document = Path(source).read_text(encoding="utf-8")
+                dictionary_controller.import_json(document)
+            except (OSError, ValueError) as error:
+                dictionary_error(error)
+                return
+            dictionary_status.configure(
+                text=self._t("dictionary_imported"), text_color="#69c58a")
+            render_dictionary_rows()
+
+        dictionary_footer = ctk.CTkFrame(
+            dictionary_inner, fg_color="transparent")
+        dictionary_footer.pack(fill="x", pady=(7, 0))
+        ctk.CTkButton(
+            dictionary_footer, text=self._t("dictionary_import"), width=76,
+            height=28, corner_radius=14, fg_color="transparent",
+            hover_color="#292929", text_color=DIM, font=font_caption,
+            command=import_dictionary).pack(side="left")
+        ctk.CTkButton(
+            dictionary_footer, text=self._t("dictionary_export"), width=76,
+            height=28, corner_radius=14, fg_color="transparent",
+            hover_color="#292929", text_color=DIM, font=font_caption,
+            command=export_dictionary).pack(side="left", padx=3)
+        ctk.CTkButton(
+            dictionary_footer, text=self._t("dictionary_reset"), width=84,
+            height=28, corner_radius=14, fg_color="transparent",
+            hover_color="#321e1e", text_color="#b67b7b", font=font_caption,
+            command=reset_dictionary).pack(side="right")
+        render_dictionary_rows()
 
         def select_model(provider, model):
             selected["provider"], selected["model"] = provider, model
@@ -8661,6 +9156,12 @@ class App(ctk.CTk):
             text_color=DIM, font=font_body,
             command=lambda: show_page("settings"))
         nav_buttons["settings"].pack(fill="x", padx=9, pady=3)
+        nav_buttons["dictionary"] = ctk.CTkButton(sidebar,
+            text=self._t("dictionary_section"), anchor="w", height=38,
+            corner_radius=9, fg_color="transparent", hover_color="#242424",
+            text_color=DIM, font=font_body,
+            command=lambda: show_page("dictionary"))
+        nav_buttons["dictionary"].pack(fill="x", padx=9, pady=3)
 
         apply_feedback_job = {"id": None, "active": False}
         apply_check_images = []
