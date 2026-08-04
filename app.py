@@ -2454,6 +2454,8 @@ def _language_display_name(value: str) -> str:
     if not text:
         return "English"
     key = text.casefold()
+    if key == "auto":
+        return "the detected source language"
     direct = LANG_NAMES.get(key)
     if direct:
         return direct

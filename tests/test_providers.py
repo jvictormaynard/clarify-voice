@@ -513,6 +513,52 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(app._language_display_name("zh-Hant"), "zh-Hant")
         self.assertEqual(app._language_display_name("fr-FR"), "fr-FR")
 
+    def test_language_display_name_maps_auto_to_detected_source_language(self):
+        self.assertEqual(
+            app._language_display_name("auto"),
+            "the detected source language",
+        )
+
+    def test_local_prompt_refinement_maps_auto_language_before_cloud_call(self):
+        original = app.APP_CONFIG.copy()
+        try:
+            app.APP_CONFIG.update({
+                "transcription_provider": "local_asr",
+                "local_asr_model": "ggml-small",
+                "local_asr_cloud_refinement": True,
+                "workflows": {
+                    **app.APP_CONFIG.get("workflows", {}),
+                    "local_asr_refinement": {
+                        "provider_id": "openai",
+                        "model_id": "gpt-4o-mini",
+                        "enabled": True,
+                        "independent": True,
+                    },
+                },
+            })
+            with patch.object(
+                    app.PROVIDER_REGISTRY, "transcribe",
+                    return_value=app.TranscriptionResult(
+                        "local transcript", "local_asr", "ggml-small")), \
+                    patch.object(
+                        app.PROVIDER_REGISTRY, "rewrite",
+                        return_value=app.TranscriptionResult(
+                            "refined transcript", "openai", "gpt-4o-mini")) as rewrite:
+                result = app._call_provider_audio(
+                    "local_asr", self.audio_path, "prompt", "auto",
+                    audio_bytes=b"RIFF")
+
+            self.assertEqual(result, "refined transcript")
+            instruction = rewrite.call_args.args[1].instruction
+            self.assertIn(
+                "Output MUST be in the detected source language.",
+                instruction,
+            )
+            self.assertNotIn("Output MUST be in auto.", instruction)
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original)
+
     @patch("app.PROVIDER_HTTP.session.post")
     def test_openai_whisper_normalizes_regional_language_hint(self, post):
         app.APP_CONFIG.update({
