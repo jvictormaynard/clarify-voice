@@ -55,6 +55,8 @@ Build the current executable from the reviewed checkout and record its hash:
 
 ```powershell
 .\scripts\build.ps1 -OutputDirectory $run\dist
+$python = Join-Path (Get-Location) ".venv\Scripts\python.exe"
+if (-not (Test-Path $python)) { throw "Build did not prepare the project Python environment" }
 Get-FileHash $run\dist\ClarifyVoice.exe -Algorithm SHA256 |
     ConvertTo-Json | Set-Content $evidence\ClarifyVoice.exe.sha256.json
 ```
@@ -82,7 +84,7 @@ build alone is not a substitute.
 | W1 | Open Settings → Providers → Local Whisper before clicking Download | Requirements show Windows/CPU/AVX, VC++ runtime, RAM, disk, and download; `$assetRoot` does not exist and no sidecar process is running | Blocked: needs packaged Windows UI |
 | W2 | Click **Download local ASR** once and capture progress | Network starts only after the click; progress advances through runtime/model stages; final state is installed; `status` verifies every manifest digest | Blocked: needs packaged Windows UI/network |
 | W3 | Repeat `status` and inspect `$assetRoot` | `whisper-server.exe`, model, receipt, and license notices exist only below the owned root; no files are in the executable directory | Blocked: needs Windows install |
-| W4 | With a versioned WAV fixture, run `transcribe` once | Transcript is produced locally; capture harness JSON, audio duration, model/version, and no cloud request | Blocked: needs Windows sidecar + fixture |
+| W4 | With a versioned WAV fixture, run `transcribe` once | Transcript is produced locally; harness JSON includes audio duration, engine/model version, and no cloud request | Blocked: needs Windows sidecar + fixture |
 | W5 | Disable networking after W2, then run the same transcription again | Second transcription succeeds with network disabled; attach the offline transcript and network-isolation evidence | Blocked: requires disposable offline Windows run |
 | W6 | Start a fresh download and click **Cancel** during a transfer | UI becomes cancelled; no executable/model is published; no `.install-*` staging directory remains after the worker exits | Blocked: needs Windows UI/download |
 | W7 | Start inference, then exercise Cancel and close/quit while the sidecar is active | No `whisper-server.exe`, owned process record, or temporary WAV remains after bounded shutdown; attach `Get-Process`/filesystem snapshots | Blocked: needs packaged process lifecycle |
@@ -93,14 +95,20 @@ build alone is not a substitute.
 The harness commands for W4 and W9 are:
 
 ```powershell
-py scripts\local_asr_harness.py --root $assetRoot transcribe `
+$transcription = & $python scripts\local_asr_harness.py --root $assetRoot transcribe `
     --file C:\path\to\fixture.wav --language en > $evidence\offline-transcript.json
-py scripts\local_asr_harness.py --root $assetRoot benchmark `
+if ($LASTEXITCODE -ne 0) { throw "Local-ASR transcription failed with exit code $LASTEXITCODE" }
+$benchmark = & $python scripts\local_asr_harness.py --root $assetRoot benchmark `
     --file C:\path\to\fixture.wav --language en `
     --expected-text "Reference transcript" > $evidence\benchmark.json
+if ($LASTEXITCODE -ne 0) { throw "Local-ASR benchmark failed with exit code $LASTEXITCODE" }
 ```
 
-The benchmark JSON must include non-null `startup_seconds`,
+The harness must be invoked with the `.venv\Scripts\python.exe` prepared by
+`build.ps1`; the system `py` launcher is not guaranteed to have the locked
+runtime dependencies. The `transcribe` JSON must include non-null
+`audio_seconds`, `engine`, and `model` fields in addition to its local-only
+transcript. The benchmark JSON must include non-null `startup_seconds`,
 `inference_seconds`, `real_time_factor`, and `peak_working_set_bytes`. The
 fixture, reference transcript, and WER review are part of the evidence and
 must not be replaced by a synthetic unit-test audio buffer.
