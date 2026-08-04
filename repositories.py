@@ -852,6 +852,36 @@ class LocalConfigRepository(ConfigRepository):
             runtime = self._load_runtime_mapping(raw_mapping, migrated)
             return AppConfig.from_mapping(runtime, self.defaults)
 
+    def _model_from_mapping(
+        self,
+        config: Mapping[str, Any],
+        current_payload: Mapping[str, Any],
+    ) -> AppConfig:
+        """Merge partial legacy input with disk before normalizing routes."""
+        merged = dict(current_payload)
+        merged.update(dict(config))
+        model = AppConfig.from_mapping(merged, self.defaults)
+        legacy_workflow_keys = {
+            "transcription_provider",
+            "refinement_provider",
+            "refinement_model",
+            "local_asr_cloud_refinement",
+        }
+        legacy_workflow_keys.update(
+            metadata.audio_model_key for metadata in PROVIDER_REGISTRY.metadata
+        )
+        changed_keys = {
+            key for key in legacy_workflow_keys
+            if key in config and config.get(key) != current_payload.get(key)
+        }
+        if changed_keys:
+            legacy_values = dict(current_payload)
+            legacy_values.update(dict(config))
+            legacy_values.pop("workflows", None)
+            legacy_model = AppConfig.from_mapping(legacy_values, self.defaults)
+            model = model.synchronize_legacy_routes(legacy_model, changed_keys)
+        return model
+
     def save(self, config: AppConfig | Mapping[str, Any]) -> None:
         with self._lock:
             _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
@@ -869,31 +899,8 @@ class LocalConfigRepository(ConfigRepository):
                     raise UnsupportedSchemaVersionError(
                         f"Cannot save schema version {supplied_version} "
                         f"with supported version {CONFIG_SCHEMA_VERSION}")
-                model = AppConfig.from_mapping(config, self.defaults)
+                model = self._model_from_mapping(config, current_payload)
                 supplied_keys = set(config)
-                legacy_workflow_keys = {
-                    "transcription_provider",
-                    "refinement_provider",
-                    "refinement_model",
-                    "local_asr_cloud_refinement",
-                }
-                legacy_workflow_keys.update(
-                    metadata.audio_model_key
-                    for metadata in PROVIDER_REGISTRY.metadata
-                )
-                changed_keys = {
-                    key for key in legacy_workflow_keys
-                    if key in config
-                    and config.get(key) != current_payload.get(key)
-                }
-                if changed_keys:
-                    legacy_values = dict(current_payload)
-                    legacy_values.update(dict(config))
-                    legacy_values.pop("workflows", None)
-                    legacy_model = AppConfig.from_mapping(
-                        legacy_values, self.defaults)
-                    model = model.synchronize_legacy_routes(
-                        legacy_model, changed_keys)
 
             values = model.to_mapping()
             changes: dict[str, str] = {}
@@ -966,15 +973,28 @@ class LocalConfigRepository(ConfigRepository):
         settings callers validate every workflow before touching a provider,
         sidecar, or credential backend.
         """
-        model = config if isinstance(config, AppConfig) else AppConfig.from_mapping(
-            config, self.defaults
-        )
-        validated = replace(
-            model,
-            workflows=validate_workflow_config(model.workflows),
-        )
-        self.save(validated)
-        return validated
+        with self._lock:
+            if isinstance(config, AppConfig):
+                model = config
+                supplied_keys = None
+            else:
+                _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
+                current_payload = _read_json_mapping(self.path) or {}
+                model = self._model_from_mapping(config, current_payload)
+                supplied_keys = set(config)
+            validated = replace(
+                model,
+                workflows=validate_workflow_config(model.workflows),
+            )
+            if supplied_keys is None:
+                self.save(validated)
+            else:
+                persisted = validated.to_mapping()
+                for key in PROVIDER_SECRET_KEYS.values():
+                    if key not in supplied_keys:
+                        persisted.pop(key, None)
+                self.save(persisted)
+            return validated
 
     def reset_workflow(self, scope: WorkflowScope | str) -> AppConfig:
         """Reset and persist one workflow route while retaining other settings."""

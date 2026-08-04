@@ -22,6 +22,7 @@ from repositories import (
     WorkflowRoute,
     WorkflowScope,
     migrate_config_payload,
+    test_workflow_configuration,
     validate_workflow_config,
 )
 from secret_store import MemorySecretStore
@@ -109,15 +110,14 @@ class WorkflowConfigurationTests(unittest.TestCase):
                 "provider_id": "groq",
                 "model_id": "llama-3.3-70b-versatile",
                 "prompt": "translate independently",
+                "custom_endpoint": "https://proxy.example/v1",
             }
             repository.save(independent)
-            unrelated = repository.load().to_legacy_mapping()
-            unrelated["autostart"] = True
-            repository.save(unrelated)
-            self.assertEqual(
-                repository.load().workflow(WorkflowScope.TRANSLATION).provider_id,
-                "groq",
-            )
+            repository.save({"ui_language": "pt"})
+            preserved = repository.load().workflow(WorkflowScope.TRANSLATION)
+            self.assertEqual(preserved.provider_id, "groq")
+            self.assertEqual(preserved.custom_endpoint,
+                             "https://proxy.example/v1")
 
             legacy = repository.load().to_legacy_mapping()
             legacy.update({
@@ -127,7 +127,7 @@ class WorkflowConfigurationTests(unittest.TestCase):
                 "refinement_model": "llama-3.3-70b-versatile",
                 "local_asr_cloud_refinement": True,
             })
-            repository.save(legacy)
+            repository.apply(legacy)
 
             loaded = repository.load()
             self.assertEqual(
@@ -156,6 +156,61 @@ class WorkflowConfigurationTests(unittest.TestCase):
             PROVIDER_REGISTRY.connection_for_route(
                 "local_asr", connection, "https://proxy.example"
             )
+
+    def test_scoped_configuration_test_ignores_unrelated_invalid_routes(self):
+        workflows = AppConfig.from_mapping({
+            "workflows": {
+                "translation": {
+                    "provider_id": "groq",
+                    "model_id": "llama-3.3-70b-versatile",
+                },
+                "rewrite": {
+                    "provider_id": "local_asr",
+                    "model_id": "ggml-small",
+                },
+            },
+        }).workflows
+        result = test_workflow_configuration(workflows, "translation")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.scope, "translation")
+        with self.assertRaises(WorkflowConfigurationError) as raised:
+            test_workflow_configuration(workflows)
+        self.assertEqual(raised.exception.scope, "rewrite")
+
+    def test_diagnostics_reject_or_redact_endpoint_credentials(self):
+        with self.assertRaises(WorkflowConfigurationError):
+            validate_workflow_config(AppConfig.from_mapping({
+                "workflows": {
+                    "rewrite": {
+                        "provider_id": "openai",
+                        "custom_endpoint": "https://user:password@proxy.example/v1",
+                    },
+                },
+            }).workflows)
+        with self.assertRaises(WorkflowConfigurationError):
+            validate_workflow_config(AppConfig.from_mapping({
+                "workflows": {
+                    "rewrite": {
+                        "provider_id": "openai",
+                        "custom_endpoint": "https://proxy.example/v1?api_key=secret",
+                    },
+                },
+            }).workflows)
+
+        config = AppConfig.from_mapping({
+            "workflows": {
+                "rewrite": {
+                    "provider_id": "openai",
+                    "custom_endpoint": "https://proxy.example/v1?region=eu",
+                },
+            },
+        })
+        diagnostic = config.diagnostic_mapping()
+        self.assertEqual(
+            diagnostic["workflows"]["rewrite"]["custom_endpoint"],
+            "https://proxy.example/v1",
+        )
+        self.assertNotIn("region", json.dumps(diagnostic))
 
     def test_capability_errors_are_actionable_before_provider_work(self):
         workflows = AppConfig.from_mapping({

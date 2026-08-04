@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from provider_registry import PROVIDER_REGISTRY
 from provider_types import ProviderCapability, ProviderError
@@ -56,6 +57,11 @@ DEFAULT_WORKFLOW_PROMPTS = {
         "Rewrite the local transcript clearly while preserving its meaning."
     ),
 }
+_SENSITIVE_ENDPOINT_QUERY_KEYS = frozenset({
+    "api-key", "api_key", "apikey", "access_token", "auth", "authorization",
+    "client_secret", "credential", "password", "passwd", "secret",
+    "key", "sig", "signature", "token",
+})
 
 
 def normalize_workflow_scope(scope: WorkflowScope | str) -> str:
@@ -63,6 +69,25 @@ def normalize_workflow_scope(scope: WorkflowScope | str) -> str:
     value = scope.value if isinstance(scope, WorkflowScope) else str(scope or "")
     value = value.strip().lower()
     return _WORKFLOW_SCOPE_ALIASES.get(value, value)
+
+
+def _safe_endpoint_for_diagnostics(endpoint: str) -> str:
+    """Keep only public URL components in diagnostics, never URL secrets."""
+    value = str(endpoint or "").strip().rstrip("/")
+    if not value:
+        return ""
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+        if parts.scheme.lower() not in ("http", "https") or not hostname:
+            return ""
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        port = parts.port
+        netloc = hostname if port is None else f"{hostname}:{port}"
+        return urlunsplit((parts.scheme.lower(), netloc, parts.path, "", ""))
+    except ValueError:
+        return ""
 
 
 class WorkflowConfigurationError(ValueError):
@@ -158,6 +183,8 @@ class WorkflowRoute:
         """Safe route summary for diagnostics and usage metadata."""
         values = self.to_mapping()
         values.pop("prompt", None)
+        values["custom_endpoint"] = _safe_endpoint_for_diagnostics(
+            self.custom_endpoint)
         return values
 
 
@@ -339,6 +366,27 @@ def validate_workflow_route(
                 normalized_scope, "Custom endpoint must be an HTTP(S) URL.",
                 provider_id=provider, field="custom_endpoint",
             )
+        try:
+            endpoint_parts = urlsplit(endpoint)
+            query_keys = {
+                key.strip().lower()
+                for key, _value in parse_qsl(
+                        endpoint_parts.query, keep_blank_values=True)
+            }
+            has_sensitive_query = bool(
+                query_keys & _SENSITIVE_ENDPOINT_QUERY_KEYS)
+            if (not endpoint_parts.hostname or endpoint_parts.username
+                    or endpoint_parts.password or has_sensitive_query):
+                raise WorkflowConfigurationError(
+                    normalized_scope,
+                    "Custom endpoint must not contain URL credentials or tokens.",
+                    provider_id=provider, field="custom_endpoint",
+                )
+        except ValueError as error:
+            raise WorkflowConfigurationError(
+                normalized_scope, "Custom endpoint must be an HTTP(S) URL.",
+                provider_id=provider, field="custom_endpoint",
+            ) from error
     prompt = str(route.prompt or "").strip()
     if not prompt:
         prompt = DEFAULT_WORKFLOW_PROMPTS[normalized_scope]
@@ -377,19 +425,27 @@ def test_workflow_configuration(
         raise WorkflowConfigurationError(
             normalized, f"Unknown workflow scope: {normalized}", field="scope"
         )
-    validated = validate_workflow_config(workflows, registry=registry)
-    scopes = (
-        (normalize_workflow_scope(scope),) if scope is not None else WORKFLOW_SCOPES
-    )
+    normalized_scope = normalize_workflow_scope(scope) if scope is not None else None
+    if not isinstance(workflows, WorkflowConfig):
+        workflows = WorkflowConfig.from_mapping(workflows)
+    if normalized_scope is not None:
+        route = validate_workflow_route(
+            workflows[normalized_scope], normalized_scope, registry=registry)
+        validated = workflows.with_route(normalized_scope, route)
+        scopes = (normalized_scope,)
+    else:
+        validated = validate_workflow_config(workflows, registry=registry)
+        scopes = WORKFLOW_SCOPES
     results = tuple(
         WorkflowTestResult(
             scope=current,
             provider_id=validated[current].provider_id,
             model_id=validated[current].model_id,
             capability=WORKFLOW_CAPABILITIES[current].value,
-            endpoint=(
+            endpoint=_safe_endpoint_for_diagnostics(
                 validated[current].custom_endpoint
-                or str(registry.describe(validated[current].provider_id).default_base_url)
+                or str(registry.describe(
+                    validated[current].provider_id).default_base_url)
             ),
             enabled=validated[current].enabled,
         )
