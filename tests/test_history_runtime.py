@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import app
-from history_store import HistoryStore
+from history_store import HistoryStore, HistoryStoreError
 from repositories import AppConfig, ApplicationRepositories
 from workflows import WorkflowKind, WorkflowPhase, WorkflowState
 
@@ -102,6 +102,19 @@ class HistoryRuntimeTests(unittest.TestCase):
             bundle = ApplicationRepositories(
                 config=pathless, usage_stats=pathless, history_path=expected)
             self.assertEqual(app._history_path_for_repositories(bundle), expected)
+
+    def test_refresh_load_reports_corruption_instead_of_success(self):
+        class BrokenStore:
+            enabled = True
+
+            @staticmethod
+            def list_records():
+                raise HistoryStoreError("corrupt history")
+
+        loaded, records, error = app._load_history_records(BrokenStore())
+        self.assertFalse(loaded)
+        self.assertEqual(records, [])
+        self.assertIsInstance(error, HistoryStoreError)
 
 
 if __name__ == "__main__":

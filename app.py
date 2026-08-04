@@ -393,6 +393,17 @@ def _history_path_for_repositories(repositories=None) -> Path:
     return config_path.with_name("history.json")
 
 
+def _load_history_records(store):
+    """Return ``(loaded, records, error)`` for a Settings refresh attempt."""
+
+    if not store.enabled:
+        return False, [], None
+    try:
+        return True, list(store.list_records()), None
+    except HistoryStoreError as error:
+        return False, [], error
+
+
 def _workflow_route(scope: WorkflowScope | str) -> WorkflowRoute:
     """Return one effective route while honoring legacy flat UI edits.
 
@@ -9042,26 +9053,26 @@ class App(ctk.CTk):
         def history_records():
             for child in history_rows.winfo_children():
                 child.destroy()
-            if not self.history_store.enabled:
+            loaded, records, error = _load_history_records(self.history_store)
+            if not loaded and error is None:
                 ctk.CTkLabel(
                     history_rows, text=self._t("history_disabled_hint"),
                     text_color=DIM, font=font_caption, anchor="w",
                     justify="left", wraplength=420).pack(
                         fill="x", padx=12, pady=14)
-                return
-            try:
-                records = list(reversed(self.history_store.list_records()))
-            except HistoryStoreError as error:
+                return False
+            if error is not None:
                 history_status.configure(
                     text=self._t("history_error").format(error=error),
                     text_color="#d36f6f")
-                return
+                return False
+            records = list(reversed(records))
             if not records:
                 ctk.CTkLabel(
                     history_rows, text=self._t("history_empty"),
                     text_color=DIM, font=font_caption, anchor="w").pack(
                         fill="x", padx=12, pady=14)
-                return
+                return True
             for record in records:
                 row = ctk.CTkFrame(
                     history_rows, fg_color="#151515", corner_radius=8)
@@ -9104,10 +9115,11 @@ class App(ctk.CTk):
                 ctk.CTkLabel(
                     row_actions, text=self._t("history_retry_unavailable"),
                     text_color="#777777", font=font_caption).pack(side="left")
+            return True
 
         def refresh_history():
-            history_records()
-            if self.history_store.enabled:
+            loaded = history_records()
+            if loaded:
                 history_status.configure(text=self._t("history_refreshed"),
                                          text_color=DIM)
 
