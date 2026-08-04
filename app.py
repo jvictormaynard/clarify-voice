@@ -6039,7 +6039,8 @@ class App(ctk.CTk):
             self._shutdown_recording(SESSION_SHUTDOWN_JOIN_SECONDS)
         audio_import = getattr(self, "_audio_file_import_controller", None)
         if audio_import is not None:
-            audio_import.cancel()
+            self._shutdown_audio_file_import(
+                audio_import, timeout=SESSION_SHUTDOWN_JOIN_SECONDS)
         product = getattr(self, "_local_asr_product", None)
         if product is not None:
             product.shutdown(timeout=SESSION_SHUTDOWN_JOIN_SECONDS)
@@ -6051,6 +6052,24 @@ class App(ctk.CTk):
         except Exception:
             pass
         return super().destroy()
+
+    def _shutdown_audio_file_import(self, controller=None, timeout=None):
+        """Cancel an import and give its worker a bounded cleanup window."""
+        controller = (
+            getattr(self, "_audio_file_import_controller", None)
+            if controller is None else controller)
+        if controller is None:
+            return True
+        try:
+            controller.cancel()
+            controller.wait(timeout)
+        except TimeoutError:
+            return False
+        except Exception:
+            # App teardown must continue even if an import worker reports a
+            # late provider/cleanup error.  The wait remains bounded.
+            return False
+        return True
 
     def _shutdown_recording(self, timeout=None):
         """Stop the active session and leave a watcher for late upload cleanup."""
@@ -7904,8 +7923,7 @@ class App(ctk.CTk):
             raise ValueError(self._t("audio_import_route_provider_mismatch"))
 
         current_route = _workflow_route(WorkflowScope.TRANSCRIPTION)
-        if (provider_id == current_route.provider_id
-                and not current_route.enabled):
+        if not current_route.enabled:
             raise ValueError(self._t("audio_import_route_disabled"))
         route = replace(
             current_route,
@@ -7916,7 +7934,7 @@ class App(ctk.CTk):
             custom_endpoint=(
                 current_route.custom_endpoint
                 if provider_id == current_route.provider_id else ""),
-            enabled=True,
+            enabled=current_route.enabled,
             independent=True,
         )
         connection = _provider_connection(provider_id, route)

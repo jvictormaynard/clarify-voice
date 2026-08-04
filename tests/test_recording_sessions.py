@@ -755,6 +755,29 @@ class RecordingSessionTests(unittest.TestCase):
         session.cancel.assert_called_once_with()
         harness.destroy.assert_called_once_with()
 
+    def test_audio_import_shutdown_cancels_and_waits_with_bounded_timeout(self):
+        events = []
+
+        class AudioImport:
+            def cancel(self):
+                events.append("cancel")
+
+            def wait(self, timeout=None):
+                events.append(("wait", timeout))
+                raise TimeoutError("fixture keeps the worker active")
+
+        harness = SimpleNamespace(
+            _audio_file_import_controller=AudioImport(),
+        )
+
+        self.assertFalse(app.App._shutdown_audio_file_import(
+            harness, timeout=app.SESSION_SHUTDOWN_JOIN_SECONDS))
+
+        self.assertEqual(events, [
+            "cancel",
+            ("wait", app.SESSION_SHUTDOWN_JOIN_SECONDS),
+        ])
+
     def test_simultaneous_hotkeys_do_not_start_or_stop_processing_session(self):
         session = Mock()
         harness = SimpleNamespace(
