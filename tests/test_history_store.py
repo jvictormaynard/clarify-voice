@@ -718,6 +718,41 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertFalse(candidate.exists())
 
+    def test_containerless_legacy_snapshot_cannot_replace_valid_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="committed")
+            before = path.read_bytes()
+            candidate = root / ".history.json.containerless.tmp"
+            candidate.write_text(json.dumps({"version": 0}), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime + 1, target_mtime + 1))
+
+            records = store.list_records()
+            self.assertEqual([item.raw_text for item in records], ["committed"])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse(candidate.exists())
+
+    def test_rejected_snapshot_is_preserved_when_primary_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            candidate = root / ".history.json.rejected.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [{"raw_text": 123}],
+            }), encoding="utf-8")
+
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            with self.assertRaises(HistoryStoreError):
+                store.list_records()
+            self.assertFalse(path.exists())
+            self.assertTrue(candidate.exists())
+
     def test_future_interrupted_snapshot_cannot_replace_supported_primary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

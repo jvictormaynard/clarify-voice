@@ -313,7 +313,10 @@ def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
     if version == HISTORY_SCHEMA_VERSION:
         raw_records = payload.get("records")
     else:
-        if not _legacy_containers_are_valid(payload):
+        if (not _legacy_containers_are_valid(payload)
+                or not any(key in payload
+                           for key in ("records", "entries", "history"))
+                or not _legacy_entries_are_safe(payload)):
             return False
         # Reject malformed legacy entries too; promoting a snapshot that the
         # normal load path would partially drop can erase the committed file.
@@ -355,6 +358,22 @@ def _legacy_containers_are_valid(payload: Mapping[str, Any]) -> bool:
         key not in payload or isinstance(payload[key], list)
         for key in ("records", "entries", "history")
     )
+
+
+def _legacy_entries_are_safe(payload: Mapping[str, Any]) -> bool:
+    """Reject legacy records whose explicit identifiers have invalid types."""
+
+    for key in ("records", "entries", "history"):
+        source = payload.get(key)
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if not isinstance(item, Mapping):
+                return False
+            for field in ("provider", "model"):
+                if field in item and not isinstance(item[field], str):
+                    return False
+    return True
 
 
 def _migrate_v0(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -545,20 +564,21 @@ class HistoryStore:
             temporary_payloads.append((ordering, candidate.name, candidate, payload))
 
         # A parseable snapshot in a schema this executable understands but
-        # with invalid structure or records is not a recovery source.  Drop
-        # it rather than retaining transcript data indefinitely after the
-        # valid primary has been retained/rewritten. Future-schema snapshots
-        # are deliberately excluded and remain available to a newer build.
-        supported_temporary = [
+        # with invalid structure or records is not a recovery source. Keep
+        # rejected snapshots until a valid primary or replacement is known;
+        # when no such source exists they may be the only bytes left for
+        # diagnosis/recovery. Future-schema snapshots remain untouched.
+        supported_candidates = [
             item for item in temporary_payloads
             if _is_supported_schema(item[3])
         ]
-        for item in supported_temporary:
-            if not _is_recoverable_snapshot(item[3]):
-                self._remove_best_effort(item[2])
         supported_temporary = [
-            item for item in supported_temporary
+            item for item in supported_candidates
             if _is_recoverable_snapshot(item[3])
+        ]
+        rejected_temporary = [
+            item for item in supported_candidates
+            if item not in supported_temporary
         ]
 
         if current is not None:
@@ -585,12 +605,15 @@ class HistoryStore:
             # when its mtime proves it is newer; an older leftover is from a
             # failed/retried write and the committed primary wins.
             if not supported_temporary:
+                for _, _, candidate, _ in rejected_temporary:
+                    self._remove_best_effort(candidate)
                 return current
             try:
                 current_mtime = self.path.stat().st_mtime
             except OSError:
                 current_mtime = float("inf")
             newest = max(supported_temporary)
+            selected: Path | None = None
             if newest[0] > current_mtime:
                 _, _, selected, payload = newest
                 try:
@@ -603,8 +626,11 @@ class HistoryStore:
                 supported_temporary = [
                     item for item in supported_temporary if item[2] != selected
                 ]
-            for _, _, candidate, _ in supported_temporary:
-                self._remove_best_effort(candidate)
+            for _, _, candidate, _ in [
+                *rejected_temporary, *supported_temporary,
+            ]:
+                if candidate != selected:
+                    self._remove_best_effort(candidate)
             return current
 
         if not temporary_payloads:
@@ -624,6 +650,7 @@ class HistoryStore:
         # snapshots remain untouched so a newer executable can recover them.
         if supported_temporary:
             candidates = supported_temporary
+            selected_supported = True
         else:
             try:
                 primary_exists = self.path.exists()
@@ -648,15 +675,19 @@ class HistoryStore:
                 raise HistoryStoreError(
                     "The interrupted history snapshot is structurally corrupt")
             candidates = future_temporary
+            selected_supported = False
         _, _, selected, payload = max(candidates)
         try:
             os.replace(selected, self.path)
         except OSError as error:
             raise HistoryStoreError(
                 "The interrupted history write could not be recovered") from error
-        for _, _, candidate, _ in supported_temporary:
-            if candidate != selected:
-                self._remove_best_effort(candidate)
+        if selected_supported:
+            for _, _, candidate, _ in [
+                *rejected_temporary, *supported_temporary,
+            ]:
+                if candidate != selected:
+                    self._remove_best_effort(candidate)
         return payload
 
     def _load_records_locked(self) -> list[HistoryRecord]:
