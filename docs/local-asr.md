@@ -116,7 +116,9 @@ against the committed manifest. The manager then:
   if the current privilege state cannot be determined;
 - adds a fresh random request-path prefix and disables environment proxies;
 - waits for the sidecar's `/health` response before accepting inference;
-- uses CPU-only, no-context transcription and never enables conversion/ffmpeg;
+- uses CPU-only, stateless transcription (`--max-context 0`, the supported
+  whisper.cpp v1.9.1 equivalent of no context) and never enables
+  conversion/ffmpeg;
 - applies startup and inference timeouts;
 - observes cancellation during verification and startup health checks, without
   waiting for the full startup timeout;
