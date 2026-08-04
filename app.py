@@ -241,16 +241,28 @@ def _next_language(language):
     return SUPPORTED_LANGUAGES[(current + 1) % len(SUPPORTED_LANGUAGES)]
 
 
-def _dictionary_aliases_from_text(value: str) -> tuple[str, ...]:
-    """Parse the Settings alias editor without treating commas as delimiters.
+DICTIONARY_PAGE_SIZE = 3
 
-    Aliases are persisted as independent strings and may legitimately contain
-    punctuation such as commas.  The editor therefore uses one alias per line
-    and only trims/filters the line boundary here; the controller remains the
-    validation boundary for duplicate or otherwise invalid aliases.
+
+def _dictionary_aliases_from_text(value: str) -> tuple[str, ...]:
+    """Parse one alias per editor line without changing valid text.
+
+    The persistence boundary accepts leading/trailing whitespace and Unicode
+    line-separator characters inside an alias.  Only the editor's literal LF
+    delimiter is structural; empty lines are omitted, while every non-empty
+    line is passed to the controller unchanged for validation.
     """
-    return tuple(alias.strip() for alias in str(value or "").splitlines()
-                 if alias.strip())
+    return tuple(alias for alias in str(value or "").split("\n")
+                 if alias != "")
+
+
+def _dictionary_page(items, page_index: int):
+    """Return a bounded page so a large profile never creates all row widgets."""
+    page_count = max(
+        1, (len(items) + DICTIONARY_PAGE_SIZE - 1) // DICTIONARY_PAGE_SIZE)
+    page = max(0, min(int(page_index), page_count - 1))
+    start = page * DICTIONARY_PAGE_SIZE
+    return page, page_count, items[start:start + DICTIONARY_PAGE_SIZE]
 
 
 def _dictionary_item_detail(item, translate) -> str:
@@ -1905,6 +1917,7 @@ STRINGS = {
         "dictionary_add_term": "+ Dictionary term",
         "dictionary_add_snippet": "+ Snippet",
         "dictionary_empty": "No entries match your search.",
+        "dictionary_page": "Page {page} of {pages}",
         "dictionary_term": "Term",
         "dictionary_pronunciation": "Pronunciation (optional)",
         "dictionary_pronunciation_prefix": "pronunciation",
@@ -2229,7 +2242,7 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_subtitle": "Mantenha vocabulário e expansões de texto neste dispositivo.",
         "dictionary_search": "Pesquisar termos, gatilhos, aliases ou substituições",
         "dictionary_add_term": "+ Termo do dicionário", "dictionary_add_snippet": "+ Snippet",
-        "dictionary_empty": "Nenhum item corresponde à busca.", "dictionary_term": "Termo",
+        "dictionary_empty": "Nenhum item corresponde à busca.", "dictionary_page": "Página {page} de {pages}", "dictionary_term": "Termo",
         "dictionary_pronunciation": "Pronúncia (opcional)",
         "dictionary_pronunciation_prefix": "pronúncia",
         "dictionary_aliases": "Aliases (um por linha)", "dictionary_trigger": "Gatilho",
@@ -2252,7 +2265,7 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_subtitle": "Mantén el vocabulario y las expansiones de texto en este dispositivo.",
         "dictionary_search": "Buscar términos, activadores, alias o reemplazos",
         "dictionary_add_term": "+ Término del diccionario", "dictionary_add_snippet": "+ Snippet",
-        "dictionary_empty": "Ningún elemento coincide con la búsqueda.", "dictionary_term": "Término",
+        "dictionary_empty": "Ningún elemento coincide con la búsqueda.", "dictionary_page": "Página {page} de {pages}", "dictionary_term": "Término",
         "dictionary_pronunciation": "Pronunciación (opcional)",
         "dictionary_pronunciation_prefix": "pronunciación",
         "dictionary_aliases": "Alias (uno por línea)", "dictionary_trigger": "Activador",
@@ -2275,7 +2288,7 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_subtitle": "Vokabular und Texterweiterungen auf diesem Gerät verwalten.",
         "dictionary_search": "Begriffe, Auslöser, Aliase oder Ersetzungen suchen",
         "dictionary_add_term": "+ Wörterbuchbegriff", "dictionary_add_snippet": "+ Snippet",
-        "dictionary_empty": "Keine Einträge entsprechen der Suche.", "dictionary_term": "Begriff",
+        "dictionary_empty": "Keine Einträge entsprechen der Suche.", "dictionary_page": "Seite {page} von {pages}", "dictionary_term": "Begriff",
         "dictionary_pronunciation": "Aussprache (optional)",
         "dictionary_pronunciation_prefix": "Aussprache",
         "dictionary_aliases": "Aliase (einer pro Zeile)", "dictionary_trigger": "Auslöser",
@@ -2298,7 +2311,7 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_subtitle": "Храните словарь и текстовые подстановки на этом устройстве.",
         "dictionary_search": "Поиск терминов, триггеров, псевдонимов или замен",
         "dictionary_add_term": "+ Термин словаря", "dictionary_add_snippet": "+ Сниппет",
-        "dictionary_empty": "Нет элементов, соответствующих поиску.", "dictionary_term": "Термин",
+        "dictionary_empty": "Нет элементов, соответствующих поиску.", "dictionary_page": "Страница {page} из {pages}", "dictionary_term": "Термин",
         "dictionary_pronunciation": "Произношение (необязательно)",
         "dictionary_pronunciation_prefix": "произношение",
         "dictionary_aliases": "Псевдонимы (по одному в строке)", "dictionary_trigger": "Триггер",
@@ -8285,6 +8298,25 @@ class App(ctk.CTk):
             scrollbar_button_hover_color="#444444")
         dictionary_rows.pack(fill="x", expand=False, pady=(9, 7))
 
+        dictionary_page_state = {"index": 0}
+        dictionary_pagination = ctk.CTkFrame(
+            dictionary_inner, fg_color="transparent")
+        dictionary_pagination.pack(fill="x", pady=(0, 5))
+        dictionary_previous = ctk.CTkButton(
+            dictionary_pagination, text="‹", width=30, height=25,
+            corner_radius=12, fg_color="transparent", hover_color="#292929",
+            text_color=DIM, font=font_body)
+        dictionary_previous.pack(side="left")
+        dictionary_page_label = ctk.CTkLabel(
+            dictionary_pagination, text="", text_color=DIM,
+            font=font_caption, anchor="center")
+        dictionary_page_label.pack(side="left", fill="x", expand=True)
+        dictionary_next = ctk.CTkButton(
+            dictionary_pagination, text="›", width=30, height=25,
+            corner_radius=12, fg_color="transparent", hover_color="#292929",
+            text_color=DIM, font=font_body)
+        dictionary_next.pack(side="right")
+
         dictionary_status = ctk.CTkLabel(
             dictionary_inner, text="", text_color=DIM, font=font_caption,
             anchor="w", justify="left", wraplength=430)
@@ -8364,17 +8396,36 @@ class App(ctk.CTk):
                 text=self._t("dictionary_deleted"), text_color="#69c58a")
             render_dictionary_rows()
 
+        def shift_dictionary_page(delta):
+            items = dictionary_controller.search(dictionary_search.get())
+            page, _page_count, _visible = _dictionary_page(
+                items, dictionary_page_state["index"] + delta)
+            dictionary_page_state["index"] = page
+            render_dictionary_rows()
+
         def render_dictionary_rows(_event=None):
+            if _event is not None:
+                dictionary_page_state["index"] = 0
             for child in dictionary_rows.winfo_children():
                 child.destroy()
             items = dictionary_controller.search(dictionary_search.get())
+            page, page_count, visible_items = _dictionary_page(
+                items, dictionary_page_state["index"])
+            dictionary_page_state["index"] = page
+            dictionary_previous.configure(
+                state="normal" if page > 0 and items else "disabled")
+            dictionary_next.configure(
+                state="normal" if page < page_count - 1 else "disabled")
+            dictionary_page_label.configure(
+                text=(self._t("dictionary_page").format(
+                    page=page + 1, pages=page_count) if items else ""))
             if not items:
                 ctk.CTkLabel(dictionary_rows,
                     text=self._t("dictionary_empty"), text_color=DIM,
                     font=font_label, anchor="w").pack(
                         fill="x", padx=12, pady=14)
                 return
-            for item in items:
+            for item in visible_items:
                 row = ctk.CTkFrame(
                     dictionary_rows, height=46, corner_radius=9,
                     fg_color="#151515")
@@ -8412,6 +8463,10 @@ class App(ctk.CTk):
                     command=lambda current=item: delete_dictionary_item(
                         current)).pack(side="left", padx=(1, 5))
 
+        dictionary_previous.configure(
+            command=lambda: shift_dictionary_page(-1))
+        dictionary_next.configure(
+            command=lambda: shift_dictionary_page(1))
         dictionary_search.bind("<KeyRelease>", render_dictionary_rows)
 
         def open_dictionary_editor(kind, index=None):

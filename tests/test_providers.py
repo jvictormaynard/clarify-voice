@@ -1059,7 +1059,14 @@ class ProviderTests(unittest.TestCase):
     def test_dictionary_editor_preserves_commas_and_localizes_disabled_rows(self):
         self.assertEqual(
             app._dictionary_aliases_from_text(" Acme, Inc \n\n OW "),
-            ("Acme, Inc", "OW"))
+            (" Acme, Inc ", " OW "))
+        self.assertEqual(
+            app._dictionary_aliases_from_text("Acme\u2028Inc\nOW"),
+            ("Acme\u2028Inc", "OW"))
+        page, pages, visible = app._dictionary_page(tuple(range(1024)), 0)
+        self.assertEqual((page, pages, visible), (0, 342, (0, 1, 2)))
+        page, pages, visible = app._dictionary_page(tuple(range(1024)), 341)
+        self.assertEqual((page, pages, visible), (341, 342, (1023,)))
         self.assertEqual(app.STRINGS["en"]["dictionary_disabled"], "Disabled")
         self.assertEqual(app.STRINGS["pt"]["dictionary_disabled"], "Desativado")
         self.assertEqual(app.STRINGS["es"]["dictionary_disabled"], "Desactivado")
@@ -1089,6 +1096,8 @@ class ProviderTests(unittest.TestCase):
         self.assertIn('fields["aliases"].get("1.0", "end-1c")', source)
         self.assertIn('else self._t("dictionary_disabled")', source)
         self.assertIn('_dictionary_item_detail(item, self._t)', source)
+        self.assertIn('for item in visible_items:', source)
+        self.assertIn('DICTIONARY_PAGE_SIZE = 3', inspect.getsource(app))
 
     def test_every_locale_translates_the_complete_interface_catalog(self):
         english_keys = set(app.STRINGS["en"])
