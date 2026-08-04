@@ -755,7 +755,10 @@ class HistoryStore:
             try:
                 current_mtime = self.path.stat().st_mtime
             except OSError:
-                current_mtime = float("inf")
+                # Without a primary mtime, recency cannot be compared. Keep
+                # every snapshot for a later retry instead of letting the
+                # primary win by default and deleting a newer completed copy.
+                return current
             newest = max(supported_temporary)
             selected: Path | None = None
             if newest[0] > current_mtime:

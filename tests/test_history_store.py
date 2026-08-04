@@ -540,6 +540,40 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertTrue(first.exists())
             self.assertTrue(second.exists())
 
+    def test_snapshot_is_preserved_when_primary_mtime_is_unreadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="committed")
+            candidate = root / ".history.json.newer.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [HistoryRecord(
+                    raw_text="newer", timestamp=NOW,
+                    provider="openai", model="gpt-test").to_mapping()],
+            }), encoding="utf-8")
+            before = path.read_bytes()
+            original_stat = Path.stat
+
+            def unreadable_primary_mtime(path_value, *args, **kwargs):
+                if path_value == path:
+                    raise OSError("simulated primary metadata failure")
+                return original_stat(path_value, *args, **kwargs)
+
+            with patch.object(
+                history_store.Path,
+                "stat",
+                autospec=True,
+                side_effect=unreadable_primary_mtime,
+            ):
+                records = store.list_records()
+
+            self.assertEqual([item.raw_text for item in records], ["committed"])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(candidate.exists())
+
     def test_future_snapshot_is_preserved_when_supported_snapshot_is_recovered(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
