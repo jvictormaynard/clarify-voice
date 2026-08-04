@@ -76,7 +76,29 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             "disabled",
         )
 
-    def test_test_uses_draft_and_reset_preserves_other_scope_edits(self):
+    def test_test_validates_the_current_draft_before_apply(self):
+        controller = WorkflowSettingsController(self.repository())
+        persisted_translation = controller.route(WorkflowScope.TRANSLATION)
+        controller.set_route(
+            WorkflowScope.TRANSLATION,
+            provider_id="local_asr",
+            model_id="ggml-small",
+        )
+        with self.assertRaises(ValueError):
+            controller.test(WorkflowScope.TRANSLATION)
+
+        # The failed test must not mutate the persisted route or replace the
+        # draft with the repository snapshot.
+        self.assertEqual(
+            controller.repository.load().workflow(WorkflowScope.TRANSLATION),
+            persisted_translation,
+        )
+        self.assertEqual(
+            controller.route(WorkflowScope.TRANSLATION).provider_id,
+            "local_asr",
+        )
+
+    def test_reset_replaces_only_the_selected_draft_scope(self):
         controller = WorkflowSettingsController(self.repository())
         controller.set_route(
             WorkflowScope.REWRITE,
@@ -90,9 +112,10 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             model_id="llama-3.3-70b-versatile",
             prompt="custom translation policy",
         )
-        result = controller.test(WorkflowScope.TRANSLATION)
-        self.assertEqual(result.scope, WorkflowScope.TRANSLATION.value)
-        self.assertTrue(result.ok)
+        draft_rewrite = controller.route(WorkflowScope.REWRITE)
+        persisted_rewrite = controller.repository.load().workflow(
+            WorkflowScope.REWRITE
+        )
 
         reset = controller.reset(WorkflowScope.TRANSLATION)
         self.assertEqual(
@@ -102,20 +125,11 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             reset.workflow(WorkflowScope.TRANSLATION).prompt,
             "custom translation policy",
         )
+        self.assertEqual(controller.route(WorkflowScope.REWRITE), draft_rewrite)
         self.assertEqual(
-            controller.route(WorkflowScope.REWRITE).prompt,
-            "unsaved rewrite policy",
+            controller.repository.load().workflow(WorkflowScope.REWRITE),
+            persisted_rewrite,
         )
-
-    def test_test_rejects_invalid_draft_before_apply(self):
-        controller = WorkflowSettingsController(self.repository())
-        controller.set_route(
-            WorkflowScope.TRANSLATION,
-            provider_id="local_asr",
-            model_id="ggml-small",
-        )
-        with self.assertRaises(ValueError):
-            controller.test(WorkflowScope.TRANSLATION)
 
 
 class WorkflowOperationRoutingTests(unittest.TestCase):
