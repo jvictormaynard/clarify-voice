@@ -2,14 +2,616 @@ import tempfile
 import threading
 import time
 import unittest
+from array import array
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import app
+from microphone_controls import RecordingBoundaryReason, VADSettings
+
+
+class FakeBoundaryClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
 
 
 class RecordingSessionTests(unittest.TestCase):
+    def test_boundary_monitor_ignores_dynamic_mock_event_attributes(self):
+        session = app.RecordingSession(recorder=Mock())
+
+        session._start_boundary_monitor()
+
+        self.assertIsNone(session._boundary_monitor)
+        self.assertFalse(session._active_workers())
+
+    def test_boundary_monitor_notifies_lifecycle_callback_and_releases_on_cancel(self):
+        class BoundaryRecorder:
+            def __init__(self):
+                self.boundary_event = threading.Event()
+                self.boundary_reason = RecordingBoundaryReason.MAX_DURATION
+                self.path = None
+
+            def start(self, audio_path, cancel_event=None):
+                self.path = Path(audio_path)
+                self.path.write_bytes(b"a" * 1200)
+
+            def stop(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = BoundaryRecorder()
+            session = app.RecordingSession(
+                recorder=recorder,
+                audio_path=Path(directory) / "recording.wav",
+            )
+            callback_seen = threading.Event()
+            callback_details = []
+
+            def on_boundary(reason):
+                callback_details.append((reason, threading.current_thread().name))
+                callback_seen.set()
+
+            session.set_boundary_callback(on_boundary)
+            session.start()
+            recorder.boundary_event.set()
+
+            self.assertTrue(callback_seen.wait(1))
+            self.assertEqual(
+                callback_details[0][0], RecordingBoundaryReason.MAX_DURATION)
+            self.assertNotEqual(callback_details[0][1], threading.current_thread().name)
+
+            self.assertTrue(session.cancel())
+            self.assertTrue(session.shutdown_complete.wait(1))
+            self.assertFalse(session._active_workers())
+
+    def test_boundary_monitor_can_be_stopped_without_an_event(self):
+        class QuietRecorder:
+            def __init__(self):
+                self.boundary_event = threading.Event()
+
+            def start(self, audio_path, cancel_event=None):
+                Path(audio_path).write_bytes(b"a" * 1200)
+
+            def stop(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app.time, "sleep", return_value=None):
+            session = app.RecordingSession(
+                recorder=QuietRecorder(),
+                audio_path=Path(directory) / "recording.wav",
+            )
+            session.start()
+            # The boundary observer is lifecycle-only; provider/file
+            # ownership must remain empty while capture is still active.
+            self.assertIsNone(session._boundary_monitor)
+            self.assertFalse(session._active_workers())
+            session.cancel()
+
+            self.assertTrue(session.shutdown_complete.wait(1))
+            self.assertFalse(session._active_workers())
+
+    def test_recorder_boundary_callback_sets_typed_reason(self):
+        recorder = app.Recorder(
+            controls=app.RecordingControls(
+                max_duration_seconds=1,
+                warning_seconds=0,
+            )
+        )
+        recorder.boundary_policy = app.RecordingBoundaryPolicy(recorder.controls)
+        recorder.boundary_policy.start(0)
+
+        with patch.object(app.time, "monotonic", return_value=1):
+            recorder._audio_cb(array("h", [1200]).tobytes(), 1, None, None)
+
+        self.assertTrue(recorder.boundary_event.is_set())
+        self.assertEqual(
+            recorder.boundary_reason, RecordingBoundaryReason.MAX_DURATION)
+
+    def test_recorder_routes_selected_microphone_by_current_backend_handle(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "System default",
+                "host_api": "WASAPI",
+                "index": 1,
+                "max_input_channels": 1,
+                "is_default": True,
+            },
+            {
+                "name": "USB headset",
+                "host_api": "WASAPI",
+                "index": 7,
+                "max_input_channels": 1,
+            },
+        ])
+        selected_id = inventory.devices[1].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+        stream = Mock()
+        fake_sounddevice = SimpleNamespace(RawInputStream=Mock(return_value=stream))
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", fake_sounddevice), patch.object(
+                app, "IS_WIN", True), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            recorder.start(
+                Path(directory) / "recording.wav",
+                microphone=selected_id,
+            )
+
+            args = app.subprocess.Popen.call_args.args[0]
+            self.assertEqual(
+                args[0:4], [app.SOX_EXE, "-t", "waveaudio", "USB headset"])
+            stream.start.assert_called_once_with()
+            recorder.stop()
+
+    def test_selected_microphone_without_backend_index_routes_stream_by_name(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "System default",
+                "host_api": "WASAPI",
+                "max_input_channels": 1,
+                "is_default": True,
+            },
+            {
+                "name": "USB headset",
+                "host_api": "WASAPI",
+                "max_input_channels": 1,
+            },
+        ])
+        selected_id = inventory.devices[1].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+        stream = Mock()
+        fake_sounddevice = SimpleNamespace(RawInputStream=Mock(return_value=stream))
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", fake_sounddevice), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app, "IS_MAC", True), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            recorder.start(
+                Path(directory) / "recording.wav",
+                microphone=selected_id,
+            )
+
+            self.assertEqual(
+                fake_sounddevice.RawInputStream.call_args.kwargs["device"],
+                "USB headset",
+            )
+            recorder.stop()
+
+    def test_explicit_ambiguous_microphone_does_not_fall_back_to_system_default(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "Twin input",
+                "host_api": "WASAPI",
+                "index": 3,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "Twin input",
+                "host_api": "WASAPI",
+                "index": 7,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "System default",
+                "host_api": "WASAPI",
+                "index": 9,
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+        ])
+        ambiguous_id = inventory.devices[0].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "IS_WIN", True), patch.object(
+                app, "IS_MAC", False), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.subprocess, "Popen") as popen:
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            with self.assertRaises(app.MicrophoneUnavailableError):
+                recorder.start(
+                    Path(directory) / "recording.wav",
+                    microphone=ambiguous_id,
+                )
+
+            popen.assert_not_called()
+            self.assertEqual(
+                recorder.microphone_selection.state,
+                app.MicrophoneSelectionState.FALLBACK_DEFAULT,
+            )
+
+    def test_production_recorder_reloads_controls_after_settings_apply(self):
+        initial = app.RecordingControls(max_duration_seconds=30)
+        updated = app.RecordingControls(
+            max_duration_seconds=90,
+            warning_seconds=12,
+            vad=VADSettings(
+                enabled=True,
+                level_threshold=0.12,
+                minimum_speech_seconds=0.4,
+                silence_duration_seconds=1.1,
+            ),
+        )
+        process = Mock()
+        process.poll.return_value = None
+        original_config = app.APP_CONFIG.copy()
+
+        try:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update({
+                "recording_controls": initial.to_mapping(),
+            })
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                    app, "_save_app_config") as save_config, patch.object(
+                    app, "sd", None), patch.object(
+                    app, "IS_WIN", False), patch.object(
+                    app.subprocess, "Popen", return_value=process), patch.object(
+                    app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                    app.time, "sleep", return_value=None):
+                # This is the production construction path: no controls are
+                # injected, so the instance is allowed to reload APP_CONFIG.
+                recorder = app.Recorder()
+                self.assertEqual(recorder.controls, initial)
+                self.assertFalse(recorder._controls_override)
+
+                app._apply_settings_transaction(
+                    {"provider": "gemini", "model": "gemini-2.5-flash"},
+                    {"provider": "openai", "model": "gpt-4o-mini"},
+                    [("gemini", "gemini-2.5-flash")],
+                    [("openai", "gpt-4o-mini")],
+                    {"gemini": "gemini_model"},
+                    False,
+                    microphone=app.MicrophoneSettings.defaults(),
+                    recording_controls=updated,
+                )
+
+                save_config.assert_called_once_with(None)
+                self.assertEqual(
+                    app.APP_CONFIG["recording_controls"], updated.to_mapping())
+
+                recorder.start(Path(directory) / "recording.wav")
+
+                self.assertEqual(recorder.controls, updated)
+                self.assertEqual(recorder.boundary_policy.controls, updated)
+                recorder.stop()
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original_config)
+
+    def test_explicit_recorder_controls_remain_overrides_after_settings_apply(self):
+        injected = app.RecordingControls(max_duration_seconds=30)
+        persisted = app.RecordingControls(max_duration_seconds=90)
+        process = Mock()
+        process.poll.return_value = None
+        original_config = app.APP_CONFIG.copy()
+
+        try:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update({"recording_controls": persisted.to_mapping()})
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                    app, "_recording_controls") as load_controls, patch.object(
+                    app, "sd", None), patch.object(
+                    app, "IS_WIN", False), patch.object(
+                    app.subprocess, "Popen", return_value=process), patch.object(
+                    app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                    app.time, "sleep", return_value=None):
+                recorder = app.Recorder(controls=injected)
+                recorder.start(Path(directory) / "recording.wav")
+
+                self.assertTrue(recorder._controls_override)
+                self.assertEqual(recorder.controls, injected)
+                self.assertEqual(recorder.boundary_policy.controls, injected)
+                load_controls.assert_not_called()
+                recorder.stop()
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original_config)
+
+    def test_source_only_capture_enforces_max_duration_without_level_meter(self):
+        controls = app.RecordingControls(
+            max_duration_seconds=5,
+            warning_seconds=1,
+        )
+        clock = FakeBoundaryClock()
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(
+                controls=controls,
+                boundary_clock=clock,
+            )
+            recorder.start(Path(directory) / "recording.wav")
+            self.assertIsNone(recorder.mic_stream)
+
+            clock.now = 5
+            self.assertTrue(recorder.boundary_event.wait(1))
+            self.assertEqual(
+                recorder.boundary_reason, RecordingBoundaryReason.MAX_DURATION)
+            recorder.stop()
+
+    def test_explicit_microphone_requires_an_inventory(self):
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process) as popen, patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"):
+            recorder = app.Recorder(controls=app.RecordingControls())
+            with self.assertRaises(app.MicrophoneUnavailableError):
+                recorder.start(
+                    Path(directory) / "recording.wav",
+                    microphone="mic-v1-explicit",
+                )
+
+            popen.assert_not_called()
+            self.assertIsNone(recorder.microphone_inventory)
+            self.assertIsNone(recorder.microphone_selection)
+
+    def test_linux_saved_microphone_falls_back_to_pulseaudio_default(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "System default",
+                "host_api": "PulseAudio",
+                "index": 1,
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "USB headset",
+                "host_api": "PulseAudio",
+                "index": 7,
+                "max_input_channels": 1,
+            },
+        ])
+        selected_id = inventory.devices[1].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app, "IS_MAC", False), patch.object(
+                app, "_microphone_settings",
+                return_value=app.MicrophoneSettings(selected_id)), patch.object(
+                app.subprocess, "Popen", return_value=process) as popen, patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            recorder.start(Path(directory) / "recording.wav")
+
+            args = popen.call_args.args[0]
+            self.assertEqual(
+                args[0:4], [app.SOX_EXE, "-t", "pulseaudio", "default"])
+            self.assertEqual(
+                recorder.microphone_selection.state,
+                app.MicrophoneSelectionState.DEFAULT,
+            )
+            recorder.stop()
+
+    def test_linux_explicit_microphone_argument_is_rejected(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "System default",
+                "host_api": "PulseAudio",
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "USB headset",
+                "host_api": "PulseAudio",
+                "max_input_channels": 1,
+            },
+        ])
+        selected_id = inventory.devices[1].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "IS_WIN", False), patch.object(
+                app, "IS_MAC", False), patch.object(
+                app.subprocess, "Popen") as popen, patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"):
+            recorder = app.Recorder(controls=app.RecordingControls())
+            recorder.microphone_source = source
+
+            with self.assertRaises(app.MicrophoneUnavailableError):
+                recorder.start(
+                    Path(directory) / "recording.wav",
+                    microphone=selected_id,
+                )
+
+            popen.assert_not_called()
+            self.assertIsNone(recorder.microphone_selection)
+
+    def test_linux_system_default_route_remains_usable(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "System default",
+                "host_api": "PulseAudio",
+                "index": 1,
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "USB headset",
+                "host_api": "PulseAudio",
+                "index": 7,
+                "max_input_channels": 1,
+            },
+        ])
+        source = SimpleNamespace(snapshot=lambda: inventory)
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app, "IS_MAC", False), patch.object(
+                app, "_microphone_settings",
+                return_value=app.MicrophoneSettings.defaults()), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            recorder.start(Path(directory) / "recording.wav")
+
+            args = app.subprocess.Popen.call_args.args[0]
+            self.assertEqual(
+                args[0:4], [app.SOX_EXE, "-t", "pulseaudio", "default"])
+            self.assertEqual(
+                recorder.microphone_selection.state,
+                app.MicrophoneSelectionState.DEFAULT,
+            )
+            recorder.stop()
+
+    def test_waveaudio_prefix_collision_is_rejected(self):
+        prefix = "x" * 31
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": prefix + "-a",
+                "host_api": "WASAPI",
+                "native_id": "endpoint-a",
+                "index": 3,
+                "max_input_channels": 1,
+            },
+            {
+                "name": prefix + "-b",
+                "host_api": "WASAPI",
+                "native_id": "endpoint-b",
+                "index": 7,
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+        ])
+        selected_id = inventory.devices[0].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "IS_WIN", True), patch.object(
+                app, "IS_MAC", False), patch.object(
+                app.subprocess, "Popen") as popen, patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"):
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            with self.assertRaises(app.MicrophoneUnavailableError):
+                recorder.start(
+                    Path(directory) / "recording.wav",
+                    microphone=selected_id,
+                )
+
+            popen.assert_not_called()
+
+    def test_raw_input_stream_failure_still_enforces_max_duration(self):
+        controls = app.RecordingControls(max_duration_seconds=5, warning_seconds=1)
+        clock = FakeBoundaryClock()
+        process = Mock()
+        process.poll.return_value = None
+        failed_stream = Mock()
+        failed_stream.start.side_effect = OSError("meter unavailable")
+        failed_sounddevice = SimpleNamespace(
+            RawInputStream=Mock(return_value=failed_stream),
+        )
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", failed_sounddevice), patch.object(
+                app, "_microphone_inventory", return_value=None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(controls=controls, boundary_clock=clock)
+            recorder.start(Path(directory) / "recording.wav")
+
+            self.assertIsNone(recorder.mic_stream)
+            clock.now = 5
+            self.assertTrue(recorder.boundary_event.wait(1))
+            self.assertEqual(
+                recorder.boundary_reason, RecordingBoundaryReason.MAX_DURATION)
+            failed_sounddevice.RawInputStream.assert_called_once()
+            failed_stream.stop.assert_called_once_with()
+            failed_stream.close.assert_called_once_with()
+            recorder.stop()
+
+    def test_source_only_boundary_notifies_once_and_cancel_cleans_up(self):
+        controls = app.RecordingControls(max_duration_seconds=5, warning_seconds=1)
+        clock = FakeBoundaryClock()
+        process = Mock()
+        process.poll.return_value = None
+        callbacks = []
+        callback_seen = threading.Event()
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(controls=controls, boundary_clock=clock)
+            session = app.RecordingSession(
+                recorder=recorder,
+                audio_path=Path(directory) / "recording.wav",
+            )
+            session.set_boundary_callback(
+                lambda reason: (callbacks.append(reason), callback_seen.set()))
+            session.start()
+
+            clock.now = 5
+            self.assertTrue(callback_seen.wait(1))
+            self.assertEqual(callbacks, [RecordingBoundaryReason.MAX_DURATION])
+
+            self.assertTrue(session.cancel())
+            self.assertTrue(session.shutdown_complete.wait(1))
+            self.assertFalse(session.audio_path.exists())
+            self.assertIsNone(recorder._boundary_worker)
+            process.terminate.assert_called_once_with()
+
     def test_sessions_reserve_unique_paths_and_cleanup_success(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
                 app, "DATA_DIR", Path(directory)):
@@ -364,12 +966,10 @@ class RecordingSessionTests(unittest.TestCase):
             worker.start()
             self.assertTrue(provider_started.wait(1))
 
-            def delete(path_to_remove, *, strict=False):
-                path_to_remove.unlink(missing_ok=True)
-
             with patch.object(app, "SESSION_WORKER_JOIN_SECONDS", 0.01), \
                     patch.object(app, "SESSION_WORKER_GRACE_SECONDS", 0.2), \
-                    patch.object(app.Recorder, "_safe_delete", side_effect=delete) as cleanup:
+                    patch.object(session, "_cleanup_once",
+                                 wraps=session._cleanup_once) as cleanup:
                 session.finalize("completed")
                 time.sleep(0.05)
                 self.assertTrue(session._shutdown_watcher.is_alive())
@@ -597,6 +1197,23 @@ class RecordingSessionTests(unittest.TestCase):
             recorder.start(Path(directory) / "clarifyvoice-recording-unique.wav")
 
         cleanup.assert_not_called()
+
+    def test_default_boundary_clock_ignores_patched_app_time_module(self):
+        process = Mock()
+        process.poll.return_value = None
+        patched_time = SimpleNamespace(sleep=lambda _seconds: None)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "time", patched_time), patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"):
+            recorder = app.Recorder()
+            recorder.start(Path(directory) / "recording.wav")
+
+            self.assertIs(recorder._boundary_clock, app._REAL_TIME)
+            recorder.stop()
 
     def test_exit_waits_for_active_upload_then_retries_cleanup(self):
         release_upload = threading.Event()

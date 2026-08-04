@@ -132,6 +132,126 @@ class MicrophoneControlsTests(unittest.TestCase):
         self.assertEqual(selection.reason, "saved_device_unavailable")
         self.assertEqual(selection.device.name, "Current default")
 
+    def test_duplicate_names_across_host_apis_are_not_selectable(self):
+        inventory = MicrophoneInventory.from_records(
+            [
+                {
+                    "name": "Shared headset",
+                    "host_api": "Windows WASAPI",
+                    "index": 1,
+                    "max_input_channels": 1,
+                },
+                {
+                    "name": "Shared headset",
+                    "host_api": "MME",
+                    "index": 7,
+                    "max_input_channels": 1,
+                },
+            ]
+        )
+        first, second = inventory.devices
+
+        self.assertNotEqual(first.stable_id, second.stable_id)
+        # The physical endpoints remain usable for the system-default route,
+        # but ambiguous display names are hidden from explicit selection.
+        self.assertTrue(first.available)
+        self.assertTrue(second.available)
+        self.assertEqual(inventory.available_devices, ())
+
+        selection = inventory.resolve(first.stable_id)
+        self.assertEqual(selection.state, MicrophoneSelectionState.UNAVAILABLE)
+        self.assertFalse(selection.can_record)
+        self.assertIsNone(selection.device)
+
+    def test_duplicate_default_name_keeps_system_default_route(self):
+        inventory = MicrophoneInventory.from_records(
+            [
+                {
+                    "name": "Shared headset",
+                    "host_api": "Windows WASAPI",
+                    "native_id": "wasapi-headset",
+                    "is_default": True,
+                    "max_input_channels": 1,
+                },
+                {
+                    "name": "Shared headset",
+                    "host_api": "MME",
+                    "native_id": "mme-headset",
+                    "max_input_channels": 1,
+                },
+            ]
+        )
+
+        selection = inventory.resolve()
+        self.assertEqual(selection.state, MicrophoneSelectionState.DEFAULT)
+        self.assertTrue(selection.can_record)
+        self.assertEqual(selection.device.name, "Shared headset")
+        self.assertTrue(selection.device.is_default)
+        self.assertTrue(selection.device.available)
+        self.assertEqual(inventory.available_devices, ())
+
+        saved_default = inventory.resolve(selection.device.stable_id)
+        self.assertEqual(
+            saved_default.state, MicrophoneSelectionState.FALLBACK_DEFAULT)
+        self.assertEqual(saved_default.device.stable_id, selection.device.stable_id)
+
+    def test_duplicate_fallback_identity_keeps_system_default_route(self):
+        inventory = MicrophoneInventory.from_records(
+            [
+                {
+                    "name": "Same fallback input",
+                    "host_api": "WASAPI",
+                    "index": 3,
+                    "max_input_channels": 1,
+                },
+                {
+                    "name": "Same fallback input",
+                    "host_api": "WASAPI",
+                    "index": 7,
+                    "max_input_channels": 1,
+                },
+            ],
+            default_index=7,
+        )
+
+        self.assertEqual(
+            inventory.devices[0].stable_id,
+            inventory.devices[1].stable_id,
+        )
+        self.assertEqual(inventory.error_code, "ambiguous_identity")
+        self.assertEqual(inventory.available_devices, ())
+
+        selection = inventory.resolve()
+        self.assertEqual(selection.state, MicrophoneSelectionState.DEFAULT)
+        self.assertTrue(selection.can_record)
+        self.assertEqual(selection.device.backend_index, 7)
+
+        explicit = inventory.resolve(inventory.devices[0].stable_id)
+        self.assertEqual(
+            explicit.state, MicrophoneSelectionState.FALLBACK_DEFAULT)
+
+    def test_duplicate_fallback_default_id_without_marker_stays_usable(self):
+        records = [
+            {
+                "name": "Unmarked fallback input",
+                "host_api": "WASAPI",
+                "max_input_channels": 1,
+            },
+            {
+                "name": "Unmarked fallback input",
+                "host_api": "WASAPI",
+                "max_input_channels": 1,
+            },
+        ]
+        stable_id = stable_microphone_id("Unmarked fallback input", "WASAPI")
+        inventory = MicrophoneInventory.from_records(
+            records, default_id=stable_id)
+
+        selection = inventory.resolve()
+        self.assertEqual(selection.state, MicrophoneSelectionState.DEFAULT)
+        self.assertTrue(selection.can_record)
+        self.assertEqual(selection.device.stable_id, stable_id)
+
     def test_missing_default_is_explicitly_unavailable_not_arbitrary(self):
         inventory = MicrophoneInventory.from_records([
             {"name": "Unmarked input", "max_input_channels": 1},
@@ -172,7 +292,25 @@ class MicrophoneControlsTests(unittest.TestCase):
         )
         inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
         self.assertEqual(inventory.default_id, inventory.devices[1].stable_id)
+        self.assertEqual(
+            [device.backend_index for device in inventory.devices], [0, 1])
         self.assertNotIn("index", inventory.devices[1].to_mapping())
+
+    def test_sounddevice_adapter_assigns_query_index_when_record_omits_it(self):
+        fake = SimpleNamespace(
+            query_devices=lambda: [
+                {"name": "Other", "max_input_channels": 1},
+                {"name": "Selected", "max_input_channels": 1},
+            ],
+            default=SimpleNamespace(device=(0, -1)),
+        )
+
+        inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
+
+        self.assertEqual(
+            [device.backend_index for device in inventory.devices], [0, 1])
+        selected = inventory.resolve(inventory.devices[1].stable_id)
+        self.assertEqual(selected.device.backend_index, 1)
 
     def test_sounddevice_adapter_accepts_pair_like_default(self):
         class InputOutputPair:
@@ -194,6 +332,22 @@ class MicrophoneControlsTests(unittest.TestCase):
         )
         inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
         self.assertEqual(inventory.default_id, inventory.devices[1].stable_id)
+
+    def test_sounddevice_adapter_accepts_single_default_mapping(self):
+        fake = SimpleNamespace(
+            query_devices=lambda: {
+                "name": "Default input",
+                "max_input_channels": 1,
+                "hostapi": "MME",
+            },
+            default=SimpleNamespace(device=(0, -1)),
+        )
+
+        inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
+
+        self.assertEqual(len(inventory.devices), 1)
+        self.assertEqual(inventory.devices[0].name, "Default input")
+        self.assertEqual(inventory.default_id, inventory.devices[0].stable_id)
 
     def test_sounddevice_adapter_resolves_numeric_host_api_name(self):
         fake = SimpleNamespace(
@@ -254,6 +408,30 @@ class MicrophoneControlsTests(unittest.TestCase):
         self.assertTrue(stopped.should_stop)
         self.assertEqual(stopped.reason, RecordingBoundaryReason.MAX_DURATION)
         self.assertEqual(policy.observe().reason, RecordingBoundaryReason.MAX_DURATION)
+
+    def test_duration_observation_does_not_advance_vad_clock(self):
+        clock = FakeClock()
+        policy = RecordingBoundaryPolicy(
+            RecordingControls(
+                max_duration_seconds=10,
+                vad=VADSettings(enabled=True),
+            ),
+            clock=clock,
+        )
+        policy.start()
+
+        clock.now = 4
+        duration = policy.observe_duration()
+        self.assertFalse(duration.should_stop)
+        self.assertIsNone(duration.vad)
+
+        callback = policy.observe(input_level=1.0)
+        self.assertIsNotNone(callback.vad)
+        self.assertTrue(callback.vad.speech_detected)
+
+        clock.now = 10
+        stopped = policy.observe_duration()
+        self.assertEqual(stopped.reason, RecordingBoundaryReason.MAX_DURATION)
 
     def test_vad_requires_minimum_speech_and_continuous_silence(self):
         settings = VADSettings(

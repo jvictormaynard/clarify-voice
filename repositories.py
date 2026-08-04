@@ -20,6 +20,10 @@ from typing import Any, Mapping
 from provider_registry import PROVIDER_IDS, PROVIDER_REGISTRY
 from provider_types import ProviderCapability, ProviderError
 from hotkey_config import HotkeySettings
+from microphone_controls import (
+    MicrophoneSettings,
+    RecordingControls,
+)
 from secret_store import (
     SecretStore,
     SecretStoreError,
@@ -49,7 +53,7 @@ __all__ = [
     "WorkflowScope", "WorkflowTestResult", "environment_defaults",
     "migrate_config_payload", "normalize_workflow_scope",
     "test_workflow_configuration", "validate_workflow_config",
-    "validate_workflow_route",
+    "validate_workflow_route", "MicrophoneSettings", "RecordingControls",
 ]
 
 
@@ -106,6 +110,8 @@ def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[s
         # first-run and legacy flat files both receive the same typed bindings.
         # HotkeySettings.from_mapping() repairs malformed entries one by one.
         "hotkeys": HotkeySettings.defaults().to_mapping(),
+        "microphone": MicrophoneSettings.defaults().to_mapping(),
+        "recording_controls": RecordingControls.defaults().to_mapping(),
     }
 
 
@@ -164,6 +170,8 @@ class AppConfig:
     workflows: WorkflowConfig = field(default_factory=WorkflowConfig)
     voice_translation: VoiceTranslationConfig = field(
         default_factory=VoiceTranslationConfig)
+    microphone: MicrophoneSettings = field(default_factory=MicrophoneSettings.defaults)
+    recording_controls: RecordingControls = field(default_factory=RecordingControls.defaults)
 
     @classmethod
     def from_mapping(
@@ -311,6 +319,51 @@ class AppConfig:
             # the dedicated settings/apply boundary reports invalid routes
             # before a provider request is attempted.
             voice_translation = VoiceTranslationConfig()
+
+        supplied_values = values if isinstance(values, Mapping) else {}
+        if "microphone" in supplied_values:
+            microphone_values = supplied_values["microphone"]
+        elif "microphone_settings" in supplied_values:
+            microphone_values = supplied_values["microphone_settings"]
+        elif (
+            "selected_microphone_id" in supplied_values
+            or "microphone_id" in supplied_values
+        ):
+            # Accept the short-lived flat spelling used by the initial
+            # microphone foundation while writing only the typed nested form.
+            # Inspect the supplied payload before merging defaults: the
+            # default nested mapping must not mask a persisted legacy ID.
+            microphone_values = {
+                "selected_id": supplied_values.get(
+                    "selected_microphone_id",
+                    supplied_values.get("microphone_id")),
+            }
+        else:
+            microphone_values = source.get(
+                "microphone", source.get("microphone_settings"))
+            if microphone_values is None:
+                microphone_values = {
+                    "selected_id": source.get(
+                        "selected_microphone_id", source.get("microphone_id")),
+                }
+        try:
+            microphone = MicrophoneSettings.from_mapping(microphone_values)
+        except (TypeError, ValueError):
+            microphone = MicrophoneSettings.defaults()
+
+        if "recording_controls" in supplied_values:
+            recording_values = supplied_values["recording_controls"]
+        elif "recording" in supplied_values:
+            # The legacy alias must be selected from the supplied payload
+            # before built-in nested defaults are allowed to mask it.
+            recording_values = supplied_values["recording"]
+        else:
+            recording_values = source.get(
+                "recording_controls", source.get("recording"))
+        try:
+            recording_controls = RecordingControls.from_mapping(recording_values)
+        except (TypeError, ValueError):
+            recording_controls = RecordingControls.defaults()
         route_defaults = WorkflowConfig(
             transcription=WorkflowRoute(
                 provider_id=provider,
@@ -439,6 +492,8 @@ class AppConfig:
             hotkeys=hotkeys,
             workflows=workflows,
             voice_translation=voice_translation,
+            microphone=microphone,
+            recording_controls=recording_controls,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -470,6 +525,8 @@ class AppConfig:
             "hotkeys": self.hotkeys.to_mapping(),
             "workflows": self.workflows.to_mapping(),
             "voice_translation": self.voice_translation.to_mapping(),
+            "microphone": self.microphone.to_mapping(),
+            "recording_controls": self.recording_controls.to_mapping(),
         }
 
     def to_legacy_mapping(self) -> dict[str, Any]:

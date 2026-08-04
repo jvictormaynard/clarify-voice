@@ -18,6 +18,7 @@ from repositories import (
     UnsupportedSchemaVersionError,
     migrate_config_payload,
 )
+from microphone_controls import MicrophoneSettings, RecordingControls, VADSettings
 from secret_store import (
     MemorySecretStore,
     SecretStore,
@@ -65,6 +66,121 @@ class ConfigurationRepositoryTests(unittest.TestCase):
         self.assertEqual(
             loaded.to_mapping()["voice_translation"]["target_language"], "de-DE"
         )
+
+    def test_microphone_and_recording_controls_round_trip(self):
+        config = AppConfig.from_mapping({
+            "microphone": {"selected_id": "mic-v1-usb"},
+            "recording_controls": {
+                "max_duration_seconds": 120,
+                "warning_seconds": 15,
+                "vad": {
+                    "enabled": True,
+                    "level_threshold": 0.12,
+                    "minimum_speech_seconds": 0.4,
+                    "silence_duration_seconds": 1.1,
+                },
+            },
+        })
+
+        self.assertEqual(config.microphone, MicrophoneSettings("mic-v1-usb"))
+        self.assertEqual(
+            config.recording_controls.vad,
+            VADSettings(
+                enabled=True,
+                level_threshold=0.12,
+                minimum_speech_seconds=0.4,
+                silence_duration_seconds=1.1,
+            ),
+        )
+        mapped = config.to_mapping()
+        self.assertEqual(mapped["microphone"]["selected_id"], "mic-v1-usb")
+        self.assertEqual(
+            AppConfig.from_mapping(mapped).recording_controls,
+            config.recording_controls,
+        )
+
+    def test_invalid_microphone_controls_fall_back_to_safe_defaults(self):
+        config = AppConfig.from_mapping({
+            "microphone": {"schema_version": 99, "selected_id": "bad"},
+            "recording_controls": {
+                "max_duration_seconds": 1,
+                "warning_seconds": 2,
+            },
+        })
+
+        self.assertEqual(config.microphone, MicrophoneSettings.defaults())
+        self.assertEqual(
+            config.recording_controls, RecordingControls.defaults())
+
+    def test_legacy_microphone_id_is_migrated_to_typed_mapping(self):
+        config = AppConfig.from_mapping({"microphone_id": "mic-v1-legacy"})
+        self.assertEqual(config.microphone.selected_id, "mic-v1-legacy")
+        self.assertNotIn("microphone_id", config.to_mapping())
+
+    def test_local_repository_defaults_do_not_mask_legacy_microphone_ids(self):
+        for legacy_key in ("microphone_id", "selected_microphone_id"):
+            with self.subTest(legacy_key=legacy_key):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "config.json"
+                    path.write_text(
+                        json.dumps({legacy_key: "mic-v1-legacy"}),
+                        encoding="utf-8",
+                    )
+                    repository = LocalConfigRepository(
+                        path, defaults=repositories.environment_defaults({}))
+
+                    loaded = repository.load()
+                    self.assertEqual(
+                        loaded.microphone.selected_id, "mic-v1-legacy")
+
+                    repository.save({"ui_language": "pt"})
+                    persisted = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        persisted["microphone"]["selected_id"],
+                        "mic-v1-legacy",
+                    )
+                    self.assertNotIn(legacy_key, persisted)
+                    saved = repository.load()
+                    self.assertEqual(
+                        saved.microphone.selected_id, "mic-v1-legacy")
+
+    def test_local_repository_defaults_do_not_mask_legacy_recording_controls(self):
+        legacy_recording = {
+            "max_duration_seconds": 45,
+            "warning_seconds": 8,
+            "vad": {
+                "enabled": True,
+                "level_threshold": 0.15,
+                "minimum_speech_seconds": 0.5,
+                "silence_duration_seconds": 1.2,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps({"recording": legacy_recording}),
+                encoding="utf-8",
+            )
+            repository = LocalConfigRepository(
+                path, defaults=repositories.environment_defaults({}))
+
+            loaded = repository.load()
+            self.assertEqual(
+                loaded.recording_controls,
+                RecordingControls.from_mapping(legacy_recording),
+            )
+
+            repository.save({"ui_language": "pt"})
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("recording", persisted)
+            self.assertEqual(
+                persisted["recording_controls"]["max_duration_seconds"], 45.0)
+            self.assertEqual(
+                persisted["recording_controls"]["vad"]["silence_duration_seconds"],
+                1.2,
+            )
+            saved = repository.load()
+            self.assertEqual(saved.recording_controls, loaded.recording_controls)
 
     def test_local_asr_selection_and_cloud_refinement_opt_in_round_trip(self):
         config = AppConfig.from_mapping({

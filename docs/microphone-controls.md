@@ -1,9 +1,13 @@
 # Microphone selection and recording controls (issue #52)
 
-This change adds the UI-independent foundation for microphone selection and
-recording boundaries. It intentionally does not connect a new device picker or
-VAD loop to `app.py`; the existing `Recorder`/`RecordingSession` lifecycle and
-its cancellation and temporary-WAV cleanup remain unchanged.
+The application connects the UI-independent microphone policies to the typed
+config repository, the Settings surface, and the existing
+`Recorder`/`RecordingSession` owner. Device selection is resolved from a fresh
+PortAudio inventory before every session; recording boundaries are observed by
+the audio callback and by a small policy worker, so hard duration limits also
+work when capture is SoX-only and the optional PortAudio meter is unavailable.
+The owning workflow is stopped through a lifecycle worker. Cancellation and
+temporary-WAV cleanup remain owned by `RecordingSession`.
 
 ## Device identity and inventory
 
@@ -34,9 +38,22 @@ one of them.
 
 `MicrophoneSettings` is a small versioned mapping boundary. It stores only the
 selected identity and supports the legacy `microphone_id` key for migration.
-The repository/UI integration that persists this mapping in `config.json`,
-refreshes it on hot-plug, and exposes an input-level test is intentionally a
-follow-up.
+`AppConfig` persists this mapping under `microphone`; the Settings page refreshes
+the inventory, shows a visible stale-selection fallback, and runs a short
+input-level test without writing or transmitting audio. A recording resolves
+the same selection again at start, so a hot-plug change cannot silently reuse a
+stale backend index.
+
+## Backend-specific selection safety
+
+On Linux, SoX's PulseAudio driver does not honor a supplied input name. An
+explicit microphone selection therefore fails closed with
+`MicrophoneUnavailableError`; the safe SoX route is the System default.
+
+On Windows, SoX's WaveAudio driver matches non-numeric input names using only
+their first 31 characters. Before starting a recording, the selected name is
+checked with that same prefix rule; a collision with another usable input is
+rejected as ambiguous rather than risking capture from the wrong device.
 
 ## Recording boundaries
 
@@ -60,25 +77,27 @@ without speech never stops a session. A timestamp regression is rejected so a
 wall-clock adjustment cannot terminate a recording early.
 `RecordingBoundaryPolicy` combines both policies and exposes explicit
 `ACTIVE`, `STOPPED`, `CANCELLED`, and `DEVICE_UNAVAILABLE` states without
-touching an audio stream or publishing text.
-
-An audio adapter should call the policy before requesting
-`RecordingSession.stop()`. It must preserve the existing owner/cancellation
-order: cancellation wins over publication, snapshots are taken before
-provider work, and temporary WAV cleanup remains owned by `RecordingSession`.
-A future implementation must also decide how a short/empty capture is
-surfaced rather than treating a policy decision as proof that usable audio
-exists.
+publishing text. The recorder calls the combined policy from its level
+callback, while a short-lived policy worker observes only the opted-in hard
+duration limit. Keeping the worker's duration clock separate prevents it from
+feeding synthetic levels into VAD or racing real callbacks; both paths signal
+the same boundary event. The worker is stopped and joined with the recorder
+process during explicit stop/cancel, so it cannot keep a session alive after
+cleanup. `RecordingSession` invokes the workflow stop
+callback from a separate lifecycle worker, never from the PortAudio callback
+itself. The existing owner/cancellation order remains in force:
+cancellation wins over publication, snapshots are taken before provider work,
+and temporary WAV cleanup remains owned by `RecordingSession`. A policy
+decision is not treated as proof that usable audio exists; the normal WAV
+size/encoding gate still returns `no_audio` for an empty capture.
 
 ## Deferred product acceptance
 
-The following remain outside this incremental foundation and are required
+The following remain outside this incremental integration and are required
 before issue #52 can close:
 
-- Settings UI for listing, selecting, testing, and persisting microphones;
-- visible missing-device and stale-selection messages;
 - real Windows PortAudio/SoX hot-plug and device-loss behavior;
-- maximum-duration warning presentation;
+- visual polish for maximum-duration warning presentation;
 - start/stop audio cues and documentation of media-playback pause behavior;
 - packaged Windows acceptance with fake inventory/unit evidence supplemented by
   manual hot-plug checks.

@@ -22,7 +22,7 @@ backend, Tk, or secret-storage imports.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
 import math
@@ -348,9 +348,23 @@ class MicrophoneInventory:
         ids = [device.stable_id for device in devices]
         if len(set(ids)) != len(ids):
             # Two endpoints with the same fallback name/host identity cannot
-            # be selected safely without a backend-native ID.  Keep the
-            # inventory visible, but resolution will report it unavailable.
+            # be selected safely without a backend-native ID.
             object.__setattr__(self, "error_code", self.error_code or "ambiguous_identity")
+        name_counts: dict[str, int] = {}
+        for device in devices:
+            if device.usable:
+                name = device.name.casefold()
+                name_counts[name] = name_counts.get(name, 0) + 1
+        ambiguous_names = {
+            name for name, count in name_counts.items() if count > 1
+        }
+        if ambiguous_names:
+            # SoX receives only the display name for the selected input. Do
+            # not expose endpoints that would resolve to one another when
+            # host APIs share that name; they remain visible in the snapshot
+            # but are explicitly non-selectable for Settings and Recorder.
+            object.__setattr__(
+                self, "error_code", self.error_code or "ambiguous_name")
         default_id = self.default_id
         if default_id is not None:
             default_id = str(default_id).strip() or None
@@ -376,6 +390,7 @@ class MicrophoneInventory:
             for record in records
         )
         resolved_default = str(default_id).strip() if default_id else ""
+        default_device_index = None
         if not resolved_default:
             marked = tuple(device.stable_id for device in devices if device.is_default)
             if len(marked) == 1:
@@ -384,6 +399,7 @@ class MicrophoneInventory:
             indexed = tuple(
                 device for device in devices if device.backend_index == default_index)
             if len(indexed) == 1:
+                default_device_index = devices.index(indexed[0])
                 resolved_default = indexed[0].stable_id
             elif (
                 not indexed
@@ -394,7 +410,14 @@ class MicrophoneInventory:
                 # the query order as their only index. Never use this fallback
                 # when any real backend index is present, because PortAudio
                 # handles may be sparse after filtering.
+                default_device_index = default_index
                 resolved_default = devices[default_index].stable_id
+        if default_device_index is not None:
+            devices = tuple(
+                replace(device, is_default=True)
+                if index == default_device_index else device
+                for index, device in enumerate(devices)
+            )
         return cls(devices, resolved_default or None)
 
     @classmethod
@@ -405,33 +428,63 @@ class MicrophoneInventory:
 
     @property
     def available_devices(self) -> tuple[MicrophoneDevice, ...]:
-        return tuple(device for device in self.devices if device.usable)
+        ambiguous_names = self._ambiguous_names()
+        return tuple(
+            device for device in self.devices
+            if device.usable and device.name.casefold() not in ambiguous_names
+        )
+
+    def _ambiguous_names(self) -> frozenset[str]:
+        counts: dict[str, int] = {}
+        for device in self.devices:
+            if device.usable:
+                name = device.name.casefold()
+                counts[name] = counts.get(name, 0) + 1
+        return frozenset(name for name, count in counts.items() if count > 1)
 
     def _default_device(self) -> MicrophoneDevice | None:
         if not self.default_id:
             return None
         matches = tuple(
             device for device in self.devices if device.stable_id == self.default_id)
-        if len(matches) != 1 or not matches[0].usable:
+        usable = tuple(device for device in matches if device.usable)
+        if not usable:
             return None
-        return matches[0]
+        if len(usable) == 1:
+            return usable[0]
+        marked = tuple(device for device in usable if device.is_default)
+        if len(marked) == 1:
+            return marked[0]
+        # A duplicate fallback ID is unsafe for a stable/name-based request,
+        # but resolve(None) is the system-default route and Recorder passes
+        # that selection to SoX as -d/default without using this name.
+        return usable[0]
 
     def resolve(self, requested_id: str | None = None) -> MicrophoneSelection:
         """Resolve a saved preference without silently choosing an arbitrary device."""
 
         requested = str(requested_id).strip() if requested_id else None
+        ambiguous_names = self._ambiguous_names()
         matches = tuple(
             device for device in self.devices
             if requested and device.stable_id == requested
         )
-        if len(matches) == 1 and matches[0].usable:
+        if (
+            len(matches) == 1
+            and matches[0].usable
+            and matches[0].name.casefold() not in ambiguous_names
+        ):
             return MicrophoneSelection(
                 MicrophoneSelectionState.SELECTED,
                 matches[0], requested, "requested_device_available")
 
         fallback = self._default_device()
         if fallback is not None:
-            if requested and (len(matches) != 1 or not matches[0].usable):
+            if requested and (
+                len(matches) != 1
+                or not matches[0].usable
+                or matches[0].name.casefold() in ambiguous_names
+            ):
                 return MicrophoneSelection(
                     MicrophoneSelectionState.FALLBACK_DEFAULT,
                     fallback,
@@ -481,7 +534,18 @@ class SoundDeviceMicrophoneInventory:
 
     def snapshot(self) -> MicrophoneInventory:
         try:
-            records = tuple(self._sounddevice.query_devices())
+            raw_records = self._sounddevice.query_devices()
+            # A few lightweight wrappers (and test doubles) return the
+            # default input mapping for ``query_devices()`` instead of the
+            # full sequence. Treat it as one endpoint rather than iterating
+            # its dictionary keys into invalid device descriptors.
+            if isinstance(raw_records, Mapping):
+                one = dict(raw_records)
+                one.setdefault("name", "Default input")
+                one.setdefault("is_default", True)
+                records = (one,)
+            else:
+                records = tuple(raw_records)
             query_hostapis = getattr(self._sounddevice, "query_hostapis", None)
             try:
                 hostapis = tuple(query_hostapis()) if callable(query_hostapis) else ()
@@ -512,6 +576,23 @@ class SoundDeviceMicrophoneInventory:
                             record["host_api"] = host_name
                     normalized_records.append(record)
                 records = tuple(normalized_records)
+            indexed_records = []
+            for index, record in enumerate(records):
+                if not isinstance(record, Mapping):
+                    indexed_records.append(record)
+                    continue
+                record = dict(record)
+                has_backend_index = any(
+                    key in record and record[key] is not None
+                    for key in ("backend_index", "index", "device_index")
+                )
+                if not has_backend_index:
+                    # ``query_devices`` returns the complete PortAudio list;
+                    # its query position is the backend handle when a fake or
+                    # wrapper omitted the explicit index field.
+                    record["index"] = index
+                indexed_records.append(record)
+            records = tuple(indexed_records)
             default = getattr(getattr(self._sounddevice, "default", None), "device", None)
             default_index = None
             if isinstance(default, (tuple, list)):
@@ -913,6 +994,10 @@ class RecordingBoundaryPolicy:
         self._clock = clock
         self._started_at: float | None = None
         self._last_timestamp: float | None = None
+        # The duration monitor has its own timestamp sequence.  It may run
+        # concurrently with the level callback, so it must not advance the
+        # VAD observation clock or make a valid audio callback look stale.
+        self._duration_last_timestamp: float | None = None
         self._state = RecordingBoundaryState.ACTIVE
         self._reason = RecordingBoundaryReason.NONE
         self._lock = threading.RLock()
@@ -942,10 +1027,50 @@ class RecordingBoundaryPolicy:
             timestamp = self._timestamp(now)
             self._started_at = timestamp
             self._last_timestamp = timestamp
+            self._duration_last_timestamp = timestamp
             self._state = RecordingBoundaryState.ACTIVE
             self._reason = RecordingBoundaryReason.NONE
             self._vad.start(timestamp)
             return BoundaryDecision(self._state, self._reason, 0.0)
+
+    def observe_duration(self, now: float | None = None) -> BoundaryDecision:
+        """Evaluate only the hard duration boundary.
+
+        A source-only recorder may not have level callbacks at all.  Keeping
+        this observation separate from :meth:`observe` lets a timer enforce
+        maximum duration without feeding synthetic silence into VAD or
+        racing the callback's timestamp sequence.
+        """
+        with self._lock:
+            timestamp = self._timestamp(now)
+            if (self._duration_last_timestamp is not None
+                    and timestamp < self._duration_last_timestamp):
+                raise NonMonotonicTimestampError(
+                    "recording timestamps must be monotonic")
+            if self._started_at is None:
+                self._started_at = timestamp
+                self._last_timestamp = timestamp
+                self._duration_last_timestamp = timestamp
+                self._vad.start(timestamp)
+            if timestamp < self._started_at:
+                raise NonMonotonicTimestampError(
+                    "recording timestamps must be monotonic")
+            self._duration_last_timestamp = timestamp
+            elapsed = timestamp - self._started_at
+            if self._state is not RecordingBoundaryState.ACTIVE:
+                return BoundaryDecision(self._state, self._reason, elapsed)
+            duration = self._duration.evaluate(elapsed)
+            if duration.should_stop:
+                self._state = RecordingBoundaryState.STOPPED
+                self._reason = duration.reason
+                return BoundaryDecision(
+                    self._state, self._reason, elapsed, duration.warning)
+            return BoundaryDecision(
+                RecordingBoundaryState.ACTIVE,
+                RecordingBoundaryReason.NONE,
+                elapsed,
+                duration.warning,
+            )
 
     def observe(
         self,

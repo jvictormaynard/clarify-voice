@@ -593,6 +593,18 @@ class WorkflowService:
         session.started_at = self._clock.time()
         session.usage_context = self._config.recording_usage_context(command.mode)
         session.recording = recording
+        set_boundary_callback = getattr(recording, "set_boundary_callback", None)
+        if callable(set_boundary_callback):
+            operation_id = session.operation_id
+
+            def automatic_stop(_reason=None, operation_id=operation_id):
+                # The recording owner invokes this from its lifecycle worker;
+                # re-check the operation before enqueueing processing so a
+                # late VAD callback cannot stop a newer dictation.
+                if self._is_current(operation_id):
+                    self._stop_dictation()
+
+            set_boundary_callback(automatic_stop)
         self._transition(session, WorkflowPhase.RECORDING)
         self._run_recording(
             recording, lambda: self._start_audio(session)
