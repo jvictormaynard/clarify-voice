@@ -621,24 +621,39 @@ def _read_json_mapping(
     strict: bool = False,
     raise_on_io: bool = False,
 ) -> dict[str, Any] | None:
+    payload, state, error = _read_json_mapping_state(path)
+    if state == "valid":
+        return payload
+    if state == "io" and (strict or raise_on_io):
+        message = (
+            "The history file is unreadable or corrupt"
+            if strict else "The history snapshot could not be read"
+        )
+        raise HistoryStoreError(message) from error
+    if state == "malformed" and strict:
+        raise HistoryStoreError(
+            "The history file is unreadable or corrupt") from error
+    return None
+
+
+def _read_json_mapping_state(
+    path: Path,
+) -> tuple[dict[str, Any] | None, Literal[
+    "missing", "io", "malformed", "non_mapping", "valid"
+], BaseException | None]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return None
+        return None, "missing", None
     except OSError as error:
-        if strict or raise_on_io:
-            message = (
-                "The history file is unreadable or corrupt"
-                if strict else "The history snapshot could not be read"
-            )
-            raise HistoryStoreError(message) from error
-        return None
+        return None, "io", error
+    try:
+        payload = json.loads(text)
     except (TypeError, ValueError) as error:
-        if strict:
-            raise HistoryStoreError(
-                "The history file is unreadable or corrupt") from error
-        return None
-    return dict(payload) if isinstance(payload, Mapping) else None
+        return None, "malformed", error
+    if not isinstance(payload, Mapping):
+        return None, "non_mapping", None
+    return dict(payload), "valid", None
 
 
 class HistoryStore:
@@ -715,10 +730,14 @@ class HistoryStore:
 
     def _recover_interrupted_write_locked(self) -> dict[str, Any] | None:
         primary_exists = self._primary_exists_for_recovery()
-        current = _read_json_mapping(self.path)
-        if current is None and primary_exists:
+        current, primary_state, primary_error = _read_json_mapping_state(self.path)
+        if current is None and primary_exists and primary_state != "malformed":
             # A readable primary must never be replaced merely because a
             # transient read failed; strict mode keeps this invocation closed.
+            if primary_state == "io":
+                raise HistoryStoreError(
+                    "The history file could not be read consistently"
+                ) from primary_error
             _read_json_mapping(self.path, strict=True)
             raise HistoryStoreError(
                 "The history file could not be read consistently")
