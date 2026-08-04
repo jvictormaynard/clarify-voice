@@ -255,6 +255,28 @@ class HistoryStoreTests(unittest.TestCase):
             persisted = Path(store.path).read_text(encoding="utf-8")
             self.assertNotIn("nested-secret", persisted)
 
+    def test_escaped_mapping_unquoted_credentials_are_redacted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            store.add(
+                status="error",
+                error='body="{\\"token\\":123456789,\\"ok\\":true}"',
+                record_id="escaped-unquoted-credential-record",
+            )
+
+            error = store.list_records()[0].error
+            self.assertEqual(
+                error,
+                'body="{\\"token\\":<redacted>,\\"ok\\":true}"',
+            )
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            self.assertNotIn("123456789", persisted)
+
     def test_escaped_mapping_credentials_with_escaped_quotes_are_fully_redacted(
         self,
     ):

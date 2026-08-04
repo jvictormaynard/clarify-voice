@@ -204,9 +204,19 @@ def _escaped_field_opening(
     value: str,
     match: re.Match[str],
 ) -> tuple[int, int] | None:
-    """Find an assignment's opening quote after a bounded field-name match."""
+    """Find an assignment's value after a bounded field-name match."""
 
     field_name = match.group(0).lower()
+    escaped_key = (
+        (match.start() > 0 and value[match.start() - 1] == "\\")
+        or (
+            match.start() > 1
+            and value[match.start() - 2] == "\\"
+            and value[match.start() - 1] in "'\""
+        )
+    )
+    if field_name in {"authorization", "bearer"} and not escaped_key:
+        return None
     index = match.end()
     length = len(value)
     while index < length and value[index] in "\\'\"\t\r\n ":
@@ -230,9 +240,46 @@ def _escaped_field_opening(
     opening_start = index
     while index < length and value[index] == "\\":
         index += 1
-    if index >= length or value[index] not in "'\"":
+    if index >= length or value[index] in ",;&}]\n":
         return None
-    return opening_start, index + 1
+    if value[index] in "'\"":
+        return opening_start, index + 1
+    return opening_start, opening_start
+
+
+def _escaped_unquoted_field_value_end(value: str, start: int) -> int:
+    """Find a serialized unquoted value's structural boundary linearly."""
+
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(start, len(value)):
+        character = value[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+        elif character in "'\"":
+            quote = character
+        elif character in "{[":
+            depth += 1
+        elif character in "}]":
+            if depth:
+                depth -= 1
+            else:
+                return index
+        elif depth == 0 and character in ",;&\n":
+            return index
+    return len(value)
 
 
 def _redact_escaped_fields(value: str) -> str:
@@ -257,6 +304,14 @@ def _redact_escaped_fields(value: str) -> str:
             search_at = match.end()
             continue
         opening_start, opening_end = opening
+        if opening_start == opening_end:
+            end = _escaped_unquoted_field_value_end(value, opening_end)
+            prefix = value[match.start():opening_start]
+            pieces.append(value[cursor:match.start()])
+            pieces.append(f"{prefix}<redacted>")
+            cursor = end
+            search_at = end
+            continue
         quote = value[opening_start:opening_end]
         end = _escaped_field_value_end(value, opening_end, quote)
         prefix = value[match.start():opening_start]
