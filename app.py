@@ -10892,7 +10892,6 @@ class App(ctk.CTk):
                 return
             try:
                 store_workflow_form()
-                self.apply_hotkey_settings(hotkey_settings_controller.settings)
                 _apply_settings_transaction(
                     selected, selected_refinement, active_options(),
                     active_text_options(), model_keys,
@@ -10910,6 +10909,11 @@ class App(ctk.CTk):
                 workflow_controller.reload()
                 load_workflow_form(workflow_scope_state["scope"])
                 history_records()
+                # Apply hotkeys last.  The native/config transaction is itself
+                # rollback-capable; deferring it until the rest of Settings
+                # succeeds prevents a later provider/workflow failure from
+                # leaving only the shortcut draft active.
+                self.apply_hotkey_settings(hotkey_settings_controller.settings)
             except (HotkeyRegistrationError, HotkeyValidationError) as error:
                 if getattr(error, "code", "") == "unsupported_activation_mode":
                     message = self._t("hotkey_ptt_unsupported")

@@ -91,6 +91,11 @@ class HotkeySettingsIntegrationTests(unittest.TestCase):
                 "self.apply_hotkey_settings(hotkey_settings_controller.settings)"):
             with self.subTest(expected=expected):
                 self.assertIn(expected, source)
+        self.assertLess(
+            source.index("_apply_settings_transaction("),
+            source.index(
+                "self.apply_hotkey_settings(hotkey_settings_controller.settings)"),
+        )
 
     def test_apply_transaction_persists_the_selected_draft(self):
         previous = HotkeySettings.defaults()
