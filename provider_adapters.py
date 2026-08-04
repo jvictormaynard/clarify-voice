@@ -42,18 +42,26 @@ def audio_mime_type(audio_path: Path) -> str:
 
 
 def _model_entries(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    entries = payload.get("models", payload.get("data", []))
-    if not isinstance(entries, list):
+    if not isinstance(payload, Mapping):
         return []
-    return [entry for entry in entries if isinstance(entry, Mapping)]
+    for key in ("models", "data"):
+        entries = payload.get(key)
+        if isinstance(entries, list) and all(
+                isinstance(entry, Mapping) for entry in entries):
+            return list(entries)
+    return []
 
 
-def _valid_catalog_payload(payload: Any, key: str) -> bool:
-    if not isinstance(payload, Mapping) or key not in payload:
+def _valid_catalog_payload(payload: Any, keys: str | tuple[str, ...]) -> bool:
+    if not isinstance(payload, Mapping):
         return False
-    entries = payload[key]
-    return isinstance(entries, list) and all(
-        isinstance(entry, Mapping) for entry in entries)
+    expected_keys = (keys,) if isinstance(keys, str) else keys
+    return any(
+        key in payload
+        and isinstance(payload[key], list)
+        and all(isinstance(entry, Mapping) for entry in payload[key])
+        for key in expected_keys
+    )
 
 
 def _invalid_response_error(http, response, provider: str, operation: str):
@@ -358,7 +366,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         )
         payload = self.http.json(
             response, provider=self.metadata.provider_id, operation=operation)
-        if not _valid_catalog_payload(payload, "data"):
+        if not _valid_catalog_payload(payload, ("models", "data")):
             raise _invalid_response_error(
                 self.http, response, self.metadata.provider_id, operation)
         return payload

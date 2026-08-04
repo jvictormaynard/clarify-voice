@@ -268,6 +268,22 @@ class ProviderHttpPolicyTests(unittest.TestCase):
 
         self.assertEqual(session.get.call_count, 1)
 
+    def test_malformed_endpoint_host_does_not_mask_network_error(self):
+        logger = Mock()
+        client, session = self.make_client(
+            get=[requests.exceptions.InvalidURL("invalid IPv6 endpoint")],
+            logger=logger,
+        )
+
+        with self.assertRaises(NetworkError):
+            client.request(
+                "GET", "https://[bad", provider="openai",
+                operation="validation")
+
+        self.assertEqual(session.get.call_count, 1)
+        logger.write.assert_called_once()
+        self.assertEqual(logger.write.call_args.args[0]["host"], "")
+
     def test_http_failures_are_classified_without_exposing_response_text(self):
         cases = (
             (FakeResponse(429, {"error": {"code": "rate_limit"}}), RateLimitError),
