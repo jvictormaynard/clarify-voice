@@ -240,6 +240,33 @@ class HotkeySettingsIntegrationTests(unittest.TestCase):
         self.assertEqual(config["hotkeys"], selected.to_mapping())
         self.assertEqual(tray.applied, [selected])
 
+    def test_outer_rollback_saves_config_when_autostart_restore_fails(self):
+        previous = {
+            "history_enabled": False,
+            "autostart": False,
+            "workflows": {"transcription": {"prompt": "original"}},
+        }
+        config = {
+            "history_enabled": True,
+            "autostart": True,
+            "workflows": {"transcription": {"prompt": "draft"}},
+        }
+        persisted = []
+
+        def save_config(_repositories=None):
+            persisted.append(deepcopy(config))
+
+        with patch.object(app, "APP_CONFIG", config), \
+                patch.object(
+                    app, "_restore_autostart_registry_state",
+                    side_effect=OSError("registry unavailable")), \
+                patch.object(app, "_save_app_config", side_effect=save_config):
+            app._restore_settings_apply_state(
+                previous, (False, None, None))
+
+        self.assertEqual(config, previous)
+        self.assertEqual(persisted, [previous])
+
     def test_recording_hint_uses_effective_binding_in_every_locale(self):
         selected = HotkeySettings.defaults().with_hotkey(
             HotkeyAction.RECORDING, "Ctrl+L")

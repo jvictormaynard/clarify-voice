@@ -1233,7 +1233,13 @@ def _restore_settings_apply_state(
     """
     APP_CONFIG.clear()
     APP_CONFIG.update(deepcopy(previous_config))
-    _restore_autostart_registry_state(previous_registry_state, registry)
+    try:
+        _restore_autostart_registry_state(previous_registry_state, registry)
+    except OSError:
+        # Persist the reverted config even when the Run-key adapter is
+        # temporarily unavailable. This mirrors the inner transaction's
+        # isolation and prevents a failed Apply from surviving a restart.
+        pass
     _save_app_config(repositories)
 
 
