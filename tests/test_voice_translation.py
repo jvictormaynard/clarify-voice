@@ -95,6 +95,37 @@ class BlockingClipboard(FakeClipboard):
         super().publish(text, target, disposition)
 
 
+class LateFirstProvider(FakeProvider):
+    """Hold the first worker so a later run can supersede it deterministically."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_entered = threading.Event()
+        self.first_release = threading.Event()
+        self._calls = 0
+
+    def transcribe(self, audio_source, source_language):
+        self.transcribe_calls.append((audio_source, source_language))
+        self._calls += 1
+        if self._calls == 1:
+            raw = "old transcript"
+            self.first_entered.set()
+            if not self.first_release.wait(timeout=2):
+                raise AssertionError("test did not release the late worker")
+        else:
+            raw = "new transcript"
+        return TranscriptionResult(raw, "gemini", "gemini-test")
+
+    def translate(self, request):
+        self.translation_requests.append(request)
+        return TranslationResult(
+            f"translated: {request.text}",
+            request.route.provider_id,
+            request.route.model_id,
+            request.target_language,
+        )
+
+
 class InterleavingStateMachine(VoiceTranslationStateMachine):
     """Pause just before the transition to expose phase/cancel races."""
 
@@ -391,11 +422,11 @@ class VoiceTranslationConcurrencyTests(unittest.TestCase):
         machine = InterleavingStateMachine(
             VoiceTranslationConfig(), clock=FakeClock()
         )
-        machine.begin()
-        machine.begin_transcription()
+        started = machine.begin()
+        machine.begin_transcription(started.operation_id)
         machine.block_translation = True
         transition = threading.Thread(
-            target=lambda: machine.transcript_received("raw"),
+            target=lambda: machine.transcript_received("raw", started.operation_id),
             daemon=True,
         )
         transition.start()
@@ -411,6 +442,54 @@ class VoiceTranslationConcurrencyTests(unittest.TestCase):
         self.assertFalse(transition.is_alive())
         self.assertFalse(cancellation.is_alive())
         self.assertEqual(machine.state.phase, VoiceTranslationPhase.CANCELLED)
+
+    def test_late_worker_cannot_publish_into_a_new_operation(self):
+        provider = LateFirstProvider()
+        clipboard = FakeClipboard()
+        workflow = VoiceTranslationWorkflow(
+            provider,
+            clipboard,
+            VoiceTranslationConfig(),
+            clock=FakeClock(),
+            coordinator=VoiceTranslationPublicationCoordinator(),
+        )
+        outcomes = []
+        errors = []
+
+        def run_late_worker() -> None:
+            try:
+                outcomes.append(workflow.run(b"old-audio"))
+            except BaseException as error:  # pragma: no cover - assertion aid
+                errors.append(error)
+
+        worker = threading.Thread(target=run_late_worker, daemon=True)
+        worker.start()
+        self.assertTrue(provider.first_entered.wait(timeout=2))
+        self.assertEqual(
+            workflow.state_machine.cancel().phase,
+            VoiceTranslationPhase.CANCELLED,
+        )
+
+        current = workflow.run(b"new-audio")
+        self.assertEqual(current.operation_id, 2)
+        self.assertEqual(current.phase, VoiceTranslationPhase.COMPLETED)
+
+        provider.first_release.set()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].operation_id, current.operation_id)
+        self.assertEqual(
+            clipboard.published,
+            [
+                (
+                    "translated: new transcript",
+                    "editor-window",
+                    VoiceTranslationPublication.PASTED,
+                )
+            ],
+        )
 
 
 if __name__ == "__main__":

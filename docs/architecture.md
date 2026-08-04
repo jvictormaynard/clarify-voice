@@ -112,7 +112,10 @@ completion remains consistent with the published outcome. The application-wide
 default `VoiceTranslationPublicationCoordinator` serializes external
 publication effects across separately constructed workflow objects, so two
 global actions cannot paste over one another. The policy is side-effect free
-and can be reviewed independently of any desktop API.
+and can be reviewed independently of any desktop API. Every worker carries the
+operation ID captured when it starts; all transitions and publication claims
+verify that ID, so a late completion from a cancelled run fails closed instead
+of mutating or publishing into a newer operation.
 
 This is intentionally scaffolding, not the packaged feature. A follow-up must
 connect the state machine to recording, global hotkey dispatch, the focus-safe
