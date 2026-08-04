@@ -227,6 +227,20 @@ cleanup. Settings integration, hot-plug handling, audio cues, and packaged
 Windows acceptance remain follow-up work so the existing `Recorder` and
 `RecordingSession` cleanup/cancellation contract is not duplicated here.
 
+### `history_store.py` (typed groundwork, not user-facing)
+
+Defines the opt-in, local-only transcription history boundary for issue #53.
+`HistoryRecord` accepts raw/refined text, workflow, timestamp, provider/model
+identifiers, status, and concise error metadata; it has no audio, API-key,
+provider-payload, or telemetry fields. `HistoryStore` is disabled by default,
+uses a versioned JSON document with atomic same-directory writes, recovers an
+intact interrupted snapshot when the primary is missing, enforces configurable
+retention, supports delete-all, and exports TXT, Markdown, or JSON. The first
+version intentionally avoids SQLite because the staged boundary has no search,
+sync, or high-volume requirement. Settings/UI wiring, copy/retry actions,
+per-user path selection, and packaged Windows acceptance remain follow-up work;
+this module must not be read as a product-level history claim.
+
 ### `desktop_state.py`
 
 Contains the legacy `WorkflowController` used by the current Tk path to prevent
