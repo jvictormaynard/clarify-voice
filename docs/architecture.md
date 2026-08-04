@@ -74,6 +74,18 @@ Connections arrive from the repository-loaded configuration (with provider
 secrets resolved by `SecretStore`); the transport never persists credentials or
 reads environment variables itself.
 
+### Workflow-scoped routing
+
+`workflow_config.py` is the UI-free boundary for routing decisions. It models
+independent `transcription`, `refinement`, `rewrite`, `translation`, and
+`local_asr_refinement` scopes. Each route carries a canonical provider ID,
+model ID, prompt policy, optional custom endpoint, and an explicit enabled
+flag; API keys are never part of a route. `validate_workflow_config` checks the
+registry capability required by every scope and rejects unsupported
+combinations before an adapter or local sidecar can start. Its
+`test_workflow_configuration` result is local and diagnostic-safe: it makes no
+provider request and does not persist prompt text.
+
 #### Adding an OpenAI-compatible provider
 
 1. Add `ProviderMetadata` with a canonical lowercase API ID, a separate display
@@ -197,16 +209,16 @@ attempting to read arbitrary clipboard formats.
 Defines an isolated installer and lifecycle manager for a separately downloaded,
 checksummed `whisper.cpp` Windows sidecar and model. `LocalASRProviderAdapter`
 implements the typed provider-registry contract over the narrow
-`LocalTranscriptionBackend` lifecycle seam. It is not registered in the default
-registry because product installation/progress and final wiring are still
-pending #22. The #32 signed MSI/update contract is for packaged ClarifyVoice
+`LocalTranscriptionBackend` lifecycle seam. It is registered as an explicit
+local capability, while installation/progress remains an explicit product
+action and no cloud fallback is implicit. The #32 signed MSI/update contract is for packaged ClarifyVoice
 artifacts; this source-only sidecar harness does not claim signed-release
 coverage or silently join that updater. It consumes the #18
 `TranscriptionRequest.audio_bytes` snapshot;
 `RecordingSession` remains the sole owner of the temporary WAV, while the local
-adapter owns only inference cancellation and sidecar shutdown. The current
-application therefore does not import this module, start the sidecar, or
-download assets.
+adapter owns only inference cancellation and sidecar shutdown. Importing the
+module never downloads assets; the application starts the sidecar only after an
+explicit installed local route is selected.
 
 The workflow capture path requires a sequence-bearing snapshot; it retries
 transient snapshot contention and otherwise fails closed rather than falling
@@ -241,9 +253,12 @@ values are ignored so a damaged or newer settings file cannot prevent startup.
 
 `ConfigRepository` and `UsageStatsRepository` are the application-facing
 interfaces. `LocalConfigRepository` loads the existing flat settings format,
-adds `schema_version`, and applies ordered idempotent migrations. Its typed
-`AppConfig` model groups provider endpoints/model IDs, provider selection, UI
-preferences, and startup settings. `LocalUsageStatsRepository` preserves the
+adds `schema_version`, and applies ordered idempotent migrations. Version 2
+adds a nested workflow map while retaining flat keys as a compatibility
+adapter, so existing transcription/refinement behavior survives migration and
+older callers can continue to read their fields. Its typed `AppConfig` model
+groups provider endpoints/model IDs, independent workflow routes, provider
+selection, UI preferences, and startup settings. `LocalUsageStatsRepository` preserves the
 anonymous event list and its existing `version` marker while also writing an
 explicit `schema_version`. A file from a newer schema is loaded read-only for
 compatibility; saves are refused until a version that understands that schema
@@ -253,6 +268,13 @@ without a preceding load. The legacy mapping adapter retains recognized
 startup settings such as `autostart` during round-trips. Supported provider
 choices and model canonicalization come from the provider registry while the
 on-disk keys remain unchanged.
+
+Settings apply through `LocalConfigRepository.apply`: all workflow routes are
+validated first, then secure credentials and JSON are committed atomically.
+Secret-store read-back or file-write failure restores the prior secret and
+leaves the prior configuration recoverable. `reset_workflow` and
+`test_workflow` provide UI-independent reset and capability-test operations;
+neither operation sends transcript/prompt content to diagnostics.
 
 ### `dictionary_snippets.py`
 

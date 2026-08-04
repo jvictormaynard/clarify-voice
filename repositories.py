@@ -13,12 +13,12 @@ import os
 import tempfile
 import threading
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
 from provider_registry import PROVIDER_IDS, PROVIDER_REGISTRY
-from provider_types import ProviderCapability
+from provider_types import ProviderCapability, ProviderError
 from hotkey_config import HotkeySettings
 from secret_store import (
     SecretStore,
@@ -26,9 +26,33 @@ from secret_store import (
     SecretStoreUnavailableError,
     create_secret_store,
 )
+from workflow_config import (
+    DEFAULT_WORKFLOW_PROMPTS,
+    WORKFLOW_SCOPES,
+    WorkflowConfig,
+    WorkflowConfigurationError,
+    WorkflowRoute,
+    WorkflowScope,
+    WorkflowTestResult,
+    normalize_workflow_scope,
+    test_workflow_configuration,
+    validate_workflow_config,
+    validate_workflow_route,
+)
+
+__all__ = [
+    "AppConfig", "ApplicationRepositories", "ConfigRepository",
+    "LocalConfigRepository", "LocalUsageStatsRepository", "ProviderConfig",
+    "ProviderSelection", "StartupSettings", "UIPreferences",
+    "WorkflowConfig", "WorkflowConfigurationError", "WorkflowRoute",
+    "WorkflowScope", "WorkflowTestResult", "environment_defaults",
+    "migrate_config_payload", "normalize_workflow_scope",
+    "test_workflow_configuration", "validate_workflow_config",
+    "validate_workflow_route",
+]
 
 
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
 STATS_SCHEMA_VERSION = 1
 SUPPORTED_PROVIDERS = PROVIDER_IDS
 PROVIDER_SECRET_KEYS = {
@@ -65,8 +89,6 @@ def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[s
         "groq_audio_model": env.get("GROQ_AUDIO_MODEL", "whisper-large-v3-turbo"),
         "groq_text_model": env.get("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile"),
         "local_asr_model": env.get("LOCAL_ASR_MODEL", "ggml-small"),
-        # Local transcription never sends text to a cloud refinement provider
-        # unless the user explicitly opts in from Settings.
         "local_asr_cloud_refinement": False,
         "refinement_provider": env.get("REFINEMENT_PROVIDER", ""),
         "refinement_model": env.get("REFINEMENT_MODEL", ""),
@@ -130,6 +152,7 @@ class AppConfig:
     startup: StartupSettings = field(default_factory=StartupSettings)
     local_asr_cloud_refinement: bool = False
     hotkeys: HotkeySettings = field(default_factory=HotkeySettings.defaults)
+    workflows: WorkflowConfig = field(default_factory=WorkflowConfig)
 
     @classmethod
     def from_mapping(
@@ -137,7 +160,13 @@ class AppConfig:
         values: Mapping[str, Any] | None,
         defaults: Mapping[str, Any] | None = None,
     ) -> "AppConfig":
-        """Build a safe config from legacy flat JSON, ignoring bad fields."""
+        """Build a safe config from flat or workflow-scoped JSON.
+
+        The flat fields remain the compatibility source for the current UI,
+        while the nested ``workflows`` object is authoritative whenever a
+        route explicitly supplies a value.  This lets the migration land
+        without forcing a product UI rewrite in the same change.
+        """
 
         source: dict[str, Any] = {}
         if defaults:
@@ -234,10 +263,86 @@ class AppConfig:
                     hotkeys.hotkeys, source["recording_activation_mode"])
             except ValueError:
                 pass
+        route_defaults = WorkflowConfig(
+            transcription=WorkflowRoute(
+                provider_id=provider,
+                model_id=PROVIDER_REGISTRY.canonical_audio_model(
+                    provider,
+                    provider_config(provider).audio_model,
+                ),
+                prompt=DEFAULT_WORKFLOW_PROMPTS[
+                    WorkflowScope.TRANSCRIPTION.value
+                ],
+            ),
+            refinement=WorkflowRoute(
+                provider_id=refinement_provider,
+                model_id=refinement_model,
+                prompt=DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.REFINEMENT.value],
+            ),
+            rewrite=WorkflowRoute(
+                provider_id=refinement_provider,
+                model_id=refinement_model,
+                prompt=DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.REWRITE.value],
+            ),
+            translation=WorkflowRoute(
+                provider_id=refinement_provider,
+                model_id=refinement_model,
+                prompt=DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.TRANSLATION.value],
+            ),
+            local_asr_refinement=WorkflowRoute(
+                provider_id=refinement_provider,
+                model_id=refinement_model,
+                prompt=DEFAULT_WORKFLOW_PROMPTS[
+                    WorkflowScope.LOCAL_ASR_REFINEMENT.value
+                ],
+                enabled=local_asr_cloud_refinement,
+            ),
+        )
+        workflow_values = source.get("workflows")
+        workflows = WorkflowConfig.from_mapping(
+            workflow_values if isinstance(workflow_values, Mapping) else None,
+            defaults=route_defaults,
+        )
+        # Canonicalize persisted audio aliases while leaving unsupported
+        # combinations for the explicit apply/test validation boundary.
+        try:
+            transcription = workflows.transcription
+            workflows = workflows.with_route(
+                WorkflowScope.TRANSCRIPTION,
+                replace(
+                    transcription,
+                    model_id=PROVIDER_REGISTRY.canonical_audio_model(
+                        transcription.provider_id, transcription.model_id
+                    ),
+                ),
+            )
+        except (ProviderError, ValueError):
+            pass
+
+        workflow_mapping = workflow_values if isinstance(workflow_values, Mapping) else {}
+        effective_transcription_provider = (
+            workflows.transcription.provider_id
+            if "transcription" in workflow_mapping else provider
+        )
+        effective_refinement_provider = (
+            workflows.refinement.provider_id
+            if "refinement" in workflow_mapping else refinement_provider
+        )
+        effective_refinement_model = (
+            workflows.refinement.model_id
+            if "refinement" in workflow_mapping else refinement_model
+        )
+        if ("local_asr_refinement" in workflow_mapping
+                and isinstance(workflows.local_asr_refinement.enabled, bool)):
+            local_asr_cloud_refinement = workflows.local_asr_refinement.enabled
 
         return cls(
             schema_version=CONFIG_SCHEMA_VERSION,
-            selection=ProviderSelection(provider, refinement_provider, refinement_model),
+            selection=ProviderSelection(
+                effective_transcription_provider,
+                effective_refinement_provider,
+                effective_refinement_model,
+            ),
             gemini=provider_config("gemini"),
             openai=provider_config("openai"),
             groq=provider_config("groq"),
@@ -246,10 +351,11 @@ class AppConfig:
             startup=StartupSettings(autostart),
             local_asr_cloud_refinement=local_asr_cloud_refinement,
             hotkeys=hotkeys,
+            workflows=workflows,
         )
 
     def to_mapping(self) -> dict[str, Any]:
-        """Serialize using the existing flat keys plus an explicit version."""
+        """Serialize nested workflow routes plus legacy compatibility fields."""
 
         return {
             "schema_version": CONFIG_SCHEMA_VERSION,
@@ -273,6 +379,7 @@ class AppConfig:
             "ui_language": self.ui.language,
             "autostart": self.startup.autostart,
             "hotkeys": self.hotkeys.to_mapping(),
+            "workflows": self.workflows.to_mapping(),
         }
 
     def to_legacy_mapping(self) -> dict[str, Any]:
@@ -281,6 +388,59 @@ class AppConfig:
         values = self.to_mapping()
         values.pop("schema_version", None)
         return values
+
+    def workflow(self, scope: WorkflowScope | str) -> WorkflowRoute:
+        return self.workflows.route(scope)
+
+    def diagnostic_mapping(self) -> dict[str, Any]:
+        """Return effective routing metadata without prompts or credentials."""
+        return {
+            "schema_version": self.schema_version,
+            "workflows": self.workflows.diagnostic_mapping(),
+        }
+
+    def reset_workflow(
+        self,
+        scope: WorkflowScope | str,
+        *,
+        registry=PROVIDER_REGISTRY,
+    ) -> "AppConfig":
+        """Reset one route to the current provider/model defaults."""
+        normalized = normalize_workflow_scope(scope)
+        if normalized not in WORKFLOW_SCOPES:
+            raise WorkflowConfigurationError(
+                normalized, f"Unknown workflow scope: {normalized}", field="scope"
+            )
+        selection = self.selection
+        if normalized == WorkflowScope.TRANSCRIPTION.value:
+            provider_id = selection.transcription_provider
+            metadata = registry.describe(provider_id)
+            route = WorkflowRoute(
+                provider_id=provider_id,
+                model_id=registry.canonical_audio_model(
+                    provider_id, metadata.default_audio_model
+                ),
+                prompt=DEFAULT_WORKFLOW_PROMPTS[normalized],
+            )
+        else:
+            provider_id = selection.refinement_provider
+            metadata = registry.describe(provider_id)
+            route = WorkflowRoute(
+                provider_id=provider_id,
+                model_id=metadata.default_text_model,
+                prompt=DEFAULT_WORKFLOW_PROMPTS[normalized],
+                enabled=(
+                    self.local_asr_cloud_refinement
+                    if normalized == WorkflowScope.LOCAL_ASR_REFINEMENT.value
+                    else True
+                ),
+            )
+        workflows = self.workflows.with_route(normalized, route)
+        return replace(self, workflows=workflows,
+                       local_asr_cloud_refinement=(
+                           route.enabled
+                           if normalized == WorkflowScope.LOCAL_ASR_REFINEMENT.value
+                           else self.local_asr_cloud_refinement))
 
 
 def _version(value: Any) -> int:
@@ -293,7 +453,118 @@ def _migrate_legacy_to_v1(payload: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
-CONFIG_MIGRATIONS = {0: _migrate_legacy_to_v1}
+def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
+    """Split the shared legacy refinement route into workflow scopes."""
+    migrated = dict(payload)
+    existing = migrated.get("workflows")
+    workflows = dict(existing) if isinstance(existing, Mapping) else {}
+
+    def string(key: str, fallback: str = "") -> str:
+        value = migrated.get(key, fallback)
+        return value.strip() if isinstance(value, str) else fallback
+
+    transcription_provider = string("transcription_provider", "gemini").lower()
+    if transcription_provider not in SUPPORTED_PROVIDERS:
+        transcription_provider = "gemini"
+    requested_refinement_provider = string("refinement_provider").lower()
+    refinement_provider = requested_refinement_provider
+    refinement_fallback = False
+    if refinement_provider not in SUPPORTED_PROVIDERS:
+        refinement_fallback = True
+        refinement_provider = (
+            transcription_provider
+            if transcription_provider in ("openai", "groq")
+            else "openai"
+        )
+    if not PROVIDER_REGISTRY.supports(
+            refinement_provider, ProviderCapability.TEXT_GENERATION):
+        refinement_fallback = True
+        refinement_provider = (
+            transcription_provider
+            if (PROVIDER_REGISTRY.supports(
+                    transcription_provider, ProviderCapability.TEXT_GENERATION)
+                and not PROVIDER_REGISTRY.supports(
+                    transcription_provider,
+                    ProviderCapability.MULTIMODAL_AUDIO))
+            else "openai"
+        )
+    defaults = {
+        "gemini": ("gemini-2.5-flash", "gemini-2.5-flash"),
+        "openai": ("whisper-1", "gpt-4o-mini"),
+        "groq": ("whisper-large-v3-turbo", "llama-3.3-70b-versatile"),
+        "local_asr": ("ggml-small", ""),
+    }
+    transcription_model = string(
+        "gemini_model" if transcription_provider == "gemini"
+        else f"{transcription_provider}_audio_model",
+        defaults.get(transcription_provider, ("", ""))[0],
+    )
+    if transcription_provider == "gemini":
+        transcription_model = transcription_model or defaults["gemini"][0]
+    refinement_model = "" if refinement_fallback else string(
+        "refinement_model",
+        string(f"{refinement_provider}_text_model",
+               defaults.get(refinement_provider, ("", ""))[1]),
+    )
+    local_enabled = migrated.get("local_asr_cloud_refinement", False)
+    local_enabled = local_enabled if isinstance(local_enabled, bool) else False
+
+    defaults_for_scope = {
+        WorkflowScope.TRANSCRIPTION.value: {
+            "provider_id": transcription_provider,
+            "model_id": transcription_model,
+            "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.TRANSCRIPTION.value],
+            "custom_endpoint": "",
+            "enabled": True,
+        },
+        WorkflowScope.REFINEMENT.value: {
+            "provider_id": refinement_provider,
+            "model_id": refinement_model,
+            "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.REFINEMENT.value],
+            "custom_endpoint": "",
+            "enabled": True,
+        },
+        WorkflowScope.REWRITE.value: {
+            "provider_id": refinement_provider,
+            "model_id": refinement_model,
+            "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.REWRITE.value],
+            "custom_endpoint": "",
+            "enabled": True,
+        },
+        WorkflowScope.TRANSLATION.value: {
+            "provider_id": refinement_provider,
+            "model_id": refinement_model,
+            "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.TRANSLATION.value],
+            "custom_endpoint": "",
+            "enabled": True,
+        },
+        WorkflowScope.LOCAL_ASR_REFINEMENT.value: {
+            "provider_id": refinement_provider,
+            "model_id": refinement_model,
+            "prompt": DEFAULT_WORKFLOW_PROMPTS[
+                WorkflowScope.LOCAL_ASR_REFINEMENT.value
+            ],
+            "custom_endpoint": "",
+            "enabled": local_enabled,
+        },
+    }
+    for scope, default in defaults_for_scope.items():
+        if not isinstance(workflows.get(scope), Mapping):
+            workflows[scope] = default
+        else:
+            # Do not overwrite a partially authored future route.  Missing
+            # fields receive deterministic defaults and the migration remains
+            # idempotent when called again.
+            route = dict(workflows[scope])
+            for key, value in default.items():
+                route.setdefault(key, value)
+            workflows[scope] = route
+    migrated["workflows"] = workflows
+    migrated["schema_version"] = 2
+    return migrated
+
+
+CONFIG_MIGRATIONS = {0: _migrate_legacy_to_v1, 1: _migrate_v1_to_v2}
 
 
 def migrate_config_payload(payload: Any) -> dict[str, Any]:
@@ -585,6 +856,36 @@ class LocalConfigRepository(ConfigRepository):
                 self._restore_secrets(previous)
                 raise SecretStoreUnavailableError(
                     "The credential store could not be updated") from None
+
+    def apply(self, config: AppConfig | Mapping[str, Any]) -> AppConfig:
+        """Validate routes, then persist config as one rollback-capable unit.
+
+        ``save`` already coordinates secret-store verification and the atomic
+        JSON replacement.  Keeping this higher-level operation separate lets
+        settings callers validate every workflow before touching a provider,
+        sidecar, or credential backend.
+        """
+        model = config if isinstance(config, AppConfig) else AppConfig.from_mapping(
+            config, self.defaults
+        )
+        validated = replace(
+            model,
+            workflows=validate_workflow_config(model.workflows),
+        )
+        self.save(validated)
+        return validated
+
+    def reset_workflow(self, scope: WorkflowScope | str) -> AppConfig:
+        """Reset and persist one workflow route while retaining other settings."""
+        current = self.load()
+        return self.apply(current.reset_workflow(scope))
+
+    def test_workflow(
+        self,
+        scope: WorkflowScope | str | None = None,
+    ) -> WorkflowTestResult | tuple[WorkflowTestResult, ...]:
+        """Return a safe local route check without making network requests."""
+        return test_workflow_configuration(self.load().workflows, scope)
 
 
 class LocalUsageStatsRepository(UsageStatsRepository):

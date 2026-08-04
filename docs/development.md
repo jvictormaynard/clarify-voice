@@ -72,21 +72,45 @@ Run the same core checks used in CI:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q app.py workflows.py repositories.py dictionary_snippets.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
+.\.venv\Scripts\python.exe -m compileall -q app.py workflows.py repositories.py workflow_config.py dictionary_snippets.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
 ```
 
 From Linux or WSL with the dependencies installed:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q app.py workflows.py repositories.py dictionary_snippets.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
+python3 -m compileall -q app.py workflows.py repositories.py workflow_config.py dictionary_snippets.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
 ```
 
-Repository-specific tests live in `tests/test_repositories.py` and are split
-into configuration, migration, and usage-statistics cases. They cover legacy
-file loading, future/unknown fields, idempotent migrations, atomic writes, and
-rollback when a secret backend cannot be verified. The backend contract and
+Repository-specific tests live in `tests/test_repositories.py` and
+`tests/test_workflow_config.py`. They cover legacy file loading, the ordered
+flat-to-workflow migration, independent routes, canonical model IDs,
+capability/custom-endpoint validation, future/unknown fields, atomic writes,
+and rollback when a secret backend cannot be verified. The backend contract and
 corrupted-entry handling are covered in `tests/test_secret_store.py`.
+
+Workflow settings are persisted below the `workflows` key in `config.json`:
+
+```json
+{
+  "workflows": {
+    "translation": {
+      "provider_id": "groq",
+      "model_id": "llama-3.3-70b-versatile",
+      "prompt": "Translate literally.",
+      "custom_endpoint": "",
+      "enabled": true
+    }
+  }
+}
+```
+
+Use `LocalConfigRepository.apply(...)` to validate and commit a candidate as a
+single transaction. `repository.test_workflow(scope)` performs a local
+capability check only; it does not send text or prompts. `reset_workflow(scope)`
+restores the provider's canonical default model and prompt for that scope.
+Provider API keys remain resolved through the secure `SecretStore` and are not
+part of a workflow route or its diagnostics.
 
 After a Windows package is built, the executable can validate its actual
 credential backend without touching the developer profile:
