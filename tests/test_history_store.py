@@ -399,6 +399,44 @@ class HistoryStoreTests(unittest.TestCase):
                 store.list_records()
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
 
+    def test_invalid_schema_marker_primary_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.json"
+            path.write_text(json.dumps({
+                "schema_version": "2",
+                "records": [{"raw_text": "unknown-format"}],
+            }), encoding="utf-8")
+            before = path.read_bytes()
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+
+            with self.assertRaises(HistoryStoreError):
+                store.list_records()
+            with self.assertRaises(HistoryStoreError):
+                store.add(raw_text="must not rewrite unknown schema")
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_invalid_schema_marker_snapshot_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="committed")
+            before = path.read_bytes()
+            candidate = root / ".history.json.unknown-version.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": "2",
+                "records": [{"raw_text": "unknown-format"}],
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime + 1, target_mtime + 1))
+
+            records = store.list_records()
+            self.assertEqual([item.raw_text for item in records], ["committed"])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(candidate.exists())
+
     def test_future_primary_is_not_replaced_by_supported_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -526,6 +564,27 @@ class HistoryStoreTests(unittest.TestCase):
             candidate.write_text(json.dumps({
                 "schema_version": HISTORY_SCHEMA_VERSION,
                 "records": [{"raw_text": 123}],
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime + 1, target_mtime + 1))
+
+            records = store.list_records()
+            self.assertEqual([item.raw_text for item in records], ["committed"])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse(candidate.exists())
+
+    def test_incomplete_v1_record_cannot_replace_valid_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="committed")
+            before = path.read_bytes()
+            candidate = root / ".history.json.incomplete-entry.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [{}],
             }), encoding="utf-8")
             target_mtime = path.stat().st_mtime
             os.utime(candidate, (target_mtime + 1, target_mtime + 1))

@@ -242,15 +242,57 @@ class HistoryRecord:
         )
 
 
-def _version(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+_HISTORY_RECORD_FIELDS: tuple[str, ...] = (
+    "id",
+    "raw_text",
+    "refined_text",
+    "workflow",
+    "timestamp",
+    "provider",
+    "model",
+    "status",
+    "error",
+)
+
+
+def _version(value: Any) -> int | None:
+    """Parse an explicit schema marker, rejecting unknown marker types."""
+
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or value < 0):
+        return None
+    return value
+
+
+def _payload_version(payload: Mapping[str, Any]) -> int | None:
+    """Return a payload's version, treating an absent marker as legacy v0."""
+
+    if "schema_version" in payload:
+        return _version(payload["schema_version"])
+    if "version" in payload:
+        return _version(payload["version"])
+    return 0
+
+
+def _is_supported_schema(payload: Mapping[str, Any]) -> bool:
+    version = _payload_version(payload)
+    return version is not None and version <= HISTORY_SCHEMA_VERSION
+
+
+def _is_future_schema(payload: Mapping[str, Any]) -> bool:
+    version = _payload_version(payload)
+    return version is not None and version > HISTORY_SCHEMA_VERSION
+
+
+def _has_canonical_v1_fields(payload: Mapping[str, Any]) -> bool:
+    return all(field in payload for field in _HISTORY_RECORD_FIELDS)
 
 
 def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
     """Return whether this executable can safely load a snapshot payload."""
 
-    version = _version(payload.get("schema_version", payload.get("version")))
-    if version > HISTORY_SCHEMA_VERSION:
+    version = _payload_version(payload)
+    if version is None or version > HISTORY_SCHEMA_VERSION:
         return False
     if version == HISTORY_SCHEMA_VERSION:
         raw_records = payload.get("records")
@@ -273,6 +315,9 @@ def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
     for item in raw_records:
         if not isinstance(item, Mapping):
             return False
+        if (version == HISTORY_SCHEMA_VERSION
+                and not _has_canonical_v1_fields(item)):
+            return False
         try:
             HistoryRecord.from_mapping(item)
         except HistoryValidationError:
@@ -281,8 +326,8 @@ def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
 
 
 def _snapshot_container_is_valid(payload: Mapping[str, Any]) -> bool:
-    version = _version(payload.get("schema_version", payload.get("version")))
-    if version > HISTORY_SCHEMA_VERSION:
+    version = _payload_version(payload)
+    if version is None or version > HISTORY_SCHEMA_VERSION:
         return False
     if version == HISTORY_SCHEMA_VERSION:
         return isinstance(payload.get("records"), list)
@@ -341,8 +386,8 @@ def migrate_history_payload(payload: Any) -> dict[str, Any]:
         return {"schema_version": HISTORY_SCHEMA_VERSION, "records": []}
 
     migrated: dict[str, Any] = dict(payload)
-    version = _version(migrated.get("schema_version", migrated.get("version")))
-    if version > HISTORY_SCHEMA_VERSION:
+    version = _payload_version(migrated)
+    if version is None or version > HISTORY_SCHEMA_VERSION:
         return migrated
 
     while version < HISTORY_SCHEMA_VERSION:
@@ -350,8 +395,8 @@ def migrate_history_payload(payload: Any) -> dict[str, Any]:
         if migration is None:
             break
         migrated = migration(migrated)
-        next_version = _version(migrated.get("schema_version"))
-        if next_version <= version:
+        next_version = _payload_version(migrated)
+        if next_version is None or next_version <= version:
             break
         version = next_version
 
@@ -490,9 +535,7 @@ class HistoryStore:
         # are deliberately excluded and remain available to a newer build.
         supported_temporary = [
             item for item in temporary_payloads
-            if _version(item[3].get(
-                "schema_version", item[3].get("version")))
-            <= HISTORY_SCHEMA_VERSION
+            if _is_supported_schema(item[3])
         ]
         for item in supported_temporary:
             if not _is_recoverable_snapshot(item[3]):
@@ -503,8 +546,12 @@ class HistoryStore:
         ]
 
         if current is not None:
-            current_version = _version(
-                current.get("schema_version", current.get("version")))
+            current_version = _payload_version(current)
+            if current_version is None:
+                # An explicit but unknown marker is not a legacy v0 file.
+                # Keep it in place so this executable cannot rewrite a
+                # format whose version semantics it does not understand.
+                return current
             if current_version > HISTORY_SCHEMA_VERSION:
                 # Never let an older executable replace a future-schema
                 # primary with an older temporary snapshot.  The newer file
@@ -576,9 +623,7 @@ class HistoryStore:
                     "The history file is unreadable or corrupt")
             future_temporary = [
                 item for item in temporary_payloads
-                if _version(item[3].get(
-                    "schema_version", item[3].get("version")))
-                > HISTORY_SCHEMA_VERSION
+                if _is_future_schema(item[3])
             ]
             if not future_temporary:
                 # A supported-schema temp exists, but its structure is
@@ -602,7 +647,10 @@ class HistoryStore:
         payload = self._recover_interrupted_write_locked()
         if payload is None:
             return []
-        version = _version(payload.get("schema_version", payload.get("version")))
+        version = _payload_version(payload)
+        if version is None:
+            raise HistoryStoreError(
+                "The history file has an invalid schema version")
         if version > HISTORY_SCHEMA_VERSION:
             raise UnsupportedHistorySchemaVersionError(
                 f"History schema version {version} is newer than supported "
@@ -622,6 +670,9 @@ class HistoryStore:
         if isinstance(raw_records, list):
             for item in raw_records:
                 if not isinstance(item, Mapping):
+                    continue
+                if (version == HISTORY_SCHEMA_VERSION
+                        and not _has_canonical_v1_fields(item)):
                     continue
                 try:
                     records.append(HistoryRecord.from_mapping(item))
