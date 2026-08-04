@@ -285,7 +285,11 @@ def _is_future_schema(payload: Mapping[str, Any]) -> bool:
 
 
 def _has_canonical_v1_fields(payload: Mapping[str, Any]) -> bool:
-    return all(field in payload for field in _HISTORY_RECORD_FIELDS)
+    return (
+        all(field in payload for field in _HISTORY_RECORD_FIELDS)
+        and isinstance(payload["provider"], str)
+        and isinstance(payload["model"], str)
+    )
 
 
 def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:

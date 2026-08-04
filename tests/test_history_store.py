@@ -594,6 +594,32 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertFalse(candidate.exists())
 
+    def test_non_text_v1_identifiers_cannot_replace_valid_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="committed")
+            before = path.read_bytes()
+            candidate = root / ".history.json.invalid-identifiers.tmp"
+            record = HistoryRecord(
+                raw_text="candidate", timestamp=NOW,
+                provider="openai", model="gpt-test").to_mapping()
+            record["provider"] = None
+            record["model"] = {"name": "gpt-test"}
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [record],
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime + 1, target_mtime + 1))
+
+            records = store.list_records()
+            self.assertEqual([item.raw_text for item in records], ["committed"])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse(candidate.exists())
+
     def test_invalid_supported_snapshot_is_removed_after_primary_wins(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
