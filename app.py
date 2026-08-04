@@ -7196,20 +7196,25 @@ class App(ctk.CTk):
                 )
                 completed_operation_id = event.operation_id
 
-                def finish_success(*, delayed=False):
+                def success_is_current(*, delayed=False):
                     current_runtime = getattr(
                         self, "_voice_translation_runtime", None)
                     if (current_runtime is not None
                             and current_runtime.operation_id
                             != completed_operation_id):
-                        return
+                        return False
                     service = getattr(self, "_workflow_service", None)
                     service_state = getattr(service, "state", None)
                     if (service_state is not None
                             and service_state.phase is not WorkflowPhase.READY):
-                        return
+                        return False
                     if (delayed and hasattr(self, "app_state")
                             and self.app_state != "success"):
+                        return False
+                    return True
+
+                def finish_success(*, delayed=False):
+                    if not success_is_current(delayed=delayed):
                         return
                     self._set_state(
                         "ready",
@@ -7220,6 +7225,8 @@ class App(ctk.CTk):
                     )
 
                 if text:
+                    if not success_is_current():
+                        return
                     self._show_success_then(
                         lambda: finish_success(delayed=True))
                 else:

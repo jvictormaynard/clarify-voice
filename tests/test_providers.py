@@ -1770,6 +1770,39 @@ class WorkflowAppBridgeTests(unittest.TestCase):
         states[0][1]["after_ready"]()
         self.assertEqual(results, ["current translation"])
 
+    def test_voice_translation_skips_stale_success_before_animation(self):
+        show_success_then = Mock()
+        set_state = Mock()
+        show_result = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _workflow_service=SimpleNamespace(
+                state=SimpleNamespace(phase=app.WorkflowPhase.RECORDING)),
+            _show_success_then=show_success_then,
+            _set_state=set_state,
+            _show_result=show_result,
+            _t=lambda key: key,
+            after=lambda _delay, callback: callback(),
+            app_state="recording",
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.COMPLETED,
+                2,
+                workflow_state=SimpleNamespace(
+                    published_text="stale translation",
+                    publication=app.VoiceTranslationPublication.PASTED,
+                ),
+            ),
+        )
+
+        show_success_then.assert_not_called()
+        set_state.assert_not_called()
+        show_result.assert_not_called()
+
     def test_dictation_uses_platform_copy_and_paste_on_non_windows(self):
         target = app.SelectionTarget(77, "editor.exe")
         with patch.object(app, "IS_WIN", False), \
