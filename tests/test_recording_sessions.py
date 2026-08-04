@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import app
-from microphone_controls import RecordingBoundaryReason
+from microphone_controls import RecordingBoundaryReason, VADSettings
 
 
 class RecordingSessionTests(unittest.TestCase):
@@ -144,26 +144,90 @@ class RecordingSessionTests(unittest.TestCase):
 
     def test_production_recorder_reloads_controls_after_settings_apply(self):
         initial = app.RecordingControls(max_duration_seconds=30)
-        updated = app.RecordingControls(max_duration_seconds=90)
+        updated = app.RecordingControls(
+            max_duration_seconds=90,
+            warning_seconds=12,
+            vad=VADSettings(
+                enabled=True,
+                level_threshold=0.12,
+                minimum_speech_seconds=0.4,
+                silence_duration_seconds=1.1,
+            ),
+        )
         process = Mock()
         process.poll.return_value = None
+        original_config = app.APP_CONFIG.copy()
 
-        with tempfile.TemporaryDirectory() as directory, patch.object(
-                app, "_recording_controls",
-                side_effect=[initial, updated]), patch.object(
-                app, "sd", None), patch.object(
-                app, "IS_WIN", False), patch.object(
-                app.subprocess, "Popen", return_value=process), patch.object(
-                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
-                app.time, "sleep", return_value=None):
-            recorder = app.Recorder()
-            self.assertEqual(recorder.controls, initial)
-            self.assertFalse(recorder._controls_override)
+        try:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update({
+                "recording_controls": initial.to_mapping(),
+            })
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                    app, "_save_app_config") as save_config, patch.object(
+                    app, "sd", None), patch.object(
+                    app, "IS_WIN", False), patch.object(
+                    app.subprocess, "Popen", return_value=process), patch.object(
+                    app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                    app.time, "sleep", return_value=None):
+                # This is the production construction path: no controls are
+                # injected, so the instance is allowed to reload APP_CONFIG.
+                recorder = app.Recorder()
+                self.assertEqual(recorder.controls, initial)
+                self.assertFalse(recorder._controls_override)
 
-            recorder.start(Path(directory) / "recording.wav")
+                app._apply_settings_transaction(
+                    {"provider": "gemini", "model": "gemini-2.5-flash"},
+                    {"provider": "openai", "model": "gpt-4o-mini"},
+                    [("gemini", "gemini-2.5-flash")],
+                    [("openai", "gpt-4o-mini")],
+                    {"gemini": "gemini_model"},
+                    False,
+                    microphone=app.MicrophoneSettings.defaults(),
+                    recording_controls=updated,
+                )
 
-            self.assertEqual(recorder.controls, updated)
-            recorder.stop()
+                save_config.assert_called_once_with(None)
+                self.assertEqual(
+                    app.APP_CONFIG["recording_controls"], updated.to_mapping())
+
+                recorder.start(Path(directory) / "recording.wav")
+
+                self.assertEqual(recorder.controls, updated)
+                self.assertEqual(recorder.boundary_policy.controls, updated)
+                recorder.stop()
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original_config)
+
+    def test_explicit_recorder_controls_remain_overrides_after_settings_apply(self):
+        injected = app.RecordingControls(max_duration_seconds=30)
+        persisted = app.RecordingControls(max_duration_seconds=90)
+        process = Mock()
+        process.poll.return_value = None
+        original_config = app.APP_CONFIG.copy()
+
+        try:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update({"recording_controls": persisted.to_mapping()})
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                    app, "_recording_controls") as load_controls, patch.object(
+                    app, "sd", None), patch.object(
+                    app, "IS_WIN", False), patch.object(
+                    app.subprocess, "Popen", return_value=process), patch.object(
+                    app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                    app.time, "sleep", return_value=None):
+                recorder = app.Recorder(controls=injected)
+                recorder.start(Path(directory) / "recording.wav")
+
+                self.assertTrue(recorder._controls_override)
+                self.assertEqual(recorder.controls, injected)
+                self.assertEqual(recorder.boundary_policy.controls, injected)
+                load_controls.assert_not_called()
+                recorder.stop()
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original_config)
 
     def test_sessions_reserve_unique_paths_and_cleanup_success(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
