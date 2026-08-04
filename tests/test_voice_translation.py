@@ -213,6 +213,21 @@ class VoiceTranslationConfigTests(unittest.TestCase):
             diagnostics["route"]["custom_endpoint"], "https://proxy.example/v1"
         )
 
+    def test_execution_mapping_makes_local_cloud_policy_explicit(self):
+        config = VoiceTranslationConfig(
+            route=VoiceTranslationRoute(provider_id="openai")
+        )
+        self.assertEqual(
+            config.execution_mapping(
+                "local_asr", local_asr_cloud_refinement=True
+            ),
+            {
+                "transcription_execution": "local",
+                "translation_execution": "cloud",
+                "local_asr_cloud_refinement": True,
+            },
+        )
+
     def test_future_schema_is_rejected_before_route_validation(self):
         with self.assertRaises(VoiceTranslationConfigurationError):
             VoiceTranslationConfig.from_mapping({"schema_version": 2})

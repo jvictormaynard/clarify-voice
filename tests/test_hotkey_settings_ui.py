@@ -108,6 +108,9 @@ class HotkeySettingsIntegrationTests(unittest.TestCase):
                 "restore_after_failed_apply",
                 "restore_hotkeys_after_failed_apply",
                 "_recording_hotkey_hint",
+                "HotkeyAction.VOICE_TRANSLATION:",
+                "hotkey_voice_translation",
+                "_hotkey_definition_for_settings",
                 "self.apply_hotkey_settings(hotkey_settings_controller.settings)"):
             with self.subTest(expected=expected):
                 self.assertIn(expected, source)
@@ -116,6 +119,20 @@ class HotkeySettingsIntegrationTests(unittest.TestCase):
             source.index(
                 "self.apply_hotkey_settings(hotkey_settings_controller.settings)"),
         )
+
+    def test_legacy_profiles_show_voice_binding_without_registering_it(self):
+        legacy = HotkeySettings.from_mapping({})
+
+        self.assertNotIn(HotkeyAction.VOICE_TRANSLATION, legacy.hotkeys)
+        self.assertEqual(
+            app._hotkey_definition_for_settings(
+                legacy, HotkeyAction.VOICE_TRANSLATION).display,
+            "Alt+V",
+        )
+        for language in ("en", "pt", "es", "de", "ru"):
+            with self.subTest(language=language):
+                self.assertTrue(
+                    app.STRINGS[language]["hotkey_voice_translation"])
 
     def test_apply_transaction_persists_the_selected_draft(self):
         previous = HotkeySettings.defaults()

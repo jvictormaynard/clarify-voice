@@ -389,6 +389,33 @@ class VoiceTranslationConfig:
             "route": self.route.diagnostic_mapping(),
         }
 
+    def execution_mapping(
+        self,
+        transcription_provider: str,
+        *,
+        local_asr_cloud_refinement: bool = False,
+    ) -> dict[str, Any]:
+        """Expose safe local/cloud policy for Settings and diagnostics.
+
+        Voice translation intentionally owns only its text-generation route;
+        transcription follows the application's typed audio route.  The
+        refinement flag is surfaced explicitly so a local-ASR user can see
+        whether the optional cloud pass is enabled rather than inferring it
+        from provider names in UI code.
+        """
+
+        transcription = str(transcription_provider or "").strip().lower()
+        translation = str(self.route.provider_id or "").strip().lower()
+        return {
+            "transcription_execution": (
+                "local" if transcription == "local_asr" else "cloud"
+            ),
+            "translation_execution": (
+                "local" if translation == "local_asr" else "cloud"
+            ),
+            "local_asr_cloud_refinement": bool(local_asr_cloud_refinement),
+        }
+
 
 def validate_voice_translation_config(
     config: VoiceTranslationConfig | Mapping[str, Any],
@@ -410,6 +437,10 @@ class VoiceTranslationRequest:
     source_language: str
     target_language: str
     route: VoiceTranslationRoute
+    # Providers that expose cooperative cancellation can pass this token down
+    # to their transport.  Keeping it on the provider-neutral request avoids
+    # a second voice-specific API while fakes and older adapters can ignore it.
+    cancel_event: Any = None
 
     @property
     def prompt(self) -> str:
@@ -442,7 +473,7 @@ class VoiceTranslationClipboard(Protocol):
         text: str,
         target: Any | None,
         disposition: "VoiceTranslationPublication",
-    ) -> None: ...
+    ) -> "VoiceTranslationPublication | None": ...
 
 
 class VoiceTranslationClock(Protocol):
@@ -950,6 +981,27 @@ class VoiceTranslationWorkflow:
         except Exception as error:  # focus capture is a safe-copy fallback
             return None, f"target_capture_failed:{type(error).__name__}"
 
+    def _cancelled(self, cancel_event: Any | None) -> bool:
+        """Return whether an embedding requested cooperative cancellation."""
+
+        if cancel_event is None:
+            return False
+        try:
+            return bool(cancel_event.is_set())
+        except (AttributeError, TypeError):
+            try:
+                return bool(cancel_event.cancelled)
+            except (AttributeError, TypeError):
+                return False
+
+    def _cancel_operation(self, operation_id: int) -> VoiceTranslationState:
+        """Publish a cancellation snapshot without leaking a newer run."""
+
+        try:
+            return self.state_machine.cancel(operation_id=operation_id)
+        except VoiceTranslationStateError:
+            return self._state_for_operation(operation_id)
+
     def _publish(
         self,
         target: Any | None,
@@ -990,7 +1042,7 @@ class VoiceTranslationWorkflow:
             except VoiceTranslationStateError:
                 return self._state_for_operation(operation_id)
         try:
-            self.clipboard.publish(
+            published = self.clipboard.publish(
                 decision.text,
                 target,
                 decision.disposition,
@@ -1009,8 +1061,15 @@ class VoiceTranslationWorkflow:
         finally:
             self.coordinator.release(operation_id)
         try:
+            effective_decision = decision
+            if isinstance(published, VoiceTranslationPublication):
+                effective_decision = PublicationDecision(
+                    published,
+                    decision.text,
+                    "published_by_clipboard_adapter",
+                )
             return self.state_machine.complete(
-                decision,
+                effective_decision,
                 operation_id=operation_id,
                 failure_code=failure_code,
                 failure_message=failure_message,
@@ -1018,18 +1077,31 @@ class VoiceTranslationWorkflow:
         except VoiceTranslationStateError:
             return self._state_for_operation(operation_id)
 
-    def run(self, audio_source: Any, *, allow_paste: bool = True) -> VoiceTranslationState:
+    def run(
+        self,
+        audio_source: Any,
+        *,
+        allow_paste: bool = True,
+        target: Any | None = None,
+        cancel_event: Any | None = None,
+    ) -> VoiceTranslationState:
         """Transcribe, translate, and apply the explicit publication policy."""
 
         started = self.state_machine.begin()
         operation_id = started.operation_id
-        target, target_capture_reason = self._target_snapshot()
+        if self._cancelled(cancel_event):
+            return self._cancel_operation(operation_id)
+        target_capture_reason = ""
+        if target is None:
+            target, target_capture_reason = self._target_snapshot()
         try:
             self.state_machine.begin_transcription(operation_id)
             raw = self._text(
                 self.provider.transcribe(audio_source, self.config.source_language)
             )
         except Exception as error:
+            if self._cancelled(cancel_event):
+                return self._cancel_operation(operation_id)
             try:
                 return self.state_machine.fail(
                     "transcription_failed",
@@ -1039,6 +1111,8 @@ class VoiceTranslationWorkflow:
                 )
             except VoiceTranslationStateError:
                 return self._state_for_operation(operation_id)
+        if self._cancelled(cancel_event):
+            return self._cancel_operation(operation_id)
         if not raw:
             try:
                 return self.state_machine.transcript_received(raw, operation_id)
@@ -1054,15 +1128,20 @@ class VoiceTranslationWorkflow:
             return self._state_for_operation(operation_id)
         if current.phase is VoiceTranslationPhase.CANCELLED:
             return current
+        if self._cancelled(cancel_event):
+            return self._cancel_operation(operation_id)
         request = VoiceTranslationRequest(
             text=raw,
             source_language=self.config.source_language,
             target_language=self.config.target_language,
             route=self.config.route,
+            cancel_event=cancel_event,
         )
         try:
             translated = self._text(self.provider.translate(request))
         except Exception as error:
+            if self._cancelled(cancel_event):
+                return self._cancel_operation(operation_id)
             try:
                 self.state_machine.publishing(operation_id)
             except VoiceTranslationStateError:
@@ -1102,6 +1181,9 @@ class VoiceTranslationWorkflow:
                 failure_code="empty_translation",
                 failure_message="translation returned no usable text",
             )
+
+        if self._cancelled(cancel_event):
+            return self._cancel_operation(operation_id)
 
         try:
             self.state_machine.translation_received(translated, operation_id)

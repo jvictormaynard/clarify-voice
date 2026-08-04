@@ -39,6 +39,7 @@ from workflow_config import (
     validate_workflow_config,
     validate_workflow_route,
 )
+from voice_translation import VoiceTranslationConfig
 
 __all__ = [
     "AppConfig", "ApplicationRepositories", "ConfigRepository",
@@ -100,6 +101,7 @@ def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[s
         "history_enabled": False,
         "history_retention_days": 30,
         "autostart": False,
+        "voice_translation": VoiceTranslationConfig().to_mapping(),
         # The nested value is intentionally present in the defaults mapping so
         # first-run and legacy flat files both receive the same typed bindings.
         # HotkeySettings.from_mapping() repairs malformed entries one by one.
@@ -160,6 +162,8 @@ class AppConfig:
     history_retention_days: int | None = 30
     hotkeys: HotkeySettings = field(default_factory=HotkeySettings.defaults)
     workflows: WorkflowConfig = field(default_factory=WorkflowConfig)
+    voice_translation: VoiceTranslationConfig = field(
+        default_factory=VoiceTranslationConfig)
 
     @classmethod
     def from_mapping(
@@ -279,6 +283,15 @@ class AppConfig:
                     hotkeys.hotkeys, source["recording_activation_mode"])
             except ValueError:
                 pass
+        voice_values = source.get("voice_translation")
+        try:
+            voice_translation = VoiceTranslationConfig.from_mapping(
+                voice_values if isinstance(voice_values, Mapping) else None)
+        except ValueError:
+            # Keep startup resilient to a hand-edited future/invalid section;
+            # the dedicated settings/apply boundary reports invalid routes
+            # before a provider request is attempted.
+            voice_translation = VoiceTranslationConfig()
         route_defaults = WorkflowConfig(
             transcription=WorkflowRoute(
                 provider_id=provider,
@@ -406,6 +419,7 @@ class AppConfig:
             history_retention_days=history_retention_days,
             hotkeys=hotkeys,
             workflows=workflows,
+            voice_translation=voice_translation,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -436,6 +450,7 @@ class AppConfig:
             "history_retention_days": self.history_retention_days,
             "hotkeys": self.hotkeys.to_mapping(),
             "workflows": self.workflows.to_mapping(),
+            "voice_translation": self.voice_translation.to_mapping(),
         }
 
     def to_legacy_mapping(self) -> dict[str, Any]:

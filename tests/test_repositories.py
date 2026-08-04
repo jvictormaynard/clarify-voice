@@ -23,6 +23,7 @@ from secret_store import (
     SecretStoreCorruptedError,
     SecretStoreUnavailableError,
 )
+from voice_translation import VoiceTranslationConfig, VoiceTranslationLanguages, VoiceTranslationRoute
 
 
 _TEST_HOME = tempfile.TemporaryDirectory(prefix="clarifyvoice-repository-tests-")
@@ -43,6 +44,27 @@ class DeleteReadbackStore(MemorySecretStore):
 
 
 class ConfigurationRepositoryTests(unittest.TestCase):
+    def test_voice_translation_preferences_survive_repository_round_trip(self):
+        config = AppConfig.from_mapping({
+            "voice_translation": VoiceTranslationConfig(
+                languages=VoiceTranslationLanguages("pt-BR", "de-DE"),
+                route=VoiceTranslationRoute(
+                    provider_id="groq",
+                    model_id="llama-3.3-70b-versatile",
+                    prompt="Translate literally.",
+                ),
+            ).to_mapping(),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            repository = LocalConfigRepository(Path(directory) / "config.json")
+            repository.save(config)
+            loaded = repository.load()
+
+        self.assertEqual(loaded.voice_translation, config.voice_translation)
+        self.assertEqual(
+            loaded.to_mapping()["voice_translation"]["target_language"], "de-DE"
+        )
+
     def test_local_asr_selection_and_cloud_refinement_opt_in_round_trip(self):
         config = AppConfig.from_mapping({
             "transcription_provider": "local_asr",

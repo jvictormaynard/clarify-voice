@@ -34,6 +34,7 @@ HOTKEY_SPECS = {
     0x5102: ("rewrite_hotkey", ord("K")),
     0x5103: ("translation_hotkey", ord("T")),
     0x5104: ("toggle_visibility", ord("R")),
+    0x5106: ("voice_translation_hotkey", ord("V")),
 }
 HOTKEY_IDS_BY_ACTION = {spec[0]: hotkey_id for hotkey_id, spec in HOTKEY_SPECS.items()}
 

@@ -15,7 +15,7 @@ The current source baseline is commit `fd23eeaa548745688706fdbb9933f6f52d231eaf`
 | --- | --- | --- |
 | Full contract suite | `python3 -m unittest discover -s tests -p 'test_*.py'` | 711 passed, 4 skipped |
 | Dependency locks | Included in the full suite (`test_dependency_lock`, `test_runtime_lock`) | Current |
-| Python compilation | `python3 -m compileall -q app.py workflows.py repositories.py workflow_config.py voice_translation.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py history_store.py local_asr_product.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests` | Pass |
+| Python compilation | `python3 -m compileall -q app.py workflows.py repositories.py workflow_config.py voice_translation.py voice_translation_runtime.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py history_store.py local_asr_product.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests` | Pass |
 | Whitespace | `git diff --check` | Pass |
 | Read-only harness status | `python3 scripts/local_asr_harness.py --root <empty-temp-root> status` | `not_installed`; no network operation |
 | Unsupported-host install guard | `test_unsupported_platform_rejects_install_before_download` in the source suite | Pass; no install command or download was invoked in this documentation-only update |

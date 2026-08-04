@@ -233,7 +233,8 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual(actions, {
             "recording_hotkey", "rewrite_hotkey",
-            "translation_hotkey", "toggle_visibility",
+            "translation_hotkey", "voice_translation_hotkey",
+            "toggle_visibility",
         })
         self.assertEqual(app.WindowsTrayIcon.WM_HOTKEY, 0x0312)
 
@@ -510,6 +511,21 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(kwargs["headers"], {"Authorization": "Bearer openai-key"})
         self.assertEqual(kwargs["data"]["model"], "gpt-4o-transcribe")
         self.assertIn("file", kwargs["files"])
+
+    @patch("app.PROVIDER_HTTP.session.post")
+    def test_openai_whisper_omits_language_for_automatic_detection(self, post):
+        app.APP_CONFIG.update({
+            "openai_api_key": "openai-key",
+            "openai_base_url": "https://api.openai.com/v1",
+            "openai_audio_model": "whisper-1",
+        })
+        post.return_value = FakeResponse({"text": "detected transcript"})
+
+        self.assertEqual(
+            app.call_openai(self.audio_path, "transcription", "auto"),
+            "detected transcript",
+        )
+        self.assertNotIn("language", post.call_args.kwargs["data"])
 
     @patch("app.PROVIDER_HTTP.session.post")
     def test_openai_prompt_mode_rewrites_the_whisper_transcript(self, post):

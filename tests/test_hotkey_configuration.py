@@ -144,8 +144,8 @@ class RegistrationTests(unittest.TestCase):
             manager.replace(original.with_hotkey("rewrite_hotkey", "Alt+Q"))
 
         self.assertEqual(manager.settings, original)
-        self.assertEqual(len(manager.registered), 4)
-        self.assertEqual(len(user32.registered), 4)
+        self.assertEqual(len(manager.registered), 5)
+        self.assertEqual(len(user32.registered), 5)
 
 
 class ActivationControllerTests(unittest.TestCase):

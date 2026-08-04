@@ -29,6 +29,7 @@ class HotkeyAction(str, Enum):
     RECORDING = "recording_hotkey"
     REWRITE = "rewrite_hotkey"
     TRANSLATION = "translation_hotkey"
+    VOICE_TRANSLATION = "voice_translation_hotkey"
     VISIBILITY = "toggle_visibility"
 
 
@@ -169,6 +170,7 @@ DEFAULT_HOTKEYS: dict[HotkeyAction, HotkeyDefinition] = {
     HotkeyAction.RECORDING: HotkeyDefinition(frozenset({"alt"}), "L"),
     HotkeyAction.REWRITE: HotkeyDefinition(frozenset({"alt"}), "K"),
     HotkeyAction.TRANSLATION: HotkeyDefinition(frozenset({"alt"}), "T"),
+    HotkeyAction.VOICE_TRANSLATION: HotkeyDefinition(frozenset({"alt"}), "V"),
     HotkeyAction.VISIBILITY: HotkeyDefinition(frozenset({"alt"}), "R"),
 }
 
@@ -183,6 +185,8 @@ def _action(value: Any) -> HotkeyAction | None:
             "recording": HotkeyAction.RECORDING,
             "rewrite": HotkeyAction.REWRITE,
             "translation": HotkeyAction.TRANSLATION,
+            "voice_translation": HotkeyAction.VOICE_TRANSLATION,
+            "voice-translation": HotkeyAction.VOICE_TRANSLATION,
             "visibility": HotkeyAction.VISIBILITY,
             "show_hide": HotkeyAction.VISIBILITY,
         }

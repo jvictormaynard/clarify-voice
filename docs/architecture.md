@@ -102,18 +102,19 @@ effective-route summaries (provider, model, endpoint, and local/cloud state).
 rewrite and translation-specific prompt and endpoint, while `app.py` retains
 flat selectors only as a compatibility bridge for older settings files.
 
-### Voice translation foundation (`voice_translation.py`)
+### Dedicated voice translation (`voice_translation.py`, `voice_translation_runtime.py`)
 
 Issue #49 adds a separate, UI-free contract for voice translation rather than
-coupling a new hotkey to the selected-text `WorkflowService`. The versioned
+coupling voice capture to the selected-text `WorkflowService`. The versioned
 `VoiceTranslationConfig` stores an automatic or explicit source language, one
-explicit target language, and a dedicated provider/model/prompt route. Route
-validation delegates to the provider capability registry and therefore rejects
-providers without `TEXT_GENERATION` before a request can start; it performs no
-network call and keeps prompts out of diagnostics.
+explicit target language, and an independent provider/model/prompt route,
+persisted under `voice_translation` in `config.json`. Route validation
+delegates to the provider capability registry and therefore rejects providers
+without `TEXT_GENERATION` before a request can start; it performs no network
+call and keeps prompts out of diagnostics.
 
-`VoiceTranslationWorkflow` is a deterministic transaction seam for the future
-recorder and Windows adapters. Its immutable state machine retains the raw
+`VoiceTranslationWorkflow` is a deterministic transaction seam for recorder
+and Windows adapters. Its immutable state machine retains the raw
 transcript across translation, focus, clipboard, and publication failures. A
 translation failure or empty result produces an explicit `COPY_ONLY` decision
 containing that raw transcript. A successful translation is only `PASTED` when
@@ -131,12 +132,14 @@ verify that ID, so a late completion from a cancelled run fails closed instead
 of mutating or publishing into a newer operation. Its caller receives the
 originating operation's terminal snapshot, never the newer operation's state.
 
-This is intentionally scaffolding, not the packaged feature. A follow-up must
-connect the state machine to recording, global hotkey dispatch, the focus-safe
-Windows clipboard transaction, visible local/cloud routing and local-ASR
-cloud-refinement opt-in, settings persistence, shutdown/cancellation, and
-manual acceptance in three real applications. No `app.py` route or packaged
-Windows claim is made by this foundation.
+`VoiceTranslationRuntime` connects this contract to one recording owner and
+the configurable dedicated Alt+V global action. It publishes only lifecycle
+snapshots to Tk and propagates the recording cancellation token through
+transcription and translation. The redacted execution summary exposes local
+ASR transcription, cloud translation, and the explicit local-ASR
+cloud-refinement opt-in independently. Packaged Windows testing across three
+representative target applications remains a release acceptance gate; unit
+tests do not claim that manual evidence.
 
 #### Adding an OpenAI-compatible provider
 
@@ -273,12 +276,13 @@ formats. See [Provider HTTP reliability and diagnostics](http-resilience.md).
 ### `windows_hotkeys.py`
 
 Owns native Windows `RegisterHotKey` registration and Ctrl-key synthesis. The
-typed `HotkeySettings` value in `hotkey_config.py` persists the four actions
-(recording, rewrite, translation, and visibility) without coupling them to
-provider adapters. Legacy installations are normalised to Alt+L, Alt+K, Alt+T,
-and Alt+R. Conflicts are rejected before registration, and strict registration
-rolls back every accepted ID if Windows rejects one combination; settings
-therefore cannot leave a stale or partially active set.
+typed `HotkeySettings` value in `hotkey_config.py` persists the five actions
+(recording, rewrite, selected-text translation, voice translation, and
+visibility) without coupling them to provider adapters. Legacy installations
+are normalised to Alt+L, Alt+K, Alt+T, Alt+V, and Alt+R. Conflicts are rejected
+before registration, and strict registration rolls back every accepted ID if
+Windows rejects one combination; settings therefore cannot leave a stale or
+partially active set.
 
 The packaged native layer currently supports toggle recording only because
 `RegisterHotKey` delivers key-down notifications and has no key-up edge. The

@@ -405,6 +405,15 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                        else request.audio_path.read_bytes())
         audio_file = io.BytesIO(audio_bytes)
         try:
+            transcription_data = {
+                "model": model,
+                "response_format": "json",
+                "prompt": request.effective_prompt(),
+            }
+            # Whisper detects the language when the optional hint is omitted;
+            # sending ``language=auto`` is rejected by OpenAI-compatible APIs.
+            if str(request.language or "").strip():
+                transcription_data["language"] = request.language
             response = self.http.request(
                 "POST",
                 normalize_provider_url(
@@ -416,12 +425,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     request.audio_path.name, audio_file,
                     audio_mime_type(request.audio_path),
                 )},
-                data={
-                    "model": model,
-                    "response_format": "json",
-                    "language": request.language,
-                    "prompt": request.effective_prompt(),
-                },
+                data=transcription_data,
             )
         finally:
             audio_file.close()
