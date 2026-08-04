@@ -684,7 +684,9 @@ class HistoryStore:
 
     def _recover_interrupted_write_locked(self) -> dict[str, Any] | None:
         current = _read_json_mapping(self.path)
-        temporary_payloads: list[tuple[float, str, Path, dict[str, Any]]] = []
+        temporary_payloads: list[
+            tuple[float | None, str, Path, dict[str, Any]]
+        ] = []
         for candidate in self._temporary_paths():
             payload = _read_json_mapping(candidate)
             if payload is None:
@@ -693,8 +695,17 @@ class HistoryStore:
             try:
                 ordering = candidate.stat().st_mtime
             except OSError:
-                ordering = 0.0
+                # A fallback timestamp would make a later ``max`` choose
+                # arbitrarily by filename and could discard newer history.
+                ordering = None
             temporary_payloads.append((ordering, candidate.name, candidate, payload))
+
+        if any(item[0] is None for item in temporary_payloads):
+            # Preserve every readable snapshot until ordering metadata can be
+            # obtained; promotion and cleanup are unsafe without recency.
+            raise HistoryStoreError(
+                "The interrupted history snapshots could not be ordered"
+            )
 
         # A parseable snapshot in a schema this executable understands but
         # with invalid structure or records is not a recovery source. Keep

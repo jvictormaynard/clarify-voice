@@ -499,6 +499,47 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertFalse(candidate.exists())
 
+    def test_unordered_snapshots_are_preserved_when_mtime_is_unreadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            first = root / ".history.json.first.tmp"
+            second = root / ".history.json.second.tmp"
+            for candidate, text in ((first, "first"), (second, "second")):
+                record = HistoryRecord(
+                    raw_text=text, timestamp=NOW, provider="openai",
+                    model="gpt-test",
+                )
+                candidate.write_text(json.dumps({
+                    "schema_version": HISTORY_SCHEMA_VERSION,
+                    "records": [record.to_mapping()],
+                }), encoding="utf-8")
+
+            original_stat = Path.stat
+
+            def unreadable_snapshot_mtime(path_value, *args, **kwargs):
+                if path_value in {first, second}:
+                    raise OSError("simulated metadata failure")
+                return original_stat(path_value, *args, **kwargs)
+
+            with patch.object(
+                history_store.Path,
+                "stat",
+                autospec=True,
+                side_effect=unreadable_snapshot_mtime,
+            ):
+                with self.assertRaises(HistoryStoreError):
+                    HistoryStore(
+                        path,
+                        enabled=True,
+                        retention_days=None,
+                        clock=fixed_clock,
+                    ).list_records()
+
+            self.assertFalse(path.exists())
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
     def test_future_snapshot_is_preserved_when_supported_snapshot_is_recovered(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
