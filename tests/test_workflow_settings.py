@@ -158,6 +158,41 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             saved_settings["workflows"].route(
                 WorkflowScope.LOCAL_ASR_REFINEMENT).enabled)
 
+    def test_local_refinement_toggle_keeps_other_draft_fields_dirty(self):
+        controller = WorkflowSettingsController(self.repository())
+        persisted = controller.repository.load()
+        baseline_route = persisted.workflow(
+            WorkflowScope.LOCAL_ASR_REFINEMENT)
+        controller.set_route(
+            WorkflowScope.LOCAL_ASR_REFINEMENT,
+            provider_id="groq",
+            model_id="llama-3.3-70b-versatile",
+            prompt="draft local refinement policy",
+            custom_endpoint="https://proxy.example/v1",
+        )
+        draft_before_toggle = controller.route(
+            WorkflowScope.LOCAL_ASR_REFINEMENT)
+        saved_settings = {"workflows": persisted.workflows}
+
+        app._sync_local_asr_refinement_draft(
+            controller, saved_settings, True)
+
+        draft_after_toggle = controller.route(
+            WorkflowScope.LOCAL_ASR_REFINEMENT)
+        saved_route = saved_settings["workflows"].route(
+            WorkflowScope.LOCAL_ASR_REFINEMENT)
+        self.assertEqual(
+            draft_after_toggle,
+            replace(draft_before_toggle, enabled=True),
+        )
+        self.assertEqual(saved_route.provider_id, baseline_route.provider_id)
+        self.assertEqual(saved_route.model_id, baseline_route.model_id)
+        self.assertEqual(saved_route.prompt, baseline_route.prompt)
+        self.assertEqual(
+            saved_route.custom_endpoint, baseline_route.custom_endpoint)
+        self.assertTrue(saved_route.enabled)
+        self.assertNotEqual(draft_after_toggle, saved_route)
+
     def test_immediate_local_refinement_save_updates_selected_widget_both_ways(self):
         class FakeSwitch:
             def __init__(self):
@@ -312,6 +347,71 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             saved_settings["transcription"],
             ("openai", "whisper-1"),
         )
+
+    def test_forced_cloud_selection_refreshes_visible_transcription_fields(self):
+        controller = WorkflowSettingsController(self.repository())
+        controller.set_route(
+            WorkflowScope.TRANSCRIPTION,
+            provider_id="local_asr",
+            model_id="ggml-small",
+            prompt="unsaved transcription policy",
+            custom_endpoint="https://proxy.example/v1",
+        )
+        persisted = controller.repository.load()
+        forced_route = replace(
+            persisted.workflow(WorkflowScope.TRANSCRIPTION),
+            provider_id="openai",
+            model_id="whisper-1",
+        )
+        forced_config = replace(
+            persisted,
+            workflows=persisted.workflows.with_route(
+                WorkflowScope.TRANSCRIPTION, forced_route),
+        )
+        saved_settings = {"workflows": persisted.workflows}
+
+        class FakeOption:
+            def __init__(self):
+                self.values = []
+
+            def set(self, value):
+                self.values.append(value)
+
+        class FakeEntry:
+            def __init__(self, value="local_asr"):
+                self.values = [value]
+
+            def delete(self, *_args):
+                self.values.clear()
+
+            def insert(self, _index, value):
+                self.values.append(value)
+
+        provider_widget = FakeOption()
+        model_widget = FakeEntry("ggml-small")
+        widgets = {
+            "provider_menu": provider_widget,
+            "model": model_widget,
+        }
+        with patch.object(app, "_typed_app_config", return_value=forced_config):
+            app._sync_forced_cloud_transcription_draft(
+                controller,
+                saved_settings,
+                {"provider": "openai", "model": "whisper-1"},
+            )
+            app._sync_selected_workflow_form_widgets(
+                WorkflowScope.TRANSCRIPTION,
+                WorkflowScope.TRANSCRIPTION,
+                widgets,
+                controller.route(WorkflowScope.TRANSCRIPTION),
+                fields=("provider_id", "model_id"),
+            )
+
+        self.assertEqual(provider_widget.values, ["openai"])
+        self.assertEqual(model_widget.values, ["whisper-1"])
+        route = controller.route(WorkflowScope.TRANSCRIPTION)
+        self.assertEqual(route.prompt, "unsaved transcription policy")
+        self.assertEqual(route.custom_endpoint, "https://proxy.example/v1")
 
 
 class WorkflowOperationRoutingTests(unittest.TestCase):
