@@ -20,6 +20,14 @@ class FakeBoundaryClock:
 
 
 class RecordingSessionTests(unittest.TestCase):
+    def test_boundary_monitor_ignores_dynamic_mock_event_attributes(self):
+        session = app.RecordingSession(recorder=Mock())
+
+        session._start_boundary_monitor()
+
+        self.assertIsNone(session._boundary_monitor)
+        self.assertFalse(session._active_workers())
+
     def test_boundary_monitor_notifies_lifecycle_callback_and_releases_on_cancel(self):
         class BoundaryRecorder:
             def __init__(self):

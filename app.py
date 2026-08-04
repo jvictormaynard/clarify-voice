@@ -4341,7 +4341,11 @@ class RecordingSession:
 
     def _start_boundary_monitor(self):
         event = getattr(self.recorder, "boundary_event", None)
-        if event is None or not hasattr(event, "wait"):
+        # ``Mock`` dynamically manufactures any attribute, including a
+        # callable ``wait``. Require the concrete Event contract so test
+        # doubles and legacy recorders cannot accidentally spawn lifecycle
+        # workers that outlive their session cleanup.
+        if not isinstance(event, threading.Event):
             return
         self._boundary_monitor_stop.clear()
 
