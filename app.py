@@ -601,6 +601,18 @@ def _recording_usage_context(mode: str | None = None) -> dict:
     return context
 
 
+def _hotkey_definition_for_settings(
+        settings: HotkeySettings, action: HotkeyAction):
+    """Return a displayable binding, including an opt-in legacy default."""
+    try:
+        return settings.definition(action)
+    except KeyError:
+        # Legacy profiles intentionally omit Alt+V at startup. Settings still
+        # exposes that action so users can opt in and change a conflicting key
+        # before applying the complete native registration set.
+        return HotkeySettings.defaults().definition(action)
+
+
 def _build_recording_usage_event(context: dict, duration_seconds: float,
         result_text: str) -> dict:
     provider = str(context.get("provider", ""))
