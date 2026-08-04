@@ -131,6 +131,32 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             persisted_rewrite,
         )
 
+    def test_immediate_local_refinement_save_survives_later_apply(self):
+        controller = WorkflowSettingsController(self.repository())
+        controller.set_route(
+            WorkflowScope.REWRITE,
+            prompt="unsaved rewrite policy",
+        )
+        saved_settings = {
+            "workflows": controller.repository.load().workflows,
+        }
+
+        app._sync_local_asr_refinement_draft(
+            controller, saved_settings, True)
+        controller.apply()
+
+        restarted = WorkflowSettingsController(controller.repository)
+        self.assertTrue(restarted.config.local_asr_cloud_refinement)
+        self.assertTrue(
+            restarted.route(WorkflowScope.LOCAL_ASR_REFINEMENT).enabled)
+        self.assertEqual(
+            restarted.route(WorkflowScope.REWRITE).prompt,
+            "unsaved rewrite policy",
+        )
+        self.assertTrue(
+            saved_settings["workflows"].route(
+                WorkflowScope.LOCAL_ASR_REFINEMENT).enabled)
+
 
 class WorkflowOperationRoutingTests(unittest.TestCase):
     def setUp(self):

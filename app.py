@@ -61,6 +61,7 @@ from repositories import (
     LocalConfigRepository,
     LocalUsageStatsRepository,
     PROVIDER_SECRET_KEYS,
+    WorkflowConfig,
     WorkflowRoute,
     WorkflowScope,
     validate_workflow_route,
@@ -944,6 +945,27 @@ def _persist_local_asr_cloud_refinement(
         APP_CONFIG["local_asr_cloud_refinement"] = previous
         return False
     return True
+
+
+def _sync_local_asr_refinement_draft(
+        workflow_controller: WorkflowSettingsController,
+        saved_settings: dict[str, object], enabled: bool) -> None:
+    """Keep the typed settings draft aligned with an immediate toggle save.
+
+    The local provider page saves this safety-sensitive preference before the
+    settings window's global Apply action.  Update only the local route in the
+    controller and in the saved baseline; other workflow edits remain drafts.
+    """
+    requested = bool(enabled)
+    workflow_controller.sync_local_asr_refinement(requested)
+    saved_workflows = saved_settings.get("workflows")
+    if not isinstance(saved_workflows, WorkflowConfig):
+        return
+    saved_local = saved_workflows.route(WorkflowScope.LOCAL_ASR_REFINEMENT)
+    saved_settings["workflows"] = saved_workflows.with_route(
+        WorkflowScope.LOCAL_ASR_REFINEMENT,
+        replace(saved_local, enabled=requested),
+    )
 
 
 def _apply_settings_transaction(
@@ -9523,6 +9545,13 @@ class App(ctk.CTk):
                         error = "Could not save local-ASR refinement setting"
                         message.configure(text=f"Could not save setting: {error}")
                         return
+                    # This preference is persisted immediately, while the
+                    # settings window keeps a longer-lived typed draft.  Sync
+                    # only the local refinement flag in that draft so a later
+                    # global Apply cannot write the old value back over the
+                    # just-saved preference or disturb other unsaved routes.
+                    _sync_local_asr_refinement_draft(
+                        workflow_controller, saved_settings, requested)
                     refresh_dirty_state()
 
                 refinement_switch.configure(command=apply_local_preference)

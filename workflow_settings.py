@@ -117,6 +117,24 @@ class WorkflowSettingsController:
         self._config = self.repository.apply(self._config)
         return self._config
 
+    def sync_local_asr_refinement(self, enabled: bool) -> AppConfig:
+        """Reflect an immediate legacy preference save in the current draft.
+
+        The local-ASR provider page persists this safety-sensitive opt-in
+        immediately, before the user presses the settings window's global
+        Apply button.  Update only the corresponding typed route and legacy
+        compatibility flag so unrelated workflow drafts remain untouched.
+        """
+
+        normalized = WorkflowScope.LOCAL_ASR_REFINEMENT.value
+        route = replace(self.route(normalized), enabled=bool(enabled))
+        self._config = replace(
+            self._config,
+            workflows=self.workflows.with_route(normalized, route),
+            local_asr_cloud_refinement=bool(enabled),
+        )
+        return self._config
+
     def reset(self, scope: WorkflowScope | str) -> AppConfig:
         """Persist one scope's canonical defaults while retaining all others."""
 
