@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 import zipfile
+import wave
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -2070,6 +2071,44 @@ class LocalASRHarnessTests(unittest.TestCase):
             self.assertIn("invalid WAV", payload["error"])
             self.assertNotIn("Traceback", output.getvalue())
             manager.assert_not_called()
+
+    def test_transcribe_emits_acceptance_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "fixture.wav"
+            with wave.open(str(audio), "wb") as output:
+                output.setnchannels(1)
+                output.setsampwidth(2)
+                output.setframerate(16000)
+                output.writeframes(b"\0\0" * 16000)
+            installer = Mock()
+            installer.manifest = {
+                "engine": {"version": "v1.9.1"},
+                "recommended_model": {"id": "ggml-small"},
+            }
+            manager = Mock()
+            manager.transcribe.return_value = "local transcript"
+            output = StringIO()
+
+            with patch.object(local_asr_harness, "_require_windows"), \
+                    patch.object(
+                        local_asr_harness, "_installer", return_value=installer,
+                    ), patch.object(
+                        local_asr_harness, "LocalASRSidecarManager",
+                        return_value=manager,
+                    ), redirect_stdout(output):
+                result = local_asr_harness.main([
+                    "transcribe", "--file", str(audio),
+                ])
+
+            self.assertEqual(result, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["text"], "local transcript")
+            self.assertEqual(payload["audio_seconds"], 1.0)
+            self.assertEqual(payload["engine"], "v1.9.1")
+            self.assertEqual(payload["model"], "ggml-small")
+            self.assertFalse(payload["offline_network_disabled"])
+            manager.transcribe.assert_called_once_with(audio.resolve(), "en")
+            manager.shutdown.assert_called_once_with()
 
 
 class LocalASRProviderAdapterTests(unittest.TestCase):

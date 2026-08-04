@@ -231,13 +231,24 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "transcribe":
             _require_windows()
+            audio_path = Path(args.file).expanduser().resolve()
+            duration = _audio_duration(audio_path)
             manager = LocalASRSidecarManager(installer)
             try:
                 text = manager.transcribe(
-                    Path(args.file).expanduser().resolve(), args.language)
+                    audio_path, args.language)
             finally:
                 manager.shutdown()
-            _json({"ok": True, "text": text, "loopback_only": True})
+            _json({
+                "ok": True,
+                "text": text,
+                "loopback_only": True,
+                "audio_file": str(audio_path),
+                "audio_seconds": round(duration, 3),
+                "engine": installer.manifest["engine"]["version"],
+                "model": installer.manifest["recommended_model"]["id"],
+                "offline_network_disabled": False,
+            })
             return 0
         if args.command == "benchmark":
             _json(_benchmark(args))
