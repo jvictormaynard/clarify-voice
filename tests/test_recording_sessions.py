@@ -709,6 +709,8 @@ class RecordingSessionTests(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
                 self.assertTrue(session.wait_for_shutdown(1))
 
+            if cleanup.call_count != 1:
+                print("unexpected cleanup calls:", cleanup.call_args_list)
             self.assertEqual(cleanup.call_count, 1)
             self.assertFalse(path.exists())
 
