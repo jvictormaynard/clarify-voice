@@ -66,11 +66,13 @@ without speech never stops a session. A timestamp regression is rejected so a
 wall-clock adjustment cannot terminate a recording early.
 `RecordingBoundaryPolicy` combines both policies and exposes explicit
 `ACTIVE`, `STOPPED`, `CANCELLED`, and `DEVICE_UNAVAILABLE` states without
-publishing text. The recorder calls the policy from its level callback and
-from a short-lived policy worker that runs for opted-in duration/VAD controls;
-both paths signal the same boundary event. The worker is stopped and joined
-with the recorder process during explicit stop/cancel, so it cannot keep a
-session alive after cleanup. `RecordingSession` invokes the workflow stop
+publishing text. The recorder calls the combined policy from its level
+callback, while a short-lived policy worker observes only the opted-in hard
+duration limit. Keeping the worker's duration clock separate prevents it from
+feeding synthetic levels into VAD or racing real callbacks; both paths signal
+the same boundary event. The worker is stopped and joined with the recorder
+process during explicit stop/cancel, so it cannot keep a session alive after
+cleanup. `RecordingSession` invokes the workflow stop
 callback from a separate lifecycle worker, never from the PortAudio callback
 itself. The existing owner/cancellation order remains in force:
 cancellation wins over publication, snapshots are taken before provider work,

@@ -271,6 +271,30 @@ class MicrophoneControlsTests(unittest.TestCase):
         self.assertEqual(stopped.reason, RecordingBoundaryReason.MAX_DURATION)
         self.assertEqual(policy.observe().reason, RecordingBoundaryReason.MAX_DURATION)
 
+    def test_duration_observation_does_not_advance_vad_clock(self):
+        clock = FakeClock()
+        policy = RecordingBoundaryPolicy(
+            RecordingControls(
+                max_duration_seconds=10,
+                vad=VADSettings(enabled=True),
+            ),
+            clock=clock,
+        )
+        policy.start()
+
+        clock.now = 4
+        duration = policy.observe_duration()
+        self.assertFalse(duration.should_stop)
+        self.assertIsNone(duration.vad)
+
+        callback = policy.observe(input_level=1.0)
+        self.assertIsNotNone(callback.vad)
+        self.assertTrue(callback.vad.speech_detected)
+
+        clock.now = 10
+        stopped = policy.observe_duration()
+        self.assertEqual(stopped.reason, RecordingBoundaryReason.MAX_DURATION)
+
     def test_vad_requires_minimum_speech_and_continuous_silence(self):
         settings = VADSettings(
             enabled=True,

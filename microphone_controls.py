@@ -924,6 +924,10 @@ class RecordingBoundaryPolicy:
         self._clock = clock
         self._started_at: float | None = None
         self._last_timestamp: float | None = None
+        # The duration monitor has its own timestamp sequence.  It may run
+        # concurrently with the level callback, so it must not advance the
+        # VAD observation clock or make a valid audio callback look stale.
+        self._duration_last_timestamp: float | None = None
         self._state = RecordingBoundaryState.ACTIVE
         self._reason = RecordingBoundaryReason.NONE
         self._lock = threading.RLock()
@@ -953,10 +957,50 @@ class RecordingBoundaryPolicy:
             timestamp = self._timestamp(now)
             self._started_at = timestamp
             self._last_timestamp = timestamp
+            self._duration_last_timestamp = timestamp
             self._state = RecordingBoundaryState.ACTIVE
             self._reason = RecordingBoundaryReason.NONE
             self._vad.start(timestamp)
             return BoundaryDecision(self._state, self._reason, 0.0)
+
+    def observe_duration(self, now: float | None = None) -> BoundaryDecision:
+        """Evaluate only the hard duration boundary.
+
+        A source-only recorder may not have level callbacks at all.  Keeping
+        this observation separate from :meth:`observe` lets a timer enforce
+        maximum duration without feeding synthetic silence into VAD or
+        racing the callback's timestamp sequence.
+        """
+        with self._lock:
+            timestamp = self._timestamp(now)
+            if (self._duration_last_timestamp is not None
+                    and timestamp < self._duration_last_timestamp):
+                raise NonMonotonicTimestampError(
+                    "recording timestamps must be monotonic")
+            if self._started_at is None:
+                self._started_at = timestamp
+                self._last_timestamp = timestamp
+                self._duration_last_timestamp = timestamp
+                self._vad.start(timestamp)
+            if timestamp < self._started_at:
+                raise NonMonotonicTimestampError(
+                    "recording timestamps must be monotonic")
+            self._duration_last_timestamp = timestamp
+            elapsed = timestamp - self._started_at
+            if self._state is not RecordingBoundaryState.ACTIVE:
+                return BoundaryDecision(self._state, self._reason, elapsed)
+            duration = self._duration.evaluate(elapsed)
+            if duration.should_stop:
+                self._state = RecordingBoundaryState.STOPPED
+                self._reason = duration.reason
+                return BoundaryDecision(
+                    self._state, self._reason, elapsed, duration.warning)
+            return BoundaryDecision(
+                RecordingBoundaryState.ACTIVE,
+                RecordingBoundaryReason.NONE,
+                elapsed,
+                duration.warning,
+            )
 
     def observe(
         self,

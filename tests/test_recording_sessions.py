@@ -11,6 +11,14 @@ import app
 from microphone_controls import RecordingBoundaryReason, VADSettings
 
 
+class FakeBoundaryClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+
 class RecordingSessionTests(unittest.TestCase):
     def test_boundary_monitor_notifies_lifecycle_callback_and_releases_on_cancel(self):
         class BoundaryRecorder:
@@ -230,18 +238,11 @@ class RecordingSessionTests(unittest.TestCase):
             app.APP_CONFIG.update(original_config)
 
     def test_source_only_capture_enforces_max_duration_without_level_meter(self):
-        class FakeClock:
-            def __init__(self):
-                self.now = 0.0
-
-            def monotonic(self):
-                return self.now
-
         controls = app.RecordingControls(
             max_duration_seconds=5,
             warning_seconds=1,
         )
-        clock = FakeClock()
+        clock = FakeBoundaryClock()
         process = Mock()
         process.poll.return_value = None
 
@@ -263,6 +264,70 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertEqual(
                 recorder.boundary_reason, RecordingBoundaryReason.MAX_DURATION)
             recorder.stop()
+
+    def test_raw_input_stream_failure_still_enforces_max_duration(self):
+        controls = app.RecordingControls(max_duration_seconds=5, warning_seconds=1)
+        clock = FakeBoundaryClock()
+        process = Mock()
+        process.poll.return_value = None
+        failed_stream = Mock()
+        failed_stream.start.side_effect = OSError("meter unavailable")
+        failed_sounddevice = SimpleNamespace(
+            RawInputStream=Mock(return_value=failed_stream),
+        )
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", failed_sounddevice), patch.object(
+                app, "_microphone_inventory", return_value=None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(controls=controls, boundary_clock=clock)
+            recorder.start(Path(directory) / "recording.wav")
+
+            self.assertIsNone(recorder.mic_stream)
+            clock.now = 5
+            self.assertTrue(recorder.boundary_event.wait(1))
+            self.assertEqual(
+                recorder.boundary_reason, RecordingBoundaryReason.MAX_DURATION)
+            failed_sounddevice.RawInputStream.assert_called_once()
+            failed_stream.stop.assert_called_once_with()
+            failed_stream.close.assert_called_once_with()
+            recorder.stop()
+
+    def test_source_only_boundary_notifies_once_and_cancel_cleans_up(self):
+        controls = app.RecordingControls(max_duration_seconds=5, warning_seconds=1)
+        clock = FakeBoundaryClock()
+        process = Mock()
+        process.poll.return_value = None
+        callbacks = []
+        callback_seen = threading.Event()
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(controls=controls, boundary_clock=clock)
+            session = app.RecordingSession(
+                recorder=recorder,
+                audio_path=Path(directory) / "recording.wav",
+            )
+            session.set_boundary_callback(
+                lambda reason: (callbacks.append(reason), callback_seen.set()))
+            session.start()
+
+            clock.now = 5
+            self.assertTrue(callback_seen.wait(1))
+            self.assertEqual(callbacks, [RecordingBoundaryReason.MAX_DURATION])
+
+            self.assertTrue(session.cancel())
+            self.assertTrue(session.shutdown_complete.wait(1))
+            self.assertFalse(session.audio_path.exists())
+            self.assertIsNone(recorder._boundary_worker)
+            process.terminate.assert_called_once_with()
 
     def test_sessions_reserve_unique_paths_and_cleanup_success(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
