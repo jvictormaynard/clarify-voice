@@ -4363,13 +4363,22 @@ class RecordingSession:
                 if callback is not None:
                     callback(getattr(self.recorder, "boundary_reason", None))
             finally:
-                self.detach_worker(threading.current_thread())
+                if self._boundary_monitor is threading.current_thread():
+                    self._boundary_monitor = None
 
         worker = threading.Thread(
             target=monitor, name="ClarifyVoiceRecordingBoundary", daemon=True)
         self._boundary_monitor = worker
-        self.attach_worker(worker)
         worker.start()
+
+    def _stop_boundary_monitor(self):
+        """Stop the lifecycle observer without extending provider ownership."""
+        self._boundary_monitor_stop.set()
+        worker = self._boundary_monitor
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=max(0.5, RECORDING_BOUNDARY_POLL_SECONDS * 4))
+        if self._boundary_monitor is worker:
+            self._boundary_monitor = None
 
     def wait_until_started(self):
         """Wait for startup's terminal signal and preserve its typed outcome."""
@@ -4390,7 +4399,7 @@ class RecordingSession:
             elif self.state != "processing":
                 raise RecordingError(
                     f"Cannot stop session in state {self.state}")
-        self._boundary_monitor_stop.set()
+        self._stop_boundary_monitor()
         self.stop_recorder()
         time.sleep(0.3)
         if not self.audio_path.exists() or self.audio_path.stat().st_size < 1000:
@@ -4627,7 +4636,7 @@ class RecordingSession:
             return True
 
     def cancel(self):
-        self._boundary_monitor_stop.set()
+        self._stop_boundary_monitor()
         if not self.request_cancel():
             return False
         recorder_error = None
@@ -4651,7 +4660,7 @@ class RecordingSession:
         """Cleanup once, then publish exactly one terminal state."""
         if outcome not in self.TERMINAL_STATES:
             raise RecordingError(f"Invalid terminal state {outcome}")
-        self._boundary_monitor_stop.set()
+        self._stop_boundary_monitor()
         with self._lock:
             already_terminal = self.terminal
             if outcome == "completed" and self.state != "completed":
