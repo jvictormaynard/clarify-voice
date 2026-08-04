@@ -8,6 +8,8 @@ altgraph==0.17.5
     # via pyinstaller
 arrow==1.4.0
     # via isoduration
+ast-serialize==0.6.0
+    # via mypy
 attrs==26.1.0
     # via
     #   jsonschema
