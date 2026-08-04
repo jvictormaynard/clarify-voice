@@ -76,15 +76,20 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             "disabled",
         )
 
-    def test_reset_and_test_delegate_to_repository_scope_actions(self):
+    def test_test_uses_draft_and_reset_preserves_other_scope_edits(self):
         controller = WorkflowSettingsController(self.repository())
+        controller.set_route(
+            WorkflowScope.REWRITE,
+            provider_id="groq",
+            model_id="llama-3.3-70b-versatile",
+            prompt="unsaved rewrite policy",
+        )
         controller.set_route(
             WorkflowScope.TRANSLATION,
             provider_id="groq",
             model_id="llama-3.3-70b-versatile",
             prompt="custom translation policy",
         )
-        controller.apply()
         result = controller.test(WorkflowScope.TRANSLATION)
         self.assertEqual(result.scope, WorkflowScope.TRANSLATION.value)
         self.assertTrue(result.ok)
@@ -97,6 +102,20 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             reset.workflow(WorkflowScope.TRANSLATION).prompt,
             "custom translation policy",
         )
+        self.assertEqual(
+            controller.route(WorkflowScope.REWRITE).prompt,
+            "unsaved rewrite policy",
+        )
+
+    def test_test_rejects_invalid_draft_before_apply(self):
+        controller = WorkflowSettingsController(self.repository())
+        controller.set_route(
+            WorkflowScope.TRANSLATION,
+            provider_id="local_asr",
+            model_id="ggml-small",
+        )
+        with self.assertRaises(ValueError):
+            controller.test(WorkflowScope.TRANSLATION)
 
 
 class WorkflowOperationRoutingTests(unittest.TestCase):

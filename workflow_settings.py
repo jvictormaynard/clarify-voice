@@ -21,6 +21,7 @@ from repositories import (
     WorkflowScope,
     WorkflowTestResult,
     normalize_workflow_scope,
+    test_workflow_configuration,
     validate_workflow_route,
 )
 
@@ -119,15 +120,32 @@ class WorkflowSettingsController:
     def reset(self, scope: WorkflowScope | str) -> AppConfig:
         """Persist one scope's canonical defaults while retaining all others."""
 
-        self._config = self.repository.reset_workflow(scope)
+        persisted = self.repository.reset_workflow(scope)
+        normalized = normalize_workflow_scope(scope)
+        # ``reset_workflow`` intentionally operates on the persisted snapshot.
+        # Keep any edits in the other draft scopes while replacing only the
+        # route that was actually reset (and its legacy local-ASR flag).
+        self._config = replace(
+            self._config,
+            workflows=self.workflows.with_route(
+                normalized, persisted.workflow(normalized)
+            ),
+            local_asr_cloud_refinement=(
+                persisted.local_asr_cloud_refinement
+                if normalized == WorkflowScope.LOCAL_ASR_REFINEMENT.value
+                else self._config.local_asr_cloud_refinement
+            ),
+        )
         return self._config
 
     def test(
         self, scope: WorkflowScope | str | None = None
     ) -> WorkflowTestResult | tuple[WorkflowTestResult, ...]:
-        """Run the repository's local, network-free capability check."""
+        """Run a local, network-free capability check against the draft."""
 
-        return self.repository.test_workflow(scope)
+        return test_workflow_configuration(
+            self._config.workflows, scope, registry=self.registry
+        )
 
 
 __all__ = ["WorkflowSettingsController"]
