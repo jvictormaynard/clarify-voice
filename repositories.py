@@ -442,6 +442,7 @@ class AppConfig:
         """
         workflows = self.workflows
         selection = self.selection
+        provider_updates: dict[str, ProviderConfig] = {}
         selected_audio_key = PROVIDER_REGISTRY.describe(
             legacy_config.selection.transcription_provider).audio_model_key
         if {"transcription_provider", selected_audio_key} & changed_keys:
@@ -467,6 +468,17 @@ class AppConfig:
                 transcription_provider=(
                     legacy_config.selection.transcription_provider),
             )
+            selected_config = getattr(
+                self, legacy_config.selection.transcription_provider, None)
+            route_model = str(transcription_route.model_id or "").strip()
+            if isinstance(selected_config, ProviderConfig) and route_model:
+                # Keep flat consumers in lockstep with the route after a
+                # legacy provider/model edit. Without this, a stale nested
+                # route can overwrite the selected provider's audio model
+                # while synchronization updates only the typed route.
+                provider_updates[
+                    legacy_config.selection.transcription_provider
+                ] = replace(selected_config, audio_model=route_model)
         if {"refinement_provider", "refinement_model"} & changed_keys:
             previous_shared = workflows.refinement
             legacy_route = legacy_config.workflow(WorkflowScope.REFINEMENT)
@@ -520,6 +532,7 @@ class AppConfig:
             self,
             selection=selection,
             workflows=workflows,
+            **provider_updates,
             local_asr_cloud_refinement=(
                 legacy_config.local_asr_cloud_refinement
                 if "local_asr_cloud_refinement" in changed_keys

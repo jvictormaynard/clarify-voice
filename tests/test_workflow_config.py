@@ -298,6 +298,10 @@ class WorkflowConfigurationTests(unittest.TestCase):
                 repository.load().workflow(WorkflowScope.TRANSCRIPTION).custom_endpoint,
                 "https://openai-proxy.example/v1",
             )
+            self.assertEqual(
+                repository.load().openai.audio_model,
+                "gpt-4o-transcribe",
+            )
 
             provider_change = repository.load().to_legacy_mapping()
             provider_change.update({
@@ -308,6 +312,10 @@ class WorkflowConfigurationTests(unittest.TestCase):
             self.assertEqual(
                 repository.load().workflow(WorkflowScope.TRANSCRIPTION).custom_endpoint,
                 "",
+            )
+            self.assertEqual(
+                repository.load().groq.audio_model,
+                "whisper-large-v3",
             )
 
     def test_refinement_model_change_keeps_custom_endpoint(self):
