@@ -108,11 +108,11 @@ _SENSITIVE_ESCAPED_FIELD_PATTERN = re.compile(
     r"(?is)(\\?['\"]?(?:api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|credential|password|secret|token)"
     r"\\?['\"]?\s*[:=]\s*)"
-    # Require the closing quote to have mapping-like context.  An escaped
-    # quote inside a doubly serialized value is otherwise indistinguishable
-    # from the delimiter at the regex level; it is followed by value text,
-    # while the real delimiter is followed by a comma/bracket or the end.
-    r"((?:\\)?['\"])((?:\\.|(?!\2).)*?)\2(?=\s*[,}\]]|$)")
+    # In a doubly serialized mapping, a delimiter has one backslash before
+    # its quote, while a quote escaped inside the nested value has that
+    # backslash escaped too (three or more consecutive backslashes).  Reject
+    # a delimiter candidate whose opening backslash is itself escaped.
+    r"((?<!\\)(?:\\)?['\"])((?:\\.|(?!\2).)*?)(?<!\\)\2")
 _SENSITIVE_BEARER_PATTERN = re.compile(r"(?i)(bearer)\s+([^\s,;&]+)")
 _SENSITIVE_QUERY_PATTERN = re.compile(
     r"(?i)([?&](?:api[_-]?key|access[_-]?token|token)=)[^&#\s]+")

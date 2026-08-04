@@ -222,6 +222,35 @@ class HistoryStoreTests(unittest.TestCase):
             for value in ("abc", "def"):
                 self.assertNotIn(value, persisted)
 
+    def test_escaped_mapping_quote_structural_characters_stay_inside_secret(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            errors = (
+                'body="{\\"password\\":\\"abc\\\\\\",def\\"}"',
+                'body="{\\"password\\":\\"abc\\\\\\"}def\\"}"',
+                'body="{\\"password\\":\\"abc\\\\\\"]def\\"}"',
+            )
+            for index, error in enumerate(errors):
+                store.add(
+                    status="error",
+                    error=error,
+                    record_id=f"escaped-structural-credential-{index}",
+                )
+
+            redacted = [record.error for record in store.list_records()]
+            self.assertEqual(
+                redacted,
+                ['body="{\\"password\\":\\"<redacted>\\"}"'] * 3,
+            )
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            for value in ("abc", "def"):
+                self.assertNotIn(value, persisted)
+
     def test_v0_migration_is_idempotent_and_drops_unsupported_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
