@@ -112,6 +112,40 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertNotIn("basic-secret", persisted)
             self.assertNotIn("another-secret", persisted)
 
+    def test_structured_authorization_parameters_are_redacted_until_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            store.add(
+                status="error",
+                error=(
+                    'Authorization: Digest username="alice", '
+                    'response="digest-secret", qop=auth; '
+                    'request-id=req-1'
+                ),
+            )
+            store.add(
+                status="error",
+                error=(
+                    "Authorization: AWS4-HMAC-SHA256 "
+                    "Credential=AKIA.../scope, SignedHeaders=host, "
+                    "Signature=aws-secret&debug=true"
+                ),
+            )
+
+            errors = [record.error for record in store.list_records()]
+            self.assertEqual(errors, [
+                "Authorization: Digest <redacted>; request-id=req-1",
+                "Authorization: AWS4-HMAC-SHA256 <redacted>&debug=true",
+            ])
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            self.assertNotIn("digest-secret", persisted)
+            self.assertNotIn("aws-secret", persisted)
+
     def test_generic_token_and_credential_fields_are_redacted(self):
         with tempfile.TemporaryDirectory() as directory:
             store = HistoryStore(
@@ -1096,6 +1130,34 @@ class HistoryStoreTests(unittest.TestCase):
                 store.list_records()
             self.assertEqual(path.read_bytes(), before)
             self.assertTrue(candidate.exists())
+
+    def test_newer_snapshot_recovers_structurally_corrupt_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            path.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": {"raw_text": "corrupt-primary"},
+            }), encoding="utf-8")
+            candidate = root / ".history.json.newer.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [HistoryRecord(
+                    raw_text="recovered", timestamp=NOW,
+                    provider="openai", model="gpt-test").to_mapping()],
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime + 1, target_mtime + 1))
+
+            records = HistoryStore(
+                path,
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            ).list_records()
+
+            self.assertEqual([item.raw_text for item in records], ["recovered"])
+            self.assertFalse(candidate.exists())
 
     def test_newer_valid_snapshot_wins_over_repairable_primary_entry(self):
         with tempfile.TemporaryDirectory() as directory:

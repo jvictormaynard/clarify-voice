@@ -94,8 +94,8 @@ def _format_timestamp(value: datetime) -> str:
 
 _SENSITIVE_AUTH_PATTERN = re.compile(
     r"(?is)(['\"]?(?:authorization|bearer)['\"]?\s*[:=]\s*"
-    r"(?:[a-z]+\s+)?)(?:(['\"])((?:\\.|(?!\2).)*?)\2|"
-    r"([^,;&}\n]+))")
+    r"(?:[a-z0-9_-]+\s+)?)(?:(['\"])((?:\\.|(?!\2).)*?)\2|"
+    r"([^;&}\n]+))")
 _SENSITIVE_FIELD_PATTERN = re.compile(
     r"(?is)(['\"]?(?:api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|credential|password|secret|token)['\"]?\s*[:=]\s*)"
@@ -810,7 +810,8 @@ class HistoryStore:
                 # primary with an older temporary snapshot.  The newer file
                 # remains intact for the executable that understands it.
                 return current
-            if not _snapshot_container_is_valid(current):
+            container_valid = _snapshot_container_is_valid(current)
+            if not container_valid and not supported_temporary:
                 # Keep every interrupted snapshot available while the
                 # committed primary is still structurally invalid.  The load
                 # path will fail closed without deleting the only recoverable
@@ -839,6 +840,10 @@ class HistoryStore:
                 item for item in supported_temporary
                 if item[0] == newest_ordering
             ]
+            if newest_ordering <= current_mtime and not container_valid:
+                # A structurally corrupt primary may only be replaced by a
+                # snapshot proven to be newer; preserve both otherwise.
+                return current
             if newest_ordering > current_mtime and len(newest_candidates) > 1:
                 # A filename tie-break would make recovery nondeterministic
                 # and could discard one of two equally fresh snapshots.
