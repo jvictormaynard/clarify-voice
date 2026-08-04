@@ -94,16 +94,21 @@ class HistoryStoreTests(unittest.TestCase):
             )
             store.add(
                 status="error",
-                error="Authorization: Bearer sk-secret; Bearer another-secret",
+                error=(
+                    "Authorization: Bearer sk-secret; "
+                    "Authorization: Basic basic-secret; Bearer another-secret"
+                ),
             )
 
             error = store.list_records()[0].error
             self.assertEqual(
                 error,
-                "Authorization=<redacted>; Bearer <redacted>",
+                "Authorization=<redacted>; Authorization=<redacted>; "
+                "Bearer <redacted>",
             )
             persisted = Path(store.path).read_text(encoding="utf-8")
             self.assertNotIn("sk-secret", persisted)
+            self.assertNotIn("basic-secret", persisted)
             self.assertNotIn("another-secret", persisted)
 
     def test_v0_migration_is_idempotent_and_drops_unsupported_fields(self):

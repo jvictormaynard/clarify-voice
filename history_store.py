@@ -96,7 +96,7 @@ _SENSITIVE_ERROR_PATTERNS = (
         re.compile(
             r"(?i)(api[_ -]?key|access[_ -]?token|authorization|"
             r"client[_ -]?secret|password|secret)\s*[:=]\s*"
-            r"(?:bearer\s+)?([^\s,;&]+)"),
+            r"(?:[a-z]+\s+)?([^\s,;&]+)"),
         r"\1=<redacted>",
     ),
     (
