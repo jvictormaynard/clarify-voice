@@ -2,6 +2,7 @@
 
 import argparse
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import replace
 import json
 import math
@@ -82,7 +83,13 @@ from update_security import (
     launch_prepared_update,
     prepare_update,
 )
-from hotkey_config import ActivationMode, HotkeySettings, HotkeyValidationError
+from hotkey_config import (
+    ActivationMode,
+    HotkeyAction,
+    HotkeySettings,
+    HotkeySettingsController,
+    HotkeyValidationError,
+)
 from history_store import (
     DEFAULT_RETENTION_DAYS,
     HistoryStore,
@@ -773,7 +780,7 @@ def _provider_key_candidate(provider, entered=""):
 
 def _deactivate_provider_transaction(provider, default_base, repositories=None):
     """Delete a provider credential without leaving compatibility state stale."""
-    previous_config = APP_CONFIG.copy()
+    previous_config = deepcopy(APP_CONFIG)
     try:
         APP_CONFIG[f"{provider}_api_key"] = ""
         APP_CONFIG[f"{provider}_base_url"] = default_base
@@ -919,7 +926,9 @@ def _persist_autostart_preference(
         enabled: bool, repositories=None, registry=None,
         previous_config=None, previous_registry_state=None) -> None:
     """Keep the Windows startup entry and persisted preference in sync."""
-    previous_config = APP_CONFIG.copy() if previous_config is None else dict(previous_config)
+    previous_config = (
+        deepcopy(APP_CONFIG) if previous_config is None
+        else deepcopy(previous_config))
     previous_registry_state = (
         _autostart_registry_state(registry)
         if previous_registry_state is None else previous_registry_state)
@@ -972,7 +981,7 @@ def _persist_cloud_selection_before_local_removal(
     model_key = model_keys.get(provider)
     if not model_key:
         return False
-    previous_config = APP_CONFIG.copy()
+    previous_config = deepcopy(APP_CONFIG)
     APP_CONFIG["transcription_provider"] = provider
     APP_CONFIG[model_key] = _canonical_audio_model(provider, model)
     try:
@@ -1186,7 +1195,7 @@ def _apply_settings_transaction(
         workflow_mapping=None, history_enabled=None,
         history_retention_days=_UNSET):
     """Apply model and startup selections as one rollback-capable operation."""
-    previous_config = APP_CONFIG.copy()
+    previous_config = deepcopy(APP_CONFIG)
     previous_registry_state = _autostart_registry_state(registry)
     try:
         if workflow_mapping is not None:
@@ -1212,6 +1221,73 @@ def _apply_settings_transaction(
         raise
 
 
+def _restore_settings_apply_state(
+        previous_config, previous_registry_state, repositories=None,
+        registry=None) -> None:
+    """Restore the persisted state captured before a Settings Apply.
+
+    The model/workflow/history/autostart transaction persists before the
+    native hotkey transaction can run. Keep the outer rollback explicit so a
+    rejected shortcut cannot leave the repository on a newer, partially
+    applied configuration.
+    """
+    APP_CONFIG.clear()
+    APP_CONFIG.update(deepcopy(previous_config))
+    try:
+        _restore_autostart_registry_state(previous_registry_state, registry)
+    except OSError:
+        # Persist the reverted config even when the Run-key adapter is
+        # temporarily unavailable. This mirrors the inner transaction's
+        # isolation and prevents a failed Apply from surviving a restart.
+        pass
+    _save_app_config(repositories)
+
+
+def _apply_settings_with_hotkeys_transaction(
+        apply_general, apply_hotkeys, repositories=None, registry=None,
+        restore_hotkeys=None, on_rollback=None):
+    """Run general Settings and hotkeys as one rollback-capable operation.
+
+    ``apply_hotkeys`` is deliberately last: its native adapter owns the
+    shortcut-hook rollback. If that final step rejects a combination, this
+    outer transaction restores the config repository and autostart state, then
+    restores the native shortcut set and lets the caller restore its live
+    runtime/UI draft.
+    """
+    # APP_CONFIG contains nested workflow/hotkey mappings. A shallow copy can
+    # share a route with the draft and make rollback appear to succeed while
+    # retaining one of the newly edited nested values.
+    previous_config = deepcopy(APP_CONFIG)
+    previous_registry_state = _autostart_registry_state(registry)
+    try:
+        apply_general()
+        return apply_hotkeys()
+    except Exception as error:
+        rollback_error = None
+        try:
+            _restore_settings_apply_state(
+                previous_config, previous_registry_state, repositories, registry)
+        except Exception as candidate:
+            rollback_error = candidate
+        if restore_hotkeys is not None:
+            try:
+                restore_hotkeys()
+            except Exception:
+                # The hotkey transaction normally performs this restoration
+                # itself; this is a final runtime-hook safety net.
+                pass
+        if on_rollback is not None:
+            try:
+                on_rollback()
+            except Exception:
+                # The original Apply error remains the actionable user-facing
+                # failure; the next open of Settings can rebuild the UI.
+                pass
+        if rollback_error is not None:
+            raise rollback_error from error
+        raise
+
+
 def _apply_hotkey_settings_transaction(
         settings, repositories=None, tray_icon=None) -> HotkeySettings:
     """Register then persist hotkeys as one rollback-capable transaction.
@@ -1224,11 +1300,11 @@ def _apply_hotkey_settings_transaction(
     selected = (settings if isinstance(settings, HotkeySettings)
                 else HotkeySettings.from_mapping(settings))
     if (selected.activation_mode is ActivationMode.PUSH_TO_TALK
-            and IS_WIN and not supports_push_to_talk()):
+            and not supports_push_to_talk()):
         raise HotkeyValidationError(
-            "Push-to-talk requires a key-release capable native input layer",
+            "Push-to-talk is unavailable because the native input layer does not provide key-release events",
             code="unsupported_activation_mode")
-    previous = APP_CONFIG.get("hotkeys")
+    previous = deepcopy(APP_CONFIG.get("hotkeys"))
     previous_settings = HotkeySettings.from_mapping(previous)
     tray = tray_icon
     if tray is None:
@@ -1249,6 +1325,21 @@ def _apply_hotkey_settings_transaction(
                 pass
         raise
     return selected
+
+
+def _keyboard_hotkey_chord(definition) -> str:
+    """Format a typed binding for the optional cross-platform keyboard hook."""
+    key_aliases = {
+        "ESCAPE": "esc", "SPACE": "space", "ENTER": "enter",
+        "TAB": "tab", "UP": "up", "DOWN": "down", "LEFT": "left",
+        "RIGHT": "right",
+    }
+    parts = [name for name in ("ctrl", "alt", "shift")
+             if name in definition.modifiers]
+    if "win" in definition.modifiers:
+        parts.append("windows")
+    parts.append(key_aliases.get(definition.key, definition.key.lower()))
+    return "+".join(parts)
 
 
 def _enable_windows_dpi_awareness():
@@ -2687,6 +2778,125 @@ STRINGS = {
         "apply": "Применить", "save": "Сохранить", "cancel": "Отмена",
     },
 }
+
+# Hotkey settings are kept in the same complete interface catalog as the
+# other Settings pages.  The native layer currently exposes key-down only, so
+# the unavailable push-to-talk state is intentionally visible rather than
+# represented as a working mode.
+_HOTKEY_TRANSLATIONS = {
+    "en": {
+        "hotkeys_section": "Keyboard shortcuts",
+        "hotkeys_subtitle": "Configure the four ClarifyVoice global actions.",
+        "hotkey_recording": "Record / stop",
+        "hotkey_rewrite": "Rewrite selected text",
+        "hotkey_translation": "Translate selected text",
+        "hotkey_visibility": "Show / hide window",
+        "hotkey_capture": "Capture",
+        "hotkey_capture_prompt": "Press a shortcut…",
+        "hotkey_capture_hint": "Press a modifier and a key. Escape cancels capture.",
+        "hotkey_reset": "Reset",
+        "hotkey_reset_all": "Reset all",
+        "hotkey_activation_mode": "Recording activation",
+        "hotkey_mode_toggle": "Toggle",
+        "hotkey_mode_push_to_talk": "Push-to-talk",
+        "hotkey_toggle_hint": "Press once to start and again to stop.",
+        "hotkey_ptt_unsupported": "Push-to-talk is unavailable: the native input layer only reports key-down events.",
+        "hotkey_captured": "Shortcut updated to {binding}.",
+        "hotkey_conflict": "Shortcut conflict: {error}",
+        "hotkey_unsupported": "Unsupported shortcut: {error}",
+        "hotkey_registration_failed": "Shortcuts were not applied: {error}",
+    },
+    "pt": {
+        "hotkeys_section": "Atalhos de teclado",
+        "hotkeys_subtitle": "Configure as quatro ações globais do ClarifyVoice.",
+        "hotkey_recording": "Gravar / parar",
+        "hotkey_rewrite": "Reescrever texto selecionado",
+        "hotkey_translation": "Traduzir texto selecionado",
+        "hotkey_visibility": "Mostrar / ocultar janela",
+        "hotkey_capture": "Capturar",
+        "hotkey_capture_prompt": "Pressione um atalho…",
+        "hotkey_capture_hint": "Pressione um modificador e uma tecla. Escape cancela a captura.",
+        "hotkey_reset": "Redefinir",
+        "hotkey_reset_all": "Redefinir tudo",
+        "hotkey_activation_mode": "Ativação da gravação",
+        "hotkey_mode_toggle": "Alternar",
+        "hotkey_mode_push_to_talk": "Push-to-talk",
+        "hotkey_toggle_hint": "Pressione uma vez para iniciar e novamente para parar.",
+        "hotkey_ptt_unsupported": "Push-to-talk indisponível: a camada nativa de entrada só informa eventos de pressionar tecla.",
+        "hotkey_captured": "Atalho atualizado para {binding}.",
+        "hotkey_conflict": "Conflito de atalho: {error}",
+        "hotkey_unsupported": "Atalho não suportado: {error}",
+        "hotkey_registration_failed": "Os atalhos não foram aplicados: {error}",
+    },
+    "es": {
+        "hotkeys_section": "Atajos de teclado",
+        "hotkeys_subtitle": "Configura las cuatro acciones globales de ClarifyVoice.",
+        "hotkey_recording": "Grabar / detener",
+        "hotkey_rewrite": "Reescribir texto seleccionado",
+        "hotkey_translation": "Traducir texto seleccionado",
+        "hotkey_visibility": "Mostrar / ocultar ventana",
+        "hotkey_capture": "Capturar",
+        "hotkey_capture_prompt": "Pulsa un atajo…",
+        "hotkey_capture_hint": "Pulsa un modificador y una tecla. Escape cancela la captura.",
+        "hotkey_reset": "Restablecer",
+        "hotkey_reset_all": "Restablecer todo",
+        "hotkey_activation_mode": "Activación de grabación",
+        "hotkey_mode_toggle": "Alternar",
+        "hotkey_mode_push_to_talk": "Push-to-talk",
+        "hotkey_toggle_hint": "Pulsa una vez para iniciar y otra vez para detener.",
+        "hotkey_ptt_unsupported": "Push-to-talk no disponible: la capa nativa solo informa eventos de pulsación.",
+        "hotkey_captured": "Atajo actualizado a {binding}.",
+        "hotkey_conflict": "Conflicto de atajo: {error}",
+        "hotkey_unsupported": "Atajo no compatible: {error}",
+        "hotkey_registration_failed": "No se aplicaron los atajos: {error}",
+    },
+    "de": {
+        "hotkeys_section": "Tastenkürzel",
+        "hotkeys_subtitle": "Die vier globalen ClarifyVoice-Aktionen konfigurieren.",
+        "hotkey_recording": "Aufnehmen / stoppen",
+        "hotkey_rewrite": "Ausgewählten Text umschreiben",
+        "hotkey_translation": "Ausgewählten Text übersetzen",
+        "hotkey_visibility": "Fenster anzeigen / ausblenden",
+        "hotkey_capture": "Aufnehmen",
+        "hotkey_capture_prompt": "Tastenkürzel drücken…",
+        "hotkey_capture_hint": "Eine Zusatztaste und eine Taste drücken. Escape bricht ab.",
+        "hotkey_reset": "Zurücksetzen",
+        "hotkey_reset_all": "Alles zurücksetzen",
+        "hotkey_activation_mode": "Aufnahmeaktivierung",
+        "hotkey_mode_toggle": "Umschalten",
+        "hotkey_mode_push_to_talk": "Push-to-talk",
+        "hotkey_toggle_hint": "Einmal zum Starten und erneut zum Stoppen drücken.",
+        "hotkey_ptt_unsupported": "Push-to-talk nicht verfügbar: Die native Eingabeebene meldet nur Tastendruck-Ereignisse.",
+        "hotkey_captured": "Tastenkürzel auf {binding} aktualisiert.",
+        "hotkey_conflict": "Konflikt bei Tastenkürzeln: {error}",
+        "hotkey_unsupported": "Nicht unterstütztes Tastenkürzel: {error}",
+        "hotkey_registration_failed": "Tastenkürzel wurden nicht angewendet: {error}",
+    },
+    "ru": {
+        "hotkeys_section": "Сочетания клавиш",
+        "hotkeys_subtitle": "Настройте четыре глобальных действия ClarifyVoice.",
+        "hotkey_recording": "Запись / остановка",
+        "hotkey_rewrite": "Переписать выделенный текст",
+        "hotkey_translation": "Перевести выделенный текст",
+        "hotkey_visibility": "Показать / скрыть окно",
+        "hotkey_capture": "Задать",
+        "hotkey_capture_prompt": "Нажмите сочетание…",
+        "hotkey_capture_hint": "Нажмите модификатор и клавишу. Escape отменяет ввод.",
+        "hotkey_reset": "Сбросить",
+        "hotkey_reset_all": "Сбросить всё",
+        "hotkey_activation_mode": "Активация записи",
+        "hotkey_mode_toggle": "Переключение",
+        "hotkey_mode_push_to_talk": "Push-to-talk",
+        "hotkey_toggle_hint": "Нажмите один раз для запуска и ещё раз для остановки.",
+        "hotkey_ptt_unsupported": "Push-to-talk недоступен: нативный слой сообщает только события нажатия клавиш.",
+        "hotkey_captured": "Сочетание изменено на {binding}.",
+        "hotkey_conflict": "Конфликт сочетаний: {error}",
+        "hotkey_unsupported": "Неподдерживаемое сочетание: {error}",
+        "hotkey_registration_failed": "Сочетания не применены: {error}",
+    },
+}
+for _language, _translations in _HOTKEY_TRANSLATIONS.items():
+    STRINGS[_language].update(_translations)
 
 # Keep the Settings catalog complete in every supported locale.  These labels
 # are separate from provider/runtime strings so adding a profile page cannot
@@ -5531,6 +5741,7 @@ class App(ctk.CTk):
         self._closing = False
         self._tray_actions = queue.SimpleQueue()
         self._tray_icon = None
+        self._keyboard_hotkey_handles = {}
         self._workflow_picker_mode = False
         self._workflow_pending_result = None
         self._workflow_pending_status = None
@@ -5562,10 +5773,8 @@ class App(ctk.CTk):
         self._local_asr_product.refresh_async()
         self.bind("<Escape>", self._on_escape)
         if not IS_WIN and keyboard is not None:
-            keyboard.add_hotkey("alt+l", self._recording_hotkey)
-            keyboard.add_hotkey("alt+k", self._rewrite_hotkey)
-            keyboard.add_hotkey("alt+t", self._translation_hotkey)
-            keyboard.add_hotkey("alt+r", self._toggle_visibility)
+            self._register_non_windows_hotkeys(
+                HotkeySettings.from_mapping(APP_CONFIG.get("hotkeys")))
         self.after_idle(self._prewarm_translation_picker)
         if IS_WIN:
             self._tray_icon = WindowsTrayIcon(
@@ -5718,6 +5927,7 @@ class App(ctk.CTk):
 
     def destroy(self):
         """Stop and clean an owned recording before Tk tears down the app."""
+        self._remove_non_windows_hotkeys()
         if not getattr(self, "_recording_shutdown", False):
             self._recording_shutdown = True
             self._shutdown_recording(SESSION_SHUTDOWN_JOIN_SECONDS)
@@ -5794,8 +6004,8 @@ class App(ctk.CTk):
         self.lbl.pack(side="left", padx=(0, 6))
         self._make_draggable(self.lbl)
 
-        self.sub = ctk.CTkLabel(left, text="Alt+L", text_color=DIM,
-            font=ctk.CTkFont(size=10), anchor="w")
+        self.sub = ctk.CTkLabel(left, text=self._recording_hotkey_hint(),
+            text_color=DIM, font=ctk.CTkFont(size=10), anchor="w")
         self.sub.pack(side="left")
         self._make_draggable(self.sub)
 
@@ -5902,15 +6112,70 @@ class App(ctk.CTk):
         self.geometry(f"+{e.x_root - self._drag_x}+{e.y_root - self._drag_y}")
 
     # -- State --
+    @staticmethod
+    def _non_windows_hotkey_callbacks():
+        return {
+            HotkeyAction.RECORDING: "_recording_hotkey",
+            HotkeyAction.REWRITE: "_rewrite_hotkey",
+            HotkeyAction.TRANSLATION: "_translation_hotkey",
+            HotkeyAction.VISIBILITY: "_toggle_visibility",
+        }
+
+    def _remove_non_windows_hotkeys(self, handles=None):
+        if keyboard is None:
+            return
+        active = (self._keyboard_hotkey_handles if handles is None else handles)
+        self._keyboard_hotkey_handles = {} if handles is None else self._keyboard_hotkey_handles
+        remove = getattr(keyboard, "remove_hotkey", None)
+        if not callable(remove):
+            return
+        for handle in tuple(active.values()):
+            try:
+                remove(handle)
+            except Exception:
+                pass
+
+    def _register_non_windows_hotkeys(self, settings):
+        """Replace optional keyboard hooks without leaving a partial set."""
+        if IS_WIN or keyboard is None:
+            return
+        selected = (settings if isinstance(settings, HotkeySettings)
+                    else HotkeySettings.from_mapping(settings))
+        callbacks = self._non_windows_hotkey_callbacks()
+        new_handles = {}
+        current_action = None
+        try:
+            for action, method_name in callbacks.items():
+                current_action = action.value
+                new_handles[action] = keyboard.add_hotkey(
+                    _keyboard_hotkey_chord(selected.definition(action)),
+                    getattr(self, method_name),
+                )
+        except Exception as error:
+            self._remove_non_windows_hotkeys(new_handles)
+            raise HotkeyRegistrationError(
+                (current_action or "unknown",), reason=str(error)) from error
+
+        previous = self._keyboard_hotkey_handles
+        self._keyboard_hotkey_handles = new_handles
+        self._remove_non_windows_hotkeys(previous)
+
     @property
     def hotkey_settings(self) -> HotkeySettings:
         """Return the current typed bindings for Settings integrations."""
         return HotkeySettings.from_mapping(APP_CONFIG.get("hotkeys"))
 
+    def reconfigure_hotkeys(self, settings):
+        """Reconfigure the non-Windows hook used by the current process."""
+        self._register_non_windows_hotkeys(settings)
+
     def apply_hotkey_settings(self, settings) -> HotkeySettings:
         """Apply captured bindings only after native registration succeeds."""
+        tray = getattr(self, "_tray_icon", None)
+        if tray is None and not IS_WIN:
+            tray = self
         return _apply_hotkey_settings_transaction(
-            settings, self.repositories, getattr(self, "_tray_icon", None))
+            settings, self.repositories, tray)
 
     def _sync_escape_hotkey(self, enabled):
         tray_icon = getattr(self, "_tray_icon", None)
@@ -5964,7 +6229,10 @@ class App(ctk.CTk):
                 fill="both", expand=True, padx=self._idle_card_pad,
                 pady=self._idle_card_pad)
             self.lbl.configure(text=t or self._t("ready"), text_color=TEXT)
-            self.sub.configure(text=self._t("hint"))
+            hint_renderer = getattr(self, "_recording_hotkey_hint", None)
+            hint = (hint_renderer() if callable(hint_renderer)
+                    else self._t("hint"))
+            self.sub.configure(text=hint)
             # Restore position
             if self._saved_pos:
                 x, y = self._saved_pos
@@ -6292,6 +6560,13 @@ class App(ctk.CTk):
         language_strings = STRINGS.get(self.lang, STRINGS["en"])
         return language_strings.get(key, STRINGS["en"].get(key, key))
 
+    def _recording_hotkey_hint(self, stopping=False):
+        """Render the live recording binding inside the localized hint."""
+        binding = self.hotkey_settings.definition(
+            HotkeyAction.RECORDING).display
+        template = self._t("hint_stop" if stopping else "hint")
+        return template.replace("Alt+L", binding, 1)
+
     def _toggle_lang(self):
         self.lang = _next_language(self.lang)
         self.lang_btn.configure(image=self._language_flags[self.lang])
@@ -6319,11 +6594,11 @@ class App(ctk.CTk):
         if self.app_state == "ready":
             if self.lbl.cget("text") not in ("", ):
                 self.lbl.configure(text=self._t("ready"))
-            self.sub.configure(text=self._t("hint"))
+            self.sub.configure(text=self._recording_hotkey_hint())
         elif self.app_state in ("processing", "rewriting", "translating"):
             self.lbl.configure(text=self._t(self.app_state))
         elif self.app_state == "recording":
-            self.sub.configure(text=self._t("hint_stop"))
+            self.sub.configure(text=self._recording_hotkey_hint(stopping=True))
 
     def _cancel(self, e=None):
         service = getattr(self, "_workflow_service", None)
@@ -8917,9 +9192,201 @@ class App(ctk.CTk):
 
         # Settings contains local runtime preferences, diagnostics, and an
         # explicit secure update action. Update checks never run in the background.
-        preferences_inner = ctk.CTkFrame(
-            pages["settings"], fg_color="transparent")
+        preferences_inner = ctk.CTkScrollableFrame(
+            pages["settings"], fg_color="transparent",
+            scrollbar_button_color="#303030",
+            scrollbar_button_hover_color="#444444")
         preferences_inner.pack(fill="both", expand=True, padx=24, pady=22)
+
+        hotkey_settings_controller = HotkeySettingsController(
+            self.hotkey_settings,
+            push_to_talk_supported=supports_push_to_talk())
+        hotkey_capture_state = {"action": None}
+        hotkey_buttons = {}
+        hotkey_action_labels = {
+            HotkeyAction.RECORDING: "hotkey_recording",
+            HotkeyAction.REWRITE: "hotkey_rewrite",
+            HotkeyAction.TRANSLATION: "hotkey_translation",
+            HotkeyAction.VISIBILITY: "hotkey_visibility",
+        }
+        hotkey_mode_labels = {
+            ActivationMode.TOGGLE: self._t("hotkey_mode_toggle"),
+            ActivationMode.PUSH_TO_TALK: self._t("hotkey_mode_push_to_talk"),
+        }
+        hotkey_mode_by_label = {
+            label: mode for mode, label in hotkey_mode_labels.items()}
+
+        hotkeys_section = ctk.CTkFrame(
+            preferences_inner, fg_color="#111111", corner_radius=12,
+            border_width=1, border_color="#242424")
+        hotkeys_section.pack(fill="x", pady=(0, 18))
+        hotkeys_inner = ctk.CTkFrame(
+            hotkeys_section, fg_color="transparent")
+        hotkeys_inner.pack(fill="x", padx=14, pady=13)
+        hotkeys_heading = ctk.CTkFrame(
+            hotkeys_inner, fg_color="transparent")
+        hotkeys_heading.pack(fill="x")
+        ctk.CTkLabel(
+            hotkeys_heading, text=self._t("hotkeys_section"), text_color=TEXT,
+            font=font_body, anchor="w").pack(side="left")
+        hotkey_reset_all_button = ctk.CTkButton(
+            hotkeys_heading, text=self._t("hotkey_reset_all"), width=92,
+            height=26, corner_radius=13, fg_color="transparent",
+            hover_color="#242424", border_width=1, border_color="#333333",
+            text_color=DIM, font=font_caption)
+        hotkey_reset_all_button.pack(side="right")
+        ctk.CTkLabel(
+            hotkeys_inner, text=self._t("hotkeys_subtitle"), text_color=DIM,
+            font=font_caption, anchor="w", justify="left", wraplength=430).pack(
+                fill="x", pady=(2, 10))
+
+        hotkey_mode_row = ctk.CTkFrame(
+            hotkeys_inner, fg_color="transparent")
+        hotkey_mode_row.pack(fill="x", pady=(0, 5))
+        ctk.CTkLabel(
+            hotkey_mode_row, text=self._t("hotkey_activation_mode"),
+            text_color=DIM, font=font_label, anchor="w").pack(side="left")
+        hotkey_mode_menu = ctk.CTkOptionMenu(
+            hotkey_mode_row, values=list(hotkey_mode_labels.values()), width=148,
+            height=30, corner_radius=10, fg_color="#141414",
+            button_color="#252525", button_hover_color="#303030",
+            text_color=TEXT, font=font_label)
+        hotkey_mode_menu.pack(side="right")
+        hotkey_mode_hint = ctk.CTkLabel(
+            hotkeys_inner, text="", text_color=DIM, font=font_caption,
+            anchor="w", justify="left", wraplength=430)
+        hotkey_mode_hint.pack(fill="x", pady=(0, 8))
+
+        hotkey_feedback_label = ctk.CTkLabel(
+            hotkeys_inner, text="", text_color=DIM, font=font_caption,
+            anchor="w", justify="left", wraplength=430)
+
+        def hotkey_feedback(text, color=DIM):
+            hotkey_feedback_label.configure(text=text, text_color=color)
+            if text:
+                hotkey_feedback_label.pack(fill="x", pady=(5, 2))
+            else:
+                hotkey_feedback_label.pack_forget()
+
+        def refresh_hotkey_widgets():
+            selected = hotkey_settings_controller.settings
+            for action, button in hotkey_buttons.items():
+                if hotkey_capture_state["action"] is action:
+                    button.configure(
+                        text=self._t("hotkey_capture_prompt"),
+                        fg_color="#303030")
+                else:
+                    button.configure(
+                        text=selected.definition(action).display,
+                        fg_color="#242424")
+            hotkey_mode_menu.set(hotkey_mode_labels[selected.activation_mode])
+            if hotkey_settings_controller.push_to_talk_supported:
+                hotkey_mode_hint.configure(
+                    text=self._t("hotkey_toggle_hint"), text_color=DIM)
+            else:
+                hotkey_mode_hint.configure(
+                    text=self._t("hotkey_ptt_unsupported"), text_color="#c79b63")
+
+        def cancel_hotkey_capture(_event=None):
+            if hotkey_capture_state["action"] is not None:
+                hotkey_capture_state["action"] = None
+                refresh_hotkey_widgets()
+                hotkey_feedback("")
+            return "break"
+
+        def capture_hotkey(action):
+            hotkey_capture_state["action"] = action
+            refresh_hotkey_widgets()
+            hotkey_feedback(self._t("hotkey_capture_hint"))
+            win.focus_force()
+            hotkey_buttons[action].focus_set()
+
+        def capture_hotkey_event(event):
+            action = hotkey_capture_state["action"]
+            if action is None:
+                return
+            if str(getattr(event, "keysym", "")).lower() in {"escape", "esc"}:
+                return cancel_hotkey_capture(event)
+            if str(getattr(event, "keysym", "")).lower() in {
+                    "alt_l", "alt_r", "control_l", "control_r",
+                    "shift_l", "shift_r", "win_l", "win_r"}:
+                hotkey_feedback(self._t("hotkey_capture_hint"))
+                return "break"
+            try:
+                selected = hotkey_settings_controller.capture_event(action, event)
+            except HotkeyValidationError as error:
+                message_key = (
+                    "hotkey_conflict" if getattr(error, "code", "") == "conflict"
+                    else "hotkey_unsupported")
+                hotkey_feedback(
+                    self._t(message_key).format(error=str(error)), "#d17878")
+                return "break"
+            hotkey_capture_state["action"] = None
+            refresh_hotkey_widgets()
+            hotkey_feedback(
+                self._t("hotkey_captured").format(
+                    binding=selected.definition(action).display), "#69c58a")
+            refresh_dirty_state()
+            return "break"
+
+        def reset_hotkey(action):
+            try:
+                hotkey_settings_controller.reset(action)
+            except HotkeyValidationError as error:
+                hotkey_feedback(
+                    self._t("hotkey_conflict").format(error=str(error)),
+                    "#d17878")
+                return
+            hotkey_capture_state["action"] = None
+            refresh_hotkey_widgets()
+            hotkey_feedback("")
+            refresh_dirty_state()
+
+        def reset_all_hotkeys():
+            hotkey_capture_state["action"] = None
+            hotkey_settings_controller.reset_all()
+            refresh_hotkey_widgets()
+            hotkey_feedback("")
+            refresh_dirty_state()
+
+        def select_hotkey_mode(label):
+            mode = hotkey_mode_by_label.get(label, ActivationMode.TOGGLE)
+            try:
+                hotkey_settings_controller.set_activation_mode(mode)
+            except HotkeyValidationError:
+                hotkey_mode_menu.set(hotkey_mode_labels[
+                    hotkey_settings_controller.settings.activation_mode])
+                hotkey_feedback(self._t("hotkey_ptt_unsupported"), "#c79b63")
+                return
+            refresh_hotkey_widgets()
+            hotkey_feedback("")
+            refresh_dirty_state()
+
+        for action, label_key in hotkey_action_labels.items():
+            row = ctk.CTkFrame(hotkeys_inner, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(
+                row, text=self._t(label_key), text_color=TEXT,
+                font=font_label, anchor="w").pack(side="left", fill="x", expand=True)
+            reset_button = ctk.CTkButton(
+                row, text=self._t("hotkey_reset"), width=64, height=28,
+                corner_radius=14, fg_color="transparent", hover_color="#242424",
+                border_width=1, border_color="#333333", text_color=DIM,
+                font=font_caption, command=lambda a=action: reset_hotkey(a))
+            reset_button.pack(side="right", padx=(6, 0))
+            binding_button = ctk.CTkButton(
+                row, text="", width=128, height=30, corner_radius=10,
+                fg_color="#242424", hover_color="#303030", text_color=TEXT,
+                font=font_label, command=lambda a=action: capture_hotkey(a))
+            binding_button.pack(side="right")
+            hotkey_buttons[action] = binding_button
+
+        hotkey_mode_menu.configure(command=select_hotkey_mode)
+        hotkey_reset_all_button.configure(command=reset_all_hotkeys)
+        win.bind("<KeyPress>", capture_hotkey_event, add="+")
+        win.bind("<Escape>", cancel_hotkey_capture, add="+")
+        refresh_hotkey_widgets()
+
         autostart_switch = ctk.CTkSwitch(
             preferences_inner, text=self._t("autostart"), height=26,
             switch_width=40, switch_height=20, corner_radius=10,
@@ -9233,6 +9700,7 @@ class App(ctk.CTk):
             "refinement": (
                 selected_refinement["provider"], selected_refinement["model"]),
             "workflows": workflow_controller.workflows,
+            "hotkeys": hotkey_settings_controller.settings,
             "autostart": bool(autostart_switch.get()),
             "history_enabled": bool(history_enabled_switch.get()),
             "history_retention_days": _history_retention_days(
@@ -9245,6 +9713,7 @@ class App(ctk.CTk):
                 "refinement": (
                     selected_refinement["provider"], selected_refinement["model"]),
                 "workflows": workflow_controller.workflows,
+                "hotkeys": hotkey_settings_controller.settings,
                 "autostart": bool(autostart_switch.get()),
                 "history_enabled": bool(history_enabled_switch.get()),
                 "history_retention_days": _history_retention_days(
@@ -9276,12 +9745,14 @@ class App(ctk.CTk):
                 workflow_controller.config,
                 workflows=saved_settings["workflows"],
             )
+            hotkey_settings_controller.replace(saved_settings["hotkeys"])
             load_workflow_form(workflow_scope_state["scope"])
             model_menu_visible["value"] = False
             menu_shell.pack_forget()
             refinement_menu_visible["value"] = False
             refinement_menu_shell.pack_forget()
             refresh_model_ui(rebuild_menu=False)
+            refresh_hotkey_widgets()
             refresh_dirty_state()
 
         undo_button.configure(command=restore_saved_settings)
@@ -10499,7 +10970,8 @@ class App(ctk.CTk):
         def apply_settings():
             if apply_feedback_job["active"]:
                 return
-            try:
+
+            def apply_general_settings():
                 store_workflow_form()
                 _apply_settings_transaction(
                     selected, selected_refinement, active_options(),
@@ -10518,10 +10990,49 @@ class App(ctk.CTk):
                 workflow_controller.reload()
                 load_workflow_form(workflow_scope_state["scope"])
                 history_records()
+
+            def restore_after_failed_apply():
+                # The outer transaction has restored APP_CONFIG and the
+                # repository before this callback runs. Rebuild live runtime
+                # objects and the Settings draft from the unchanged baseline.
+                self._configure_history_store()
+                try:
+                    workflow_controller.reload()
+                except (OSError, ValueError, ProviderError):
+                    pass
+                restore_saved_settings()
+                history_records()
+
+            def restore_hotkeys_after_failed_apply():
+                # The native transaction already rolls back on its own error;
+                # reapply the saved set as a final guard for adapters that may
+                # have failed after changing their runtime registration.
+                self.apply_hotkey_settings(saved_settings["hotkeys"])
+
+            try:
+                _apply_settings_with_hotkeys_transaction(
+                    apply_general_settings,
+                    lambda: self.apply_hotkey_settings(hotkey_settings_controller.settings),
+                    repositories=self.repositories,
+                    restore_hotkeys=restore_hotkeys_after_failed_apply,
+                    on_rollback=restore_after_failed_apply)
+            except (HotkeyRegistrationError, HotkeyValidationError) as error:
+                if getattr(error, "code", "") == "unsupported_activation_mode":
+                    message = self._t("hotkey_ptt_unsupported")
+                elif getattr(error, "code", "") == "conflict":
+                    message = self._t("hotkey_conflict").format(error=str(error))
+                else:
+                    message = self._t("hotkey_registration_failed").format(
+                        error=str(error))
+                hotkey_feedback(message, "#d17878")
+                return
             except (OSError, ValueError, ProviderError):
                 return
             saved_settings.clear()
             saved_settings.update(current_settings())
+            hotkey_feedback("")
+            self.sub.configure(text=self._recording_hotkey_hint(
+                stopping=self.app_state == "recording"))
             refresh_dirty_state()
             animate_apply_confirmation()
         apply_button.configure(command=apply_settings)

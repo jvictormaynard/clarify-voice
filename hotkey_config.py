@@ -367,6 +367,22 @@ class HotkeySettingsController:
             self._settings = candidate
             return candidate
 
+    def capture_event(self, action: HotkeyAction | str, event: Any) -> HotkeySettings:
+        """Capture one Tk key event after normalising it to a binding.
+
+        Keeping event parsing here gives the Settings UI a small, deterministic
+        seam: invalid keys and conflicts are rejected before the draft changes.
+        """
+        return self.capture(action, HotkeyDefinition.from_event(event))
+
+    def replace(self, settings: HotkeySettings | Mapping[str, Any]) -> HotkeySettings:
+        """Replace the draft when the Settings window restores its baseline."""
+        with self._lock:
+            self._settings = (
+                settings if isinstance(settings, HotkeySettings)
+                else HotkeySettings.from_mapping(settings))
+            return self._settings
+
     def reset(self, action: HotkeyAction | str) -> HotkeySettings:
         with self._lock:
             self._settings = self._settings.reset(action)

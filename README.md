@@ -128,11 +128,16 @@ their current limitations.
 
 | Shortcut | Action |
 | --- | --- |
-| `Alt + L` | Start or stop recording |
+| `Alt + L` (default) | Start or stop recording |
 | `Esc` | Cancel an active recording |
-| `Alt + K` | Rewrite the selected text |
-| `Alt + T` | Translate the selected text |
-| `Alt + R` | Show or hide ClarifyVoice |
+| `Alt + K` (default) | Rewrite the selected text |
+| `Alt + T` (default) | Translate the selected text |
+| `Alt + R` (default) | Show or hide ClarifyVoice |
+
+All four global shortcuts can be captured, validated, and reset in **Settings**.
+The packaged native layer currently supports safe toggle activation only;
+push-to-talk remains visibly unavailable until a key-release-capable adapter is
+implemented.
 
 The floating bar remains available through the Windows system tray. Click the
 tray icon to restore it, or right-click the icon to open ClarifyVoice or quit.
