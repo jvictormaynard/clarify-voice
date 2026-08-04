@@ -240,7 +240,7 @@ cleanup. Settings integration, hot-plug handling, audio cues, and packaged
 Windows acceptance remain follow-up work so the existing `Recorder` and
 `RecordingSession` cleanup/cancellation contract is not duplicated here.
 
-### `history_store.py` (typed groundwork, not user-facing)
+### `history_store.py` and `history_integration.py`
 
 Defines the opt-in, local-only transcription history boundary for issue #53.
 `HistoryRecord` accepts raw/refined text, workflow, timestamp, provider/model
@@ -250,9 +250,12 @@ uses a versioned JSON document with atomic same-directory writes, recovers an
 intact interrupted snapshot when the primary is missing, enforces configurable
 retention, supports delete-all, and exports TXT, Markdown, or JSON. The first
 version intentionally avoids SQLite because the staged boundary has no search,
-sync, or high-volume requirement. Settings/UI wiring, copy/retry actions,
-per-user path selection, and packaged Windows acceptance remain follow-up work;
-this module must not be read as a product-level history claim.
+sync, or high-volume requirement. `history_integration.py` connects that
+boundary to versioned config, app startup recovery/retention, the dictation
+service, and the modern Settings surface. The UI supports enable/disable,
+retention, delete-all, export, and copy. Retry remains unavailable by design
+because audio is never retained. Packaged Windows acceptance remains separate
+and is not claimed by this source-level integration.
 
 ### `desktop_state.py`
 
@@ -411,6 +414,7 @@ fallback is intentionally explicit; it does not claim OS-backed protection.
 | Settings | `%APPDATA%\ClarifyVoice\config.json` | Provider endpoints, models, selections, and UI preferences; no API keys |
 | Provider secrets | `%APPDATA%\ClarifyVoice\secrets.dpapi.json` | Current-user DPAPI ciphertext keyed by provider |
 | Usage stats | `%APPDATA%\ClarifyVoice\usage_stats.json` | Counts, durations, model identifiers, and estimates; no transcript text |
+| Optional transcription history | `%APPDATA%\ClarifyVoice\history.json` | Versioned raw/refined/status/provider/model/error records only after explicit opt-in; no API keys, provider payloads, audio, or usage events |
 | Dictionary and snippets | `%APPDATA%\ClarifyVoice\dictionary.json` | Versioned local terms, aliases, and bounded replacement rules; no credentials or usage events |
 | Working audio | `%APPDATA%\ClarifyVoice\clarifyvoice-recording-*.wav` | One unique session-owned file, deleted after the provider no longer needs it |
 

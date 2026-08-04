@@ -216,6 +216,24 @@ class WorkflowConfig(Protocol):
     def recording_usage_context(self, mode: str) -> dict[str, Any]: ...
 
 
+class HistoryGateway(Protocol):
+    """Best-effort sink for opt-in transcription history records."""
+
+    @property
+    def enabled(self) -> bool: ...
+
+    def record_transcription(
+        self,
+        *,
+        raw_text: str | None,
+        refined_text: str | None,
+        provider: str,
+        model: str,
+        status: str,
+        error: str | None,
+    ) -> None: ...
+
+
 class StatisticsGateway(Protocol):
     def record_dictation(
         self, context: dict[str, Any], duration_seconds: float, result: str
@@ -274,6 +292,11 @@ class _Session:
     target_language: str = ""
     usage_context: dict[str, Any] = field(default_factory=dict)
     recording: RecordingSessionGateway | None = None
+    history_raw_text: str | None = None
+    history_refined_text: str | None = None
+    history_provider: str = "unknown"
+    history_model: str = "unknown"
+    history_recorded: bool = False
     # A publication is claimed under the service lock, then all gateway calls
     # happen after the lock is released.  This makes cancellation a clear
     # winner while a publication is still queued, while still preventing
@@ -295,6 +318,7 @@ class WorkflowService:
         statistics: StatisticsGateway,
         scheduler: Scheduler,
         clock: Clock | None = None,
+        history: HistoryGateway | None = None,
     ):
         self._provider = provider
         self._audio = audio
@@ -303,6 +327,7 @@ class WorkflowService:
         self._statistics = statistics
         self._scheduler = scheduler
         self._clock = clock or SystemClock()
+        self._history = history
         self._lock = threading.RLock()
         self._next_operation_id = 1
         self._session: _Session | None = None
@@ -376,6 +401,11 @@ class WorkflowService:
             else:
                 self._session = None
                 self._state = WorkflowState()
+        if (session is not None
+                and session.kind is WorkflowKind.DICTATION
+                and not deferred_release):
+            self._record_history(
+                session, status="cancelled", error="Recording cancelled")
         if session and session.recording is not None:
             self._run_recording(session.recording, session.recording.cancel)
         if not deferred_release:
@@ -466,6 +496,91 @@ class WorkflowService:
     @staticmethod
     def _provider_failed(result: str | None) -> bool:
         return not result
+
+    def _history_is_enabled(self) -> bool:
+        if self._history is None:
+            return False
+        try:
+            # Gate metadata capture as well as persistence.  A compatible
+            # test/future gateway without the property remains opt-in by
+            # construction and is treated as enabled.
+            return getattr(self._history, "enabled", True) is not False
+        except Exception:
+            return False
+
+    @staticmethod
+    def _text_metadata(value: Any) -> str | None:
+        return value if isinstance(value, str) and value else None
+
+    def _capture_history_result(
+        self, session: _Session, result: TranscriptionResult
+    ) -> None:
+        if not self._history_is_enabled():
+            return
+        provider = getattr(result, "provider_id", session.history_provider)
+        model = getattr(result, "model", session.history_model)
+        session.history_provider = str(provider or "unknown").strip() or "unknown"
+        session.history_model = str(model or "unknown").strip() or "unknown"
+        raw_text = self._text_metadata(getattr(result, "raw_text", None))
+        refined_text = self._text_metadata(getattr(result, "refined_text", None))
+        final_text = self._text_metadata(getattr(result, "text", None))
+        if raw_text is None and final_text is not None:
+            raw_text = final_text
+        session.history_raw_text = raw_text
+        session.history_refined_text = refined_text
+
+    def _capture_history_error(self, session: _Session, error: Exception) -> None:
+        if not self._history_is_enabled():
+            return
+        provider = getattr(error, "provider_id", session.history_provider)
+        model = getattr(error, "model", session.history_model)
+        session.history_provider = str(provider or "unknown").strip() or "unknown"
+        session.history_model = str(model or "unknown").strip() or "unknown"
+        raw_text = self._text_metadata(getattr(error, "raw_text", None))
+        refined_text = self._text_metadata(getattr(error, "refined_text", None))
+        if raw_text is not None:
+            session.history_raw_text = raw_text
+        if refined_text is not None:
+            session.history_refined_text = refined_text
+
+    def _record_history(
+        self,
+        session: _Session,
+        *,
+        status: str,
+        error: Exception | str | None = None,
+    ) -> None:
+        if not self._history_is_enabled() or session.history_recorded:
+            return
+        session.history_recorded = True
+        error_text = None if error is None else str(error).strip()[:400]
+        effective_status = str(status or "error").strip().lower() or "error"
+        if effective_status == "error" and (
+            session.history_raw_text is not None
+            or session.history_refined_text is not None
+        ):
+            effective_status = "partial"
+        try:
+            self._history.record_transcription(
+                raw_text=session.history_raw_text,
+                refined_text=session.history_refined_text,
+                provider=session.history_provider,
+                model=session.history_model,
+                status=effective_status,
+                error=error_text,
+            )
+        except Exception:
+            # History must never make a transcription or clipboard result fail.
+            pass
+
+    @staticmethod
+    def _fail_recording(session: _Session, error: Exception) -> None:
+        if session.recording is None:
+            return
+        try:
+            session.recording.fail(error)
+        except Exception:
+            pass
 
     def _restore_selection(self, capture: SelectionCapture | None) -> None:
         """Return capture ownership even after the workflow was invalidated."""
@@ -567,6 +682,12 @@ class WorkflowService:
         session.language = command.language
         session.started_at = self._clock.time()
         session.usage_context = self._config.recording_usage_context(command.mode)
+        session.history_provider = str(
+            session.usage_context.get("provider", "unknown") or "unknown"
+        ).strip() or "unknown"
+        session.history_model = str(
+            session.usage_context.get("model", "unknown") or "unknown"
+        ).strip() or "unknown"
         session.recording = recording
         self._transition(session, WorkflowPhase.RECORDING)
         self._run_recording(
@@ -587,11 +708,9 @@ class WorkflowService:
                     and self._state.phase is WorkflowPhase.RECORDING
                 )
             if should_fail:
-                if session.recording is not None:
-                    try:
-                        session.recording.fail(error)
-                    except Exception:
-                        pass
+                self._capture_history_error(session, error)
+                self._fail_recording(session, error)
+                self._record_history(session, status="error", error=error)
                 if isinstance(error, MicrophoneUnavailableError):
                     self._transition(
                         session, WorkflowPhase.MICROPHONE_UNAVAILABLE
@@ -642,21 +761,28 @@ class WorkflowService:
             provider_result = self._provider.transcribe(
                 audio_source, session.mode, session.language
             )
+            self._capture_history_result(session, provider_result)
             result = provider_result.text
             if not self._is_current(session.operation_id):
                 return
             if self._provider_failed(result):
-                session.recording.fail(
-                    RuntimeError("Transcription returned no text")
-                )
+                error = RuntimeError("Transcription returned no text")
+                self._fail_recording(session, error)
+                self._record_history(session, status="error", error=error)
                 self._transition(session, WorkflowPhase.FAILED, status_key="error")
                 return
             if not self._is_current(session.operation_id):
                 return
             completion = session.recording.complete()
             if completion is False:
+                self._record_history(
+                    session,
+                    status="partial",
+                    error="Recording session did not complete",
+                )
                 return
             session.elapsed_seconds = elapsed
+            self._record_history(session, status="success")
             session.publication_finished = False
             if not self._transition(
                 session,
@@ -672,29 +798,23 @@ class WorkflowService:
         except MicrophoneUnavailableError as error:
             if not self._is_current(session.operation_id):
                 return
-            if session.recording is not None:
-                try:
-                    session.recording.fail(error)
-                except Exception:
-                    pass
+            self._capture_history_error(session, error)
+            self._fail_recording(session, error)
+            self._record_history(session, status="error", error=error)
             self._transition(session, WorkflowPhase.MICROPHONE_UNAVAILABLE)
         except NoUsableAudioError as error:
             if not self._is_current(session.operation_id):
                 return
-            if session.recording is not None:
-                try:
-                    session.recording.fail(error)
-                except Exception:
-                    pass
+            self._capture_history_error(session, error)
+            self._fail_recording(session, error)
+            self._record_history(session, status="error", error=error)
             self._transition(session, WorkflowPhase.FAILED, status_key="no_audio")
         except Exception as error:
             if not self._is_current(session.operation_id):
                 return
-            if session.recording is not None:
-                try:
-                    session.recording.fail(error)
-                except Exception:
-                    pass
+            self._capture_history_error(session, error)
+            self._fail_recording(session, error)
+            self._record_history(session, status="error", error=error)
             self._transition(session, WorkflowPhase.FAILED, status_key="error")
 
     def _write_dictation_if_current(
@@ -745,6 +865,8 @@ class WorkflowService:
                 return False
             self._session = None
             self._state = WorkflowState()
+        self._record_history(
+            session, status="cancelled", error="Recording cancelled")
         if session.recording is not None:
             self._run_recording(session.recording, session.recording.cancel)
         self._scheduler.call_soon(lambda: self._deliver_ready())

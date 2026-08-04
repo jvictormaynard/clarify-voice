@@ -110,6 +110,11 @@ class TranscriptionResult:
     text: str
     provider_id: str
     model: str
+    # Optional workflow metadata used by the opt-in local history boundary.
+    # Provider adapters may leave these unset; the runtime falls back to the
+    # final text as the raw transcript when no separate refinement exists.
+    raw_text: str | None = None
+    refined_text: str | None = None
 
 
 @dataclass(frozen=True)

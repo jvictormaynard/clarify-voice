@@ -1,18 +1,18 @@
-# Local transcription history boundary
+# Local transcription history
 
-This document describes the UI-independent groundwork for issue #53. The
-history boundary is deliberately not connected to `app.py`, Settings, or the
-packaged Windows executable in this stage. It is therefore a `Part of #53`
-implementation, not a claim that the product currently exposes a history
-toggle.
+Issue #53 integrates an opt-in, local-only transcription history boundary.
+History remains disabled by default and is connected to the normal dictation
+workflow only after the user enables it in Settings. The packaged Windows
+acceptance pass is still pending; this implementation does not claim packaged
+Windows acceptance.
 
 ## Privacy contract
 
 `HistoryStore` is disabled unless a caller explicitly constructs it with
 `enabled=True`. A disabled store does not read the history path, create a
 directory, or retain transcript text in memory. `delete_all()` remains
-available while disabled so a future Settings toggle can erase an existing
-history immediately.
+available while disabled so disabling the Settings toggle can erase an
+existing history immediately.
 
 Each `HistoryRecord` contains only:
 
@@ -77,10 +77,33 @@ The export destination must differ from the history file. Export is unavailable
 while the store is disabled, and neither export nor persistence includes
 telemetry or provider credentials.
 
-## Follow-up needed for #53
+## Application integration
 
-The application still needs a visible, reversible Settings toggle, a chosen
-per-user data path, startup construction of the store, copy/retry commands,
-and packaged Windows acceptance covering restart recovery and proving that
-usage statistics contain no transcript text. Those changes belong in a later
-integration PR and must keep the default-off behavior above.
+`repositories.AppConfig.history` stores the versioned settings object:
+
+```json
+{
+  "schema_version": 1,
+  "enabled": false,
+  "retention_days": 30
+}
+```
+
+`App` creates `HistorySettingsController` beside the injected configuration
+repository and calls `startup()` before the workflow service starts. When
+enabled, that startup read performs interrupted-write recovery and retention
+cleanup. The history snapshot lives beside `config.json` as `history.json`.
+
+`WorkflowService` receives the controller as a best-effort history gateway.
+Dictation records raw text, optional refined text, status, provider/model
+identifiers, and a bounded error summary. A storage failure is surfaced to the
+Settings page but cannot fail transcription, clipboard delivery, or usage
+statistics. The statistics repository remains anonymous and does not receive
+raw or refined transcript text.
+
+The modern Settings surface provides enable/disable, retention, delete-all,
+export, and copy controls. Retry is intentionally disabled and explained in
+the UI because audio is never retained. A future packaged acceptance pass
+should cover a real Windows restart, recovery from an interrupted write,
+retention/delete/export behavior, and the absence of transcript text from
+usage statistics.

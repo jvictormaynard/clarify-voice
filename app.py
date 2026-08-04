@@ -49,6 +49,7 @@ from dictionary_snippets import (
     LocalDictionarySnippetsRepository,
 )
 from dictionary_settings import DictionarySettingsController
+from history_integration import HistorySettingsController
 from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
 from local_asr_product import (
     LocalASRProductController,
@@ -180,6 +181,7 @@ DATA_DIR = (Path(os.environ.get("APPDATA", Path.home())) / "ClarifyVoice") if IS
 AUDIO_PATH = DATA_DIR / "temp_recording.wav"
 CONFIG_PATH = DATA_DIR / "config.json"
 STATS_PATH = DATA_DIR / "usage_stats.json"
+HISTORY_PATH = DATA_DIR / "history.json"
 DICTIONARY_PATH = DATA_DIR / "dictionary.json"
 HTTP_LOG_DIR = DATA_DIR / "logs"
 _STATS_LOCK = threading.Lock()
@@ -211,6 +213,11 @@ DEFAULT_CONFIG = {
     "refinement_model": os.environ.get("REFINEMENT_MODEL", ""),
     "ui_mode": "prompt",
     "ui_language": "en",
+    "history": {
+        "schema_version": 1,
+        "enabled": False,
+        "retention_days": 30,
+    },
 }
 
 # Persistence is injected through this small boundary.  The legacy mapping
@@ -568,6 +575,13 @@ def _storage_repositories(repositories=None):
             usage_stats=LocalUsageStatsRepository(STATS_PATH),
         )
     return APP_REPOSITORIES
+
+
+def _history_path(repositories=None) -> Path:
+    """Keep injected app repositories and history in the same data directory."""
+    config = _storage_repositories(repositories).config
+    configured_path = getattr(config, "path", CONFIG_PATH)
+    return Path(configured_path).parent / HISTORY_PATH.name
 
 
 def _load_usage_events(repositories=None) -> list[dict]:
@@ -2226,6 +2240,7 @@ STRINGS = {
         "settings_section": "Settings", "workflows_section": "Workflows",
         "models_section": "Models",
         "providers_section": "Providers", "statistics_section": "Statistics",
+        "history_section": "History",
         "dictionary_section": "Dictionary",
         "dictionary_title": "Dictionary & snippets",
         "dictionary_subtitle": "Keep vocabulary and text expansions on this device.",
@@ -2263,6 +2278,26 @@ STRINGS = {
         "dictionary_file": "Dictionary JSON",
         "statistics_title": "Usage overview",
         "statistics_subtitle": "Local totals from successful ClarifyVoice actions",
+        "history_title": "Local transcription history",
+        "history_subtitle": "Optional records stay on this device and never include audio, API keys, or provider payloads.",
+        "history_enabled": "Save transcription history",
+        "history_enabled_hint": "Disabled by default. Turning this off deletes the stored history.",
+        "history_retention": "Retention",
+        "history_retention_hint": "Older records are removed automatically when the store is loaded.",
+        "history_forever": "Forever",
+        "history_delete_all": "Delete all",
+        "history_delete_confirm": "Delete all local transcription history? This cannot be undone.",
+        "history_export": "Export",
+        "history_copy": "Copy",
+        "history_empty": "No transcription history yet.",
+        "history_disabled": "History is disabled. Nothing is retained.",
+        "history_saved": "History settings saved.",
+        "history_deleted": "History deleted.",
+        "history_exported": "History exported.",
+        "history_error": "History unavailable: {error}",
+        "history_retry": "Retry unavailable",
+        "history_retry_hint": "Audio is never stored, so a past recording cannot be retried.",
+        "history_file": "History export",
         "stat_recordings": "Recordings", "stat_recording_time": "Recording time",
         "stat_estimated_cost": "Estimated cost", "stat_words": "Words transcribed",
         "most_used_models": "Most used models", "no_statistics": "No usage recorded yet",
@@ -2706,6 +2741,104 @@ for _locale, _translations in _DICTIONARY_TRANSLATIONS.items():
     STRINGS[_locale].update(_translations)
 del _locale, _translations, _DICTIONARY_TRANSLATIONS
 
+_HISTORY_TRANSLATIONS = {
+    "pt": {
+        "history_section": "Histórico",
+        "history_title": "Histórico local de transcrição",
+        "history_subtitle": "Registros opcionais ficam neste dispositivo e nunca incluem áudio, chaves de API ou payloads do provedor.",
+        "history_enabled": "Salvar histórico de transcrição",
+        "history_enabled_hint": "Desativado por padrão. Desativar remove o histórico armazenado.",
+        "history_retention": "Retenção",
+        "history_retention_hint": "Registros antigos são removidos quando o armazenamento é carregado.",
+        "history_forever": "Para sempre",
+        "history_delete_all": "Excluir tudo",
+        "history_delete_confirm": "Excluir todo o histórico local de transcrição? Esta ação não pode ser desfeita.",
+        "history_export": "Exportar",
+        "history_copy": "Copiar",
+        "history_empty": "Ainda não há histórico de transcrição.",
+        "history_disabled": "O histórico está desativado. Nada é retido.",
+        "history_saved": "Configurações do histórico salvas.",
+        "history_deleted": "Histórico excluído.",
+        "history_exported": "Histórico exportado.",
+        "history_error": "Histórico indisponível: {error}",
+        "history_retry": "Repetição indisponível",
+        "history_retry_hint": "O áudio nunca é armazenado, então uma gravação antiga não pode ser repetida.",
+        "history_file": "Exportação do histórico",
+    },
+    "es": {
+        "history_section": "Historial",
+        "history_title": "Historial local de transcripciones",
+        "history_subtitle": "Los registros opcionales permanecen en este dispositivo y nunca incluyen audio, claves API ni payloads del proveedor.",
+        "history_enabled": "Guardar historial de transcripciones",
+        "history_enabled_hint": "Desactivado por defecto. Al desactivarlo se elimina el historial guardado.",
+        "history_retention": "Retención",
+        "history_retention_hint": "Los registros antiguos se eliminan al cargar el almacenamiento.",
+        "history_forever": "Siempre",
+        "history_delete_all": "Eliminar todo",
+        "history_delete_confirm": "¿Eliminar todo el historial local de transcripciones? No se puede deshacer.",
+        "history_export": "Exportar",
+        "history_copy": "Copiar",
+        "history_empty": "Aún no hay historial de transcripciones.",
+        "history_disabled": "El historial está desactivado. No se conserva nada.",
+        "history_saved": "Configuración del historial guardada.",
+        "history_deleted": "Historial eliminado.",
+        "history_exported": "Historial exportado.",
+        "history_error": "Historial no disponible: {error}",
+        "history_retry": "Reintento no disponible",
+        "history_retry_hint": "El audio nunca se guarda, por lo que no se puede reintentar una grabación anterior.",
+        "history_file": "Exportación del historial",
+    },
+    "de": {
+        "history_section": "Verlauf",
+        "history_title": "Lokaler Transkriptionsverlauf",
+        "history_subtitle": "Optionale Einträge bleiben auf diesem Gerät und enthalten nie Audio, API-Schlüssel oder Provider-Payloads.",
+        "history_enabled": "Transkriptionsverlauf speichern",
+        "history_enabled_hint": "Standardmäßig deaktiviert. Beim Deaktivieren wird der gespeicherte Verlauf gelöscht.",
+        "history_retention": "Aufbewahrung",
+        "history_retention_hint": "Ältere Einträge werden beim Laden des Speichers automatisch entfernt.",
+        "history_forever": "Unbegrenzt",
+        "history_delete_all": "Alles löschen",
+        "history_delete_confirm": "Den gesamten lokalen Transkriptionsverlauf löschen? Dies kann nicht rückgängig gemacht werden.",
+        "history_export": "Exportieren",
+        "history_copy": "Kopieren",
+        "history_empty": "Noch kein Transkriptionsverlauf.",
+        "history_disabled": "Der Verlauf ist deaktiviert. Es wird nichts gespeichert.",
+        "history_saved": "Verlaufseinstellungen gespeichert.",
+        "history_deleted": "Verlauf gelöscht.",
+        "history_exported": "Verlauf exportiert.",
+        "history_error": "Verlauf nicht verfügbar: {error}",
+        "history_retry": "Wiederholung nicht verfügbar",
+        "history_retry_hint": "Audio wird nie gespeichert, daher kann eine frühere Aufnahme nicht wiederholt werden.",
+        "history_file": "Verlaufsexport",
+    },
+    "ru": {
+        "history_section": "История",
+        "history_title": "Локальная история транскрипций",
+        "history_subtitle": "Необязательные записи остаются на этом устройстве и никогда не содержат аудио, ключи API или данные запроса провайдера.",
+        "history_enabled": "Сохранять историю транскрипций",
+        "history_enabled_hint": "По умолчанию выключено. Выключение удаляет сохранённую историю.",
+        "history_retention": "Срок хранения",
+        "history_retention_hint": "Старые записи автоматически удаляются при загрузке хранилища.",
+        "history_forever": "Бессрочно",
+        "history_delete_all": "Удалить всё",
+        "history_delete_confirm": "Удалить всю локальную историю транскрипций? Это действие нельзя отменить.",
+        "history_export": "Экспортировать",
+        "history_copy": "Копировать",
+        "history_empty": "История транскрипций пока пуста.",
+        "history_disabled": "История выключена. Ничего не сохраняется.",
+        "history_saved": "Настройки истории сохранены.",
+        "history_deleted": "История удалена.",
+        "history_exported": "История экспортирована.",
+        "history_error": "История недоступна: {error}",
+        "history_retry": "Повтор недоступен",
+        "history_retry_hint": "Аудио никогда не сохраняется, поэтому повторить прошлую запись нельзя.",
+        "history_file": "Экспорт истории",
+    },
+}
+for _locale, _translations in _HISTORY_TRANSLATIONS.items():
+    STRINGS[_locale].update(_translations)
+del _locale, _translations, _HISTORY_TRANSLATIONS
+
 def _provider_url(base_url: str, version: str, endpoint: str) -> str:
     """Compatibility facade for the centralized adapter URL normalizer."""
     return normalize_provider_url(base_url, version, endpoint)
@@ -2816,7 +2949,8 @@ def _call_provider_audio(
         provider: str, audio_path: Path, mode: str, lang: str = "en",
         audio_bytes: bytes | None = None,
         cancel_token: CancellationToken | None = None,
-        route: WorkflowRoute | None = None) -> str:
+        route: WorkflowRoute | None = None,
+        history_metadata: dict[str, object] | None = None) -> str:
     provider = str(provider or "").strip().lower()
     try:
         metadata = PROVIDER_REGISTRY.describe(provider)
@@ -2833,6 +2967,9 @@ def _call_provider_audio(
             )
         connection = _provider_connection(provider, route)
         model = route.model_id
+        if history_metadata is not None:
+            history_metadata["provider_id"] = provider
+            history_metadata["model"] = model
         instruction = (
             TRANSCRIPTION_INSTRUCTION if mode == "transcription" else PROMPT_INSTRUCTION
         ).format(lang=LANG_NAMES.get(lang, "English"))
@@ -2848,8 +2985,12 @@ def _call_provider_audio(
             audio_bytes=audio_bytes,
         )
         request = DICTIONARY_SERVICE.apply_context(request)
-        transcript = PROVIDER_REGISTRY.transcribe(
-            provider, request, connection, cancel_token).text
+        provider_result = PROVIDER_REGISTRY.transcribe(
+            provider, request, connection, cancel_token)
+        transcript = provider_result.text
+        if history_metadata is not None:
+            history_metadata["raw_text"] = getattr(
+                provider_result, "raw_text", None) or transcript
         refinement_scope = (
             WorkflowScope.LOCAL_ASR_REFINEMENT
             if provider == LOCAL_ASR_PROVIDER_ID else WorkflowScope.REFINEMENT)
@@ -2859,16 +3000,27 @@ def _call_provider_audio(
                 and (provider != LOCAL_ASR_PROVIDER_ID
                      or bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))
                 and refinement_route.enabled):
-            transcript = _refine_transcript(
+            refined = _refine_transcript(
                 transcript, lang, cancel_token,
                 route=refinement_route)
+            transcript = refined
+            if history_metadata is not None:
+                if isinstance(refined, str) and not refined.startswith("[Error"):
+                    history_metadata["refined_text"] = refined
+                else:
+                    history_metadata["error"] = refined
         # Refinement uses a localized ``[Error: ...]`` sentinel for failures.
         # The explicit guard keeps snippets from turning that failure into a
         # successful-looking transcript before the workflow publishes it.
         if not (isinstance(transcript, str) and transcript.startswith("[Error")):
             transcript = DICTIONARY_SERVICE.expand(transcript)
+            if (history_metadata is not None
+                    and history_metadata.get("refined_text") is not None):
+                history_metadata["refined_text"] = transcript
         return transcript
     except Exception as error:
+        if history_metadata is not None:
+            history_metadata["error"] = str(error)
         try:
             metadata = PROVIDER_REGISTRY.describe(provider)
             label = metadata.display_name
@@ -3047,7 +3199,8 @@ def call_transcription_provider(
         audio_path: Path, mode: str, lang: str = "en",
         audio_bytes: bytes | None = None,
         cancel_token: CancellationToken | None = None,
-        route: WorkflowRoute | None = None) -> str:
+        route: WorkflowRoute | None = None,
+        history_metadata: dict[str, object] | None = None) -> str:
     # Recording/CLI callers retain the legacy selector behavior when no
     # route is supplied.  Typed workflow callers pass their resolved route so
     # the effective provider and model cannot be replaced by stale flat keys
@@ -3061,6 +3214,8 @@ def call_transcription_provider(
     }
     if route is not None:
         call_kwargs["route"] = route
+    if history_metadata is not None:
+        call_kwargs["history_metadata"] = history_metadata
     return _call_provider_audio(provider, audio_path, mode, lang, **call_kwargs)
 
 # ---------------------------------------------------------------------------
@@ -4097,6 +4252,21 @@ class AppWorkflowScheduler:
             raise
 
 
+def _attach_history_metadata(
+        error: Exception,
+        metadata: Mapping[str, object],
+        provider: str,
+        model: str) -> None:
+    """Carry transient transcription metadata across the provider boundary."""
+    setattr(error, "provider_id", str(
+        metadata.get("provider_id") or provider or "unknown"))
+    setattr(error, "model", str(metadata.get("model") or model or "unknown"))
+    for name in ("raw_text", "refined_text"):
+        value = metadata.get(name)
+        if isinstance(value, str) and value:
+            setattr(error, name, value)
+
+
 class AppWorkflowProvider:
     """Typed provider facade backed by the merged registry and HTTP policy."""
 
@@ -4105,19 +4275,35 @@ class AppWorkflowProvider:
         route = _workflow_route(WorkflowScope.TRANSCRIPTION)
         provider = route.provider_id
         if not route.enabled:
-            raise RuntimeError("Transcription workflow is disabled")
-        text = call_transcription_provider(
-            audio_source.audio_path,
-            mode,
-            language,
-            audio_bytes=audio_source.audio_bytes,
-            cancel_token=audio_source.cancel_token,
-            route=route,
-        )
+            error = RuntimeError("Transcription workflow is disabled")
+            _attach_history_metadata(error, {}, provider, route.model_id)
+            raise error
+        history_metadata: dict[str, object] = {}
+        try:
+            text = call_transcription_provider(
+                audio_source.audio_path,
+                mode,
+                language,
+                audio_bytes=audio_source.audio_bytes,
+                cancel_token=audio_source.cancel_token,
+                route=route,
+                history_metadata=history_metadata,
+            )
+        except Exception as error:
+            _attach_history_metadata(error, history_metadata, provider, route.model_id)
+            raise
         if not text or text.startswith("[Error"):
-            raise RuntimeError(text or "Transcription returned no text")
+            error = RuntimeError(text or "Transcription returned no text")
+            _attach_history_metadata(error, history_metadata, provider, route.model_id)
+            raise error
         model = route.model_id
-        return TranscriptionResult(text, provider, model)
+        return TranscriptionResult(
+            text,
+            provider,
+            model,
+            raw_text=(history_metadata.get("raw_text") or text),
+            refined_text=history_metadata.get("refined_text"),
+        )
 
     @staticmethod
     def rewrite(text):
@@ -5350,6 +5536,11 @@ class App(ctk.CTk):
         super().__init__()
         self.repositories = repositories or APP_REPOSITORIES
         _activate_repositories(self.repositories)
+        self._history = HistorySettingsController(
+            self.repositories.config,
+            _history_path(self.repositories),
+        )
+        self._history_startup_error = self._history.startup()
         self._clarify_visibility_target = not start_hidden
         if start_hidden:
             self.withdraw()
@@ -5421,6 +5612,7 @@ class App(ctk.CTk):
             AppWorkflowConfig(),
             AppWorkflowStatistics(self.repositories),
             AppWorkflowScheduler(self),
+            history=self._history,
         )
         self._workflow_service.subscribe(self._on_workflow_state)
         # Installed local-ASR verification hashes the published model and
@@ -8340,6 +8532,10 @@ class App(ctk.CTk):
             "models": ctk.CTkFrame(content, fg_color="transparent"),
             "workflows": ctk.CTkFrame(content, fg_color="transparent"),
             "statistics": ctk.CTkFrame(content, fg_color="transparent"),
+            "history": ctk.CTkScrollableFrame(
+                content, fg_color="transparent",
+                scrollbar_button_color="#303030",
+                scrollbar_button_hover_color="#444444"),
             "settings": ctk.CTkFrame(content, fg_color="transparent"),
             # Dictionary content is intentionally scrollable as a whole.  The
             # rows list has its own bounded viewport below, so preview and
@@ -8951,6 +9147,254 @@ class App(ctk.CTk):
                 f"{self._t('stat_rewrites')}: {summary['rewrites']}",
                 f"{self._t('stat_translations')}: {summary['translations']}",
             )))
+
+        # History is deliberately separate from the anonymous statistics
+        # page.  Its controller owns enablement, retention, recovery, and
+        # deletion so this surface never needs to touch the JSON file itself.
+        history_controller = getattr(self, "_history", None)
+        history_inner = ctk.CTkFrame(
+            pages["history"], fg_color="transparent")
+        history_inner.pack(fill="x", padx=22, pady=18)
+        ctk.CTkLabel(history_inner, text=self._t("history_title"),
+            text_color=TEXT, font=font_title, anchor="w").pack(fill="x")
+        ctk.CTkLabel(
+            history_inner, text=self._t("history_subtitle"), text_color=DIM,
+            font=font_label, anchor="w", justify="left", wraplength=430).pack(
+                fill="x", pady=(1, 10))
+
+        history_enabled_switch = ctk.CTkSwitch(
+            history_inner, text=self._t("history_enabled"), height=24,
+            switch_width=38, switch_height=19, corner_radius=10,
+            border_width=1, fg_color="#171717", progress_color="#e7e7e7",
+            button_color="#777777", text_color=TEXT, font=font_body)
+        history_enabled_switch.pack(fill="x", pady=(0, 2))
+        ctk.CTkLabel(
+            history_inner, text=self._t("history_enabled_hint"),
+            text_color="#686868", font=font_caption, anchor="w",
+            justify="left", wraplength=430).pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(history_inner, text=self._t("history_retention"),
+            text_color=DIM, font=font_label, anchor="w").pack(fill="x", padx=2)
+        history_retention_menu = ctk.CTkOptionMenu(
+            history_inner, values=["30 days", "90 days", "365 days",
+                                   self._t("history_forever")],
+            width=180, height=32, corner_radius=10, fg_color="#141414",
+            button_color="#252525", button_hover_color="#303030",
+            text_color=TEXT, font=font_body)
+        history_retention_menu.pack(anchor="w", pady=(4, 2))
+        ctk.CTkLabel(
+            history_inner, text=self._t("history_retention_hint"),
+            text_color="#686868", font=font_caption, anchor="w",
+            justify="left", wraplength=430).pack(fill="x", pady=(0, 10))
+
+        history_toolbar = ctk.CTkFrame(history_inner, fg_color="transparent")
+        history_toolbar.pack(fill="x", pady=(2, 5))
+        history_delete_button = ctk.CTkButton(
+            history_toolbar, text=self._t("history_delete_all"), width=100,
+            height=30, corner_radius=15, fg_color="transparent",
+            hover_color="#251717", border_width=1, border_color="#3a2222",
+            text_color="#b67b7b", font=font_label)
+        history_delete_button.pack(side="left")
+        history_export_button = ctk.CTkButton(
+            history_toolbar, text=self._t("history_export"), width=82,
+            height=30, corner_radius=15, fg_color="#242424",
+            hover_color="#303030", text_color=TEXT, font=font_label)
+        history_export_button.pack(side="left", padx=5)
+        history_retry_button = ctk.CTkButton(
+            history_toolbar, text=self._t("history_retry"), width=124,
+            height=30, corner_radius=15, fg_color="transparent",
+            hover_color="#151515", border_width=1, border_color="#292929",
+            text_color="#686868", font=font_label, state="disabled")
+        history_retry_button.pack(side="right")
+        ctk.CTkLabel(
+            history_inner, text=self._t("history_retry_hint"),
+            text_color="#686868", font=font_caption, anchor="w",
+            justify="left", wraplength=430).pack(fill="x", pady=(0, 8))
+
+        history_rows = ctk.CTkFrame(
+            history_inner, fg_color="#111111", corner_radius=11)
+        history_rows.pack(fill="x", pady=(0, 5))
+        history_status = ctk.CTkLabel(
+            history_inner, text="", text_color=DIM, font=font_caption,
+            anchor="w", justify="left", wraplength=430)
+        history_status.pack(fill="x", pady=(2, 0))
+        history_ui_state = {"updating": False}
+
+        def history_runtime_refresh():
+            _activate_repositories(self.repositories)
+
+        def history_retention_label(value):
+            if value is None:
+                return self._t("history_forever")
+            return f"{value} days"
+
+        def history_retention_value(label):
+            if label == self._t("history_forever"):
+                return None
+            try:
+                return int(str(label).split()[0])
+            except (TypeError, ValueError):
+                return 30
+
+        def render_history_rows(records):
+            for child in history_rows.winfo_children():
+                child.destroy()
+            if not records:
+                ctk.CTkLabel(
+                    history_rows,
+                    text=(self._t("history_disabled")
+                          if history_controller is None
+                          or not history_controller.settings.enabled
+                          else self._t("history_empty")),
+                    text_color=DIM, font=font_label, anchor="w").pack(
+                        fill="x", padx=12, pady=14)
+                return
+            for record in reversed(records):
+                row = ctk.CTkFrame(history_rows, height=58, corner_radius=9,
+                                   fg_color="#151515")
+                row.pack(fill="x", padx=5, pady=3)
+                row.pack_propagate(False)
+                timestamp = record.timestamp.astimezone().strftime(
+                    "%Y-%m-%d %H:%M")
+                preview = (record.refined_text or record.raw_text
+                           or record.error or "<not available>")
+                preview = " ".join(str(preview).split())[:92]
+                summary = ctk.CTkLabel(
+                    row, text=f"{timestamp}  ·  {record.status}  ·  {preview}",
+                    text_color=TEXT, font=font_label, anchor="w")
+                summary.pack(side="left", fill="x", expand=True, padx=10)
+
+                def copy_record(current=record):
+                    value = (current.refined_text or current.raw_text
+                             or current.error or "")
+                    if not value:
+                        return
+                    try:
+                        copy_and_paste(value, should_paste=False)
+                        history_status.configure(
+                            text=self._t("copied"), text_color="#69c58a")
+                    except Exception as error:
+                        history_status.configure(
+                            text=self._t("history_error").format(error=error),
+                            text_color="#d36f6f")
+
+                ctk.CTkButton(
+                    row, text=self._t("history_copy"), width=58, height=26,
+                    corner_radius=13, fg_color="#242424",
+                    hover_color="#303030", text_color=TEXT,
+                    font=font_caption, command=copy_record).pack(
+                        side="right", padx=(3, 7))
+
+        def refresh_history_page():
+            if history_controller is None:
+                history_status.configure(
+                    text=self._t("history_error").format(
+                        error="controller unavailable"), text_color="#d36f6f")
+                render_history_rows([])
+                return
+            error = history_controller.startup()
+            settings = history_controller.settings
+            history_ui_state["updating"] = True
+            try:
+                if settings.enabled:
+                    history_enabled_switch.select()
+                else:
+                    history_enabled_switch.deselect()
+                labels = ["30 days", "90 days", "365 days"]
+                current_label = history_retention_label(settings.retention_days)
+                if current_label not in labels:
+                    labels.append(current_label)
+                history_retention_menu.configure(values=labels)
+                history_retention_menu.set(current_label)
+            finally:
+                history_ui_state["updating"] = False
+            if error:
+                history_status.configure(
+                    text=self._t("history_error").format(error=error),
+                    text_color="#d36f6f")
+                render_history_rows([])
+                return
+            try:
+                records = history_controller.records()
+            except Exception as caught:
+                history_status.configure(
+                    text=self._t("history_error").format(error=caught),
+                    text_color="#d36f6f")
+                render_history_rows([])
+                return
+            history_status.configure(text="", text_color=DIM)
+            render_history_rows(records)
+
+        def history_setting_error(error):
+            history_status.configure(
+                text=self._t("history_error").format(error=error),
+                text_color="#d36f6f")
+            refresh_history_page()
+
+        def change_history_enabled():
+            if history_ui_state["updating"] or history_controller is None:
+                return
+            try:
+                history_controller.apply(enabled=bool(history_enabled_switch.get()))
+                history_runtime_refresh()
+                history_status.configure(
+                    text=self._t("history_saved"), text_color="#69c58a")
+                refresh_history_page()
+            except Exception as error:
+                history_setting_error(error)
+
+        def change_history_retention(label):
+            if history_ui_state["updating"] or history_controller is None:
+                return
+            try:
+                history_controller.apply(
+                    retention_days=history_retention_value(label))
+                history_runtime_refresh()
+                history_status.configure(
+                    text=self._t("history_saved"), text_color="#69c58a")
+                refresh_history_page()
+            except Exception as error:
+                history_setting_error(error)
+
+        def delete_history():
+            if history_controller is None:
+                return
+            if (messagebox is not None and not messagebox.askyesno(
+                    self._t("history_delete_all"),
+                    self._t("history_delete_confirm"), parent=win)):
+                return
+            try:
+                history_controller.delete_all()
+                history_status.configure(
+                    text=self._t("history_deleted"), text_color="#69c58a")
+                refresh_history_page()
+            except Exception as error:
+                history_setting_error(error)
+
+        def export_history():
+            if history_controller is None or filedialog is None:
+                return
+            destination = filedialog.asksaveasfilename(
+                parent=win, title=self._t("history_export"),
+                defaultextension=".json",
+                filetypes=[
+                    ("JSON", "*.json"), ("Markdown", "*.md"),
+                    ("Text", "*.txt"),
+                ])
+            if not destination:
+                return
+            try:
+                history_controller.export(destination)
+                history_status.configure(
+                    text=self._t("history_exported"), text_color="#69c58a")
+            except Exception as error:
+                history_setting_error(error)
+
+        history_enabled_switch.configure(command=change_history_enabled)
+        history_retention_menu.configure(command=change_history_retention)
+        history_delete_button.configure(command=delete_history)
+        history_export_button.configure(command=export_history)
+        refresh_history_page()
 
         # Dictionary and snippets are a local profile, independent from
         # provider credentials and usage statistics.  The controller keeps
@@ -9966,6 +10410,8 @@ class App(ctk.CTk):
             current_page["name"] = name
             if name == "statistics":
                 refresh_statistics()
+            elif name == "history":
+                refresh_history_page()
             page_frame(name).pack(fill="both", expand=True)
             section = "providers" if name.startswith("detail:") else name
             header_title.configure(text=(provider_names[name.split(":", 1)[1]]
@@ -10000,6 +10446,12 @@ class App(ctk.CTk):
             text_color=DIM, font=font_body,
             command=lambda: show_page("statistics"))
         nav_buttons["statistics"].pack(fill="x", padx=9, pady=3)
+        nav_buttons["history"] = ctk.CTkButton(sidebar,
+            text=self._t("history_section"), anchor="w", height=38,
+            corner_radius=9, fg_color="transparent", hover_color="#242424",
+            text_color=DIM, font=font_body,
+            command=lambda: show_page("history"))
+        nav_buttons["history"].pack(fill="x", padx=9, pady=3)
         nav_buttons["settings"] = ctk.CTkButton(sidebar,
             text=self._t("settings_section"), anchor="w", height=38,
             corner_radius=9, fg_color="transparent", hover_color="#242424",

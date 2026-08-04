@@ -46,7 +46,7 @@ translate selected text without opening a separate editor.
 - Gemini, OpenAI, Groq, Local Whisper, and compatible custom endpoints
 - Native Windows hotkeys and system tray integration
 - English, Portuguese, Spanish, German, and Russian interface languages
-- Local-only usage statistics without storing transcripts
+- Local-only usage statistics without storing transcripts, plus optional local transcription history
 - Bundled SoX runtime in the portable Windows build
 - No ClarifyVoice account, hosted backend, or telemetry service
 
@@ -191,6 +191,11 @@ randomized loopback sidecar. The app stores:
 - a unique temporary WAV file while processing a recording. It is deleted after
   the provider no longer needs it, including cancellation, failure, and app
   exit; it is not retained as a recording history.
+- optional transcription history in `%APPDATA%\\ClarifyVoice\\history.json` only
+  after an explicit Settings opt-in. It stores versioned raw/refined/status/
+  provider/model/error metadata, never API keys, provider payloads, or audio;
+  disable/delete-all removes the local snapshot. Retry is unavailable because
+  audio is never retained.
 
 Existing plaintext keys are migrated on first load and removed from
 `config.json` only after the encrypted copy has been read back successfully.

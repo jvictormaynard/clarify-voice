@@ -43,7 +43,7 @@ from workflow_config import (
 __all__ = [
     "AppConfig", "ApplicationRepositories", "ConfigRepository",
     "LocalConfigRepository", "LocalUsageStatsRepository", "ProviderConfig",
-    "ProviderSelection", "StartupSettings", "UIPreferences",
+    "ProviderSelection", "HistorySettings", "StartupSettings", "UIPreferences",
     "WorkflowConfig", "WorkflowConfigurationError", "WorkflowRoute",
     "WorkflowScope", "WorkflowTestResult", "environment_defaults",
     "migrate_config_payload", "normalize_workflow_scope",
@@ -54,6 +54,8 @@ __all__ = [
 
 CONFIG_SCHEMA_VERSION = 2
 STATS_SCHEMA_VERSION = 1
+HISTORY_SETTINGS_SCHEMA_VERSION = 1
+DEFAULT_HISTORY_RETENTION_DAYS = 30
 SUPPORTED_PROVIDERS = PROVIDER_IDS
 PROVIDER_SECRET_KEYS = {
     "gemini": "gemini_api_key",
@@ -139,6 +141,54 @@ class StartupSettings:
 
 
 @dataclass(frozen=True)
+class HistorySettings:
+    """Explicit, disabled-by-default local transcription history settings."""
+
+    schema_version: int = HISTORY_SETTINGS_SCHEMA_VERSION
+    enabled: bool = False
+    retention_days: int | None = DEFAULT_HISTORY_RETENTION_DAYS
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> "HistorySettings":
+        """Parse history settings conservatively, failing closed on bad data."""
+
+        if not isinstance(value, Mapping):
+            return cls()
+        version = value.get("schema_version", HISTORY_SETTINGS_SCHEMA_VERSION)
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version < 0
+            or version > HISTORY_SETTINGS_SCHEMA_VERSION
+        ):
+            return cls()
+
+        enabled = value.get("enabled", False)
+        if not isinstance(enabled, bool):
+            enabled = False
+        retention_days = value.get(
+            "retention_days", DEFAULT_HISTORY_RETENTION_DAYS)
+        if retention_days is not None and (
+            isinstance(retention_days, bool)
+            or not isinstance(retention_days, int)
+            or retention_days < 0
+        ):
+            retention_days = DEFAULT_HISTORY_RETENTION_DAYS
+        return cls(
+            schema_version=HISTORY_SETTINGS_SCHEMA_VERSION,
+            enabled=enabled,
+            retention_days=retention_days,
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "schema_version": HISTORY_SETTINGS_SCHEMA_VERSION,
+            "enabled": self.enabled,
+            "retention_days": self.retention_days,
+        }
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Versioned, typed representation of the persisted application config."""
 
@@ -153,6 +203,7 @@ class AppConfig:
     local_asr_cloud_refinement: bool = False
     hotkeys: HotkeySettings = field(default_factory=HotkeySettings.defaults)
     workflows: WorkflowConfig = field(default_factory=WorkflowConfig)
+    history: HistorySettings = field(default_factory=HistorySettings)
 
     @classmethod
     def from_mapping(
@@ -249,6 +300,7 @@ class AppConfig:
             "local_asr_cloud_refinement", False)
         if not isinstance(local_asr_cloud_refinement, bool):
             local_asr_cloud_refinement = False
+        history = HistorySettings.from_mapping(source.get("history"))
 
         supplied_hotkeys = (
             values.get("hotkeys") if isinstance(values, Mapping) else None)
@@ -388,6 +440,7 @@ class AppConfig:
             local_asr_cloud_refinement=local_asr_cloud_refinement,
             hotkeys=hotkeys,
             workflows=workflows,
+            history=history,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -416,6 +469,7 @@ class AppConfig:
             "autostart": self.startup.autostart,
             "hotkeys": self.hotkeys.to_mapping(),
             "workflows": self.workflows.to_mapping(),
+            "history": self.history.to_mapping(),
         }
 
     def to_legacy_mapping(self) -> dict[str, Any]:
@@ -853,6 +907,8 @@ def migrate_config_payload(payload: Any) -> dict[str, Any]:
             break
         version = next_version
     migrated["schema_version"] = min(version, CONFIG_SCHEMA_VERSION)
+    if version <= CONFIG_SCHEMA_VERSION:
+        migrated.setdefault("history", HistorySettings().to_mapping())
     return migrated
 
 
