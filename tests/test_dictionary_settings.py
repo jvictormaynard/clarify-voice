@@ -74,6 +74,18 @@ class DictionarySettingsControllerTests(unittest.TestCase):
         self.assertEqual(
             LocalDictionarySnippetsRepository(self.path).load(), before)
 
+    def test_aliases_with_commas_round_trip_through_edit_and_persistence(self):
+        aliases = ("Acme, Inc", "OW")
+        self.controller.add_dictionary("Acme", aliases=aliases)
+
+        self.controller.update_dictionary(
+            0, "Acme", aliases=aliases, enabled=False)
+
+        self.assertEqual(self.controller.state.dictionary[0].aliases, aliases)
+        self.assertEqual(
+            LocalDictionarySnippetsRepository(self.path).load(),
+            self.controller.state)
+
     def test_invalid_indices_are_rejected_without_writing(self):
         before = self.controller.state
         for operation in (
