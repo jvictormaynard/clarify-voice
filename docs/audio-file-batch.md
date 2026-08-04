@@ -1,8 +1,27 @@
 # Local audio-file import and bounded batch transcription
 
-`audio_file_batch.py` is the UI-independent service boundary for a future
-drag-and-drop or file-picker surface. It is intentionally a local-file
-workflow, not a download manager and not a second provider implementation.
+`audio_file_batch.py` is the UI-independent service boundary used by the
+desktop file-picker in `app.py`. It is intentionally a local-file workflow,
+not a download manager and not a second provider implementation.
+
+## Desktop file-picker
+
+The **Files** button opens a Tk/CustomTkinter window backed by
+`filedialog.askopenfilenames`, so the same surface handles one file or a
+finite batch. Before starting, the user explicitly chooses local or cloud
+execution, a provider, an audio model, and a source language. The initial
+provider/model/endpoint come from the existing transcription workflow, but
+picker changes are per-batch and are not silently persisted to Settings.
+
+`AudioFileImportController` keeps successful results when the user retries;
+the retry job contains only files that failed. Service callbacks are marshaled
+back onto Tk's event loop, and closing the window requests cooperative
+cancellation without deleting imported originals. The result panel retains
+partial transcripts and per-file errors.
+
+Standard Tk does not provide native drag-and-drop. This follow-up therefore
+does not add a new DnD dependency; packaged drag-and-drop support remains a
+separate product decision and acceptance task.
 
 ## Route selection
 
@@ -90,11 +109,12 @@ meeting capture, diarization, cloud sync, or persistent background queue.
 
 ## Acceptance evidence
 
-Deterministic tests in `tests/test_audio_file_batch.py` cover the extension
-allowlist, URL and malformed-path rejection, typed registry reuse, partial
-failures, immutable retry snapshots, bounded concurrency, cooperative
-cancellation, source preservation, converter termination, and temporary
-conversion cleanup. Packaged Windows acceptance should later add a
-real file-picker/drag-and-drop surface, representative fixtures for every
-advertised format, and offline local-ASR/cloud endpoint evidence; this issue's
-service does not claim that UI evidence.
+Deterministic tests in `tests/test_audio_file_batch.py` and
+`tests/test_audio_file_batch_ui.py` cover the extension allowlist, URL and
+malformed-path rejection, typed registry reuse, partial failures, immutable
+retry snapshots, bounded concurrency, cooperative cancellation, source
+preservation, converter termination, temporary conversion cleanup, provider
+route filtering, picker deduplication, UI retry state, and UI cancellation
+delegation. Packaged Windows acceptance still requires representative fixtures
+for every advertised format plus offline local-ASR and cloud-endpoint evidence;
+this source change does not claim that manual or packaged evidence.

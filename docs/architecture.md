@@ -215,10 +215,12 @@ another file fails. `RegistryAudioTranscriptionGateway` reuses the typed
 
 Imported paths remain user-owned. The service never deletes an original,
 resolves a URL, or creates a persistent queue; conversion directories are
-removed in a bounded `TemporaryDirectory` scope. A future Tk file-picker or
-drag-and-drop surface should marshal the callback onto the Tk loop and own only
-the presentation/lifecycle controls. Packaged UI and representative Windows
-format acceptance remain follow-up evidence, not a claim of this extraction.
+removed in a bounded `TemporaryDirectory` scope. `audio_file_batch_ui.py`
+owns only the file-picker lifecycle and retry snapshot; `app.py` marshals
+service callbacks onto the Tk loop and builds the explicit local/cloud route
+selection. Standard Tk drag-and-drop is not bundled, so DnD and representative
+Windows format/offline acceptance remain follow-up evidence, not a claim of
+this source integration.
 
 ### `microphone_controls.py`
 

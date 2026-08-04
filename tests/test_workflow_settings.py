@@ -840,6 +840,45 @@ class WorkflowOperationRoutingTests(unittest.TestCase):
             "model": "whisper-large-v3",
         })
 
+    def test_audio_import_cannot_bypass_disabled_transcription_route(self):
+        harness = SimpleNamespace(_t=lambda key: key)
+        disabled_route = app.WorkflowRoute(
+            provider_id="local_asr",
+            model_id="ggml-small",
+            enabled=False,
+            independent=True,
+        )
+        with patch.object(app, "_workflow_route", return_value=disabled_route), \
+                patch.object(app, "_provider_connection") as connection:
+            with self.assertRaisesRegex(
+                    ValueError, "audio_import_route_disabled"):
+                app.App._audio_file_import_selection(
+                    harness, "openai", "whisper-1", "en", "cloud",)
+
+        connection.assert_not_called()
+
+    def test_audio_import_selection_preserves_transcription_route_prompt(self):
+        app.APP_CONFIG["workflows"] = {
+            "transcription": {
+                "provider_id": "openai",
+                "model_id": "whisper-1",
+                "prompt": "Use the product glossary and keep speaker names.",
+                "enabled": True,
+                "independent": True,
+            },
+        }
+        harness = SimpleNamespace(_t=lambda key: key)
+        connection = SimpleNamespace(api_key="test-key")
+
+        with patch.object(app, "_provider_connection", return_value=connection):
+            selection = app.App._audio_file_import_selection(
+                harness, "openai", "whisper-1", "en", "cloud")
+
+        self.assertEqual(
+            selection.prompt,
+            "Use the product glossary and keep speaker names.",
+        )
+
     def test_effective_route_summaries_omit_prompts_and_mark_execution(self):
         app.APP_CONFIG["workflows"] = {
             "transcription": {
