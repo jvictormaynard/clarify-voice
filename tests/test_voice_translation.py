@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import unittest
 
 from provider_types import TranslationResult, TranscriptionResult
@@ -79,6 +80,45 @@ class FakeClipboard:
 
     def publish(self, text, target, disposition):
         self.published.append((text, target, disposition))
+
+
+class BlockingClipboard(FakeClipboard):
+    def __init__(self) -> None:
+        super().__init__()
+        self.publish_entered = threading.Event()
+        self.publish_release = threading.Event()
+
+    def publish(self, text, target, disposition):
+        self.publish_entered.set()
+        if not self.publish_release.wait(timeout=2):
+            raise AssertionError("test did not release clipboard publication")
+        super().publish(text, target, disposition)
+
+
+class InterleavingStateMachine(VoiceTranslationStateMachine):
+    """Pause just before the transition to expose phase/cancel races."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.transition_entered = threading.Event()
+        self.transition_release = threading.Event()
+        self.cancel_entered = threading.Event()
+        self.block_translation = False
+
+    def _set(self, **changes):
+        if (
+            self.block_translation
+            and changes.get("phase") is VoiceTranslationPhase.TRANSLATING
+        ):
+            self.transition_entered.set()
+            if not self.transition_release.wait(timeout=2):
+                raise AssertionError("test did not release state transition")
+            self.block_translation = False
+        return super()._set(**changes)
+
+    def cancel(self, *args, **kwargs):
+        self.cancel_entered.set()
+        return super().cancel(*args, **kwargs)
 
 
 class VoiceTranslationConfigTests(unittest.TestCase):
@@ -241,6 +281,7 @@ class VoiceTranslationWorkflowTests(unittest.TestCase):
                 VoiceTranslationPhase.TRANSCRIBING,
                 VoiceTranslationPhase.TRANSLATING,
                 VoiceTranslationPhase.PUBLISHING,
+                VoiceTranslationPhase.PUBLISHING,
                 VoiceTranslationPhase.COMPLETED,
             ],
         )
@@ -306,6 +347,70 @@ class VoiceTranslationConcurrencyTests(unittest.TestCase):
         machine.cancel()
         self.assertEqual(machine.state.phase, VoiceTranslationPhase.CANCELLED)
         self.assertEqual(machine.begin().operation_id, 2)
+
+    def test_default_workflows_share_global_publication_coordinator(self):
+        provider = FakeProvider()
+        first = VoiceTranslationWorkflow(
+            provider, FakeClipboard(), VoiceTranslationConfig(), clock=FakeClock()
+        )
+        second = VoiceTranslationWorkflow(
+            provider, FakeClipboard(), VoiceTranslationConfig(), clock=FakeClock()
+        )
+        self.assertIs(first.coordinator, second.coordinator)
+
+    def test_cancel_is_ignored_after_publication_claim_while_clipboard_blocks(self):
+        clipboard = BlockingClipboard()
+        workflow = VoiceTranslationWorkflow(
+            FakeProvider(),
+            clipboard,
+            VoiceTranslationConfig(),
+            clock=FakeClock(),
+            coordinator=VoiceTranslationPublicationCoordinator(),
+        )
+        outcomes = []
+        worker = threading.Thread(
+            target=lambda: outcomes.append(workflow.run(b"audio")),
+            daemon=True,
+        )
+        worker.start()
+        self.assertTrue(clipboard.publish_entered.wait(timeout=2))
+        cancelled = workflow.state_machine.cancel()
+        self.assertEqual(cancelled.phase, VoiceTranslationPhase.PUBLISHING)
+        self.assertTrue(cancelled.publication_claimed)
+        clipboard.publish_release.set()
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].phase, VoiceTranslationPhase.COMPLETED)
+        self.assertEqual(
+            outcomes[0].publication, VoiceTranslationPublication.PASTED
+        )
+
+    def test_phase_check_and_transition_are_atomic_against_cancel(self):
+        machine = InterleavingStateMachine(
+            VoiceTranslationConfig(), clock=FakeClock()
+        )
+        machine.begin()
+        machine.begin_transcription()
+        machine.block_translation = True
+        transition = threading.Thread(
+            target=lambda: machine.transcript_received("raw"),
+            daemon=True,
+        )
+        transition.start()
+        self.assertTrue(machine.transition_entered.wait(timeout=2))
+
+        cancellation = threading.Thread(target=machine.cancel, daemon=True)
+        cancellation.start()
+        self.assertTrue(machine.cancel_entered.wait(timeout=2))
+        machine.transition_release.set()
+        transition.join(timeout=2)
+        cancellation.join(timeout=2)
+
+        self.assertFalse(transition.is_alive())
+        self.assertFalse(cancellation.is_alive())
+        self.assertEqual(machine.state.phase, VoiceTranslationPhase.CANCELLED)
 
 
 if __name__ == "__main__":

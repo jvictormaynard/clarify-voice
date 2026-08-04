@@ -484,6 +484,7 @@ class VoiceTranslationState:
     translated_text: str = ""
     published_text: str = ""
     publication: VoiceTranslationPublication = VoiceTranslationPublication.NONE
+    publication_claimed: bool = False
     publication_reason: str = ""
     failure_code: str = ""
     failure_message: str = ""
@@ -558,6 +559,9 @@ class VoiceTranslationStateMachine:
                 publication=changes.pop(
                     "publication", self._state.publication
                 ),
+                publication_claimed=changes.pop(
+                    "publication_claimed", self._state.publication_claimed
+                ),
                 publication_reason=changes.pop(
                     "publication_reason", self._state.publication_reason
                 ),
@@ -598,6 +602,7 @@ class VoiceTranslationStateMachine:
                 translated_text="",
                 published_text="",
                 publication=VoiceTranslationPublication.NONE,
+                publication_claimed=False,
                 publication_reason="",
                 failure_code="",
                 failure_message="",
@@ -611,15 +616,15 @@ class VoiceTranslationStateMachine:
     def transcript_received(self, text: str) -> VoiceTranslationState:
         with self._lock:
             self._require_phase(VoiceTranslationPhase.TRANSCRIBING)
-        transcript = str(text or "").strip()
-        if not transcript:
-            return self.fail(
-                "empty_transcript", "transcription returned no usable text"
+            transcript = str(text or "").strip()
+            if not transcript:
+                return self.fail(
+                    "empty_transcript", "transcription returned no usable text"
+                )
+            return self._set(
+                phase=VoiceTranslationPhase.TRANSLATING,
+                raw_transcript=transcript,
             )
-        return self._set(
-            phase=VoiceTranslationPhase.TRANSLATING,
-            raw_transcript=transcript,
-        )
 
     def translation_started(self) -> VoiceTranslationState:
         with self._lock:
@@ -632,15 +637,15 @@ class VoiceTranslationStateMachine:
     def translation_received(self, text: str) -> VoiceTranslationState:
         with self._lock:
             self._require_phase(VoiceTranslationPhase.TRANSLATING)
-        translated = str(text or "").strip()
-        if not translated:
-            return self.fail(
-                "empty_translation", "translation returned no usable text"
+            translated = str(text or "").strip()
+            if not translated:
+                return self.fail(
+                    "empty_translation", "translation returned no usable text"
+                )
+            return self._set(
+                phase=VoiceTranslationPhase.PUBLISHING,
+                translated_text=translated,
             )
-        return self._set(
-            phase=VoiceTranslationPhase.PUBLISHING,
-            translated_text=translated,
-        )
 
     def publishing(self) -> VoiceTranslationState:
         with self._lock:
@@ -659,19 +664,19 @@ class VoiceTranslationStateMachine:
     ) -> VoiceTranslationState:
         with self._lock:
             self._require_phase(VoiceTranslationPhase.PUBLISHING)
-        phase = (
-            VoiceTranslationPhase.FAILED
-            if failure_code
-            else VoiceTranslationPhase.COMPLETED
-        )
-        return self._set(
-            phase=phase,
-            published_text=decision.text,
-            publication=decision.disposition,
-            publication_reason=decision.reason,
-            failure_code=failure_code,
-            failure_message=failure_message,
-        )
+            phase = (
+                VoiceTranslationPhase.FAILED
+                if failure_code
+                else VoiceTranslationPhase.COMPLETED
+            )
+            return self._set(
+                phase=phase,
+                published_text=decision.text,
+                publication=decision.disposition,
+                publication_reason=decision.reason,
+                failure_code=failure_code,
+                failure_message=failure_message,
+            )
 
     def fail(
         self,
@@ -686,13 +691,24 @@ class VoiceTranslationStateMachine:
                 raise VoiceTranslationStateError(
                     f"cannot fail from {self._state.phase.value}"
                 )
-        return self._set(
-            phase=VoiceTranslationPhase.FAILED,
-            publication=publication,
-            publication_reason=publication_reason,
-            failure_code=str(code),
-            failure_message=str(message),
-        )
+            return self._set(
+                phase=VoiceTranslationPhase.FAILED,
+                publication=publication,
+                publication_reason=publication_reason,
+                failure_code=str(code),
+                failure_message=str(message),
+            )
+
+    def claim_publication(self) -> VoiceTranslationState:
+        """Atomically enter the non-cancellable publication barrier."""
+
+        with self._lock:
+            self._require_phase(VoiceTranslationPhase.PUBLISHING)
+            if self._state.publication_claimed:
+                raise VoiceTranslationStateError(
+                    "voice translation publication is already claimed"
+                )
+            return self._set(publication_claimed=True)
 
     def cancel(
         self, message: str = "voice translation cancelled"
@@ -700,11 +716,19 @@ class VoiceTranslationStateMachine:
         with self._lock:
             if self._state.phase not in self._ACTIVE_PHASES:
                 return self._state
-        return self._set(
-            phase=VoiceTranslationPhase.CANCELLED,
-            failure_code="cancelled",
-            failure_message=message,
-        )
+            # Once publication is claimed, the external clipboard effect is a
+            # terminal barrier.  Cancellation is intentionally ignored so a
+            # blocked publish cannot later complete against CANCELLED state.
+            if (
+                self._state.phase is VoiceTranslationPhase.PUBLISHING
+                and self._state.publication_claimed
+            ):
+                return self._state
+            return self._set(
+                phase=VoiceTranslationPhase.CANCELLED,
+                failure_code="cancelled",
+                failure_message=message,
+            )
 
 
 @dataclass(frozen=True)
@@ -794,6 +818,12 @@ class VoiceTranslationPublicationCoordinator:
             return True
 
 
+# Global hotkeys may construct separate workflow objects.  They still need one
+# publication lock unless a caller deliberately supplies a narrower coordinator
+# for an isolated test or embedding.
+_DEFAULT_PUBLICATION_COORDINATOR = VoiceTranslationPublicationCoordinator()
+
+
 class VoiceTranslationWorkflow:
     """Run one synchronous, UI-free voice translation transaction.
 
@@ -821,7 +851,11 @@ class VoiceTranslationWorkflow:
         self.provider = provider
         self.clipboard = clipboard
         self.policy = policy or VoiceTranslationPublicationPolicy()
-        self.coordinator = coordinator or VoiceTranslationPublicationCoordinator()
+        self.coordinator = (
+            coordinator
+            if coordinator is not None
+            else _DEFAULT_PUBLICATION_COORDINATOR
+        )
         self.state_machine = VoiceTranslationStateMachine(
             self.config,
             clock=clock,
@@ -862,6 +896,14 @@ class VoiceTranslationWorkflow:
                 publication=decision.disposition,
                 publication_reason=decision.reason,
             )
+        try:
+            # Claim the state-machine barrier before taking the shared
+            # coordinator.  This ordering makes cancel-vs-publish atomic: a
+            # cancellation either wins before this point or is ignored while
+            # the external clipboard effect is in flight.
+            self.state_machine.claim_publication()
+        except VoiceTranslationStateError:
+            return self.state
         if not self.coordinator.claim(operation_id):
             return self.state_machine.fail(
                 "publication_busy",
@@ -901,15 +943,25 @@ class VoiceTranslationWorkflow:
                 self.provider.transcribe(audio_source, self.config.source_language)
             )
         except Exception as error:
+            if self.state.phase is VoiceTranslationPhase.CANCELLED:
+                return self.state
             return self.state_machine.fail(
                 "transcription_failed",
                 str(error) or type(error).__name__,
                 publication_reason=target_capture_reason,
             )
         if not raw:
-            return self.state_machine.transcript_received(raw)
+            try:
+                return self.state_machine.transcript_received(raw)
+            except VoiceTranslationStateError:
+                return self.state
 
-        self.state_machine.transcript_received(raw)
+        try:
+            self.state_machine.transcript_received(raw)
+        except VoiceTranslationStateError:
+            return self.state
+        if self.state.phase is VoiceTranslationPhase.CANCELLED:
+            return self.state
         request = VoiceTranslationRequest(
             text=raw,
             source_language=self.config.source_language,
@@ -919,7 +971,10 @@ class VoiceTranslationWorkflow:
         try:
             translated = self._text(self.provider.translate(request))
         except Exception as error:
-            self.state_machine.publishing()
+            try:
+                self.state_machine.publishing()
+            except VoiceTranslationStateError:
+                return self.state
             decision = self.policy.decide(
                 raw_transcript=raw,
                 translated_text="",
@@ -935,7 +990,10 @@ class VoiceTranslationWorkflow:
                 failure_message=str(error) or type(error).__name__,
             )
         if not translated:
-            self.state_machine.publishing()
+            try:
+                self.state_machine.publishing()
+            except VoiceTranslationStateError:
+                return self.state
             decision = self.policy.decide(
                 raw_transcript=raw,
                 translated_text="",
@@ -951,7 +1009,10 @@ class VoiceTranslationWorkflow:
                 failure_message="translation returned no usable text",
             )
 
-        self.state_machine.translation_received(translated)
+        try:
+            self.state_machine.translation_received(translated)
+        except VoiceTranslationStateError:
+            return self.state
         target_current = False
         clipboard_owned = False
         if target is not None:

@@ -106,9 +106,13 @@ translation failure or empty result produces an explicit `COPY_ONLY` decision
 containing that raw transcript. A successful translation is only `PASTED` when
 both the captured target is still current and the clipboard adapter says it
 owns the publication transaction; otherwise it is explicitly `COPY_ONLY`.
-`VoiceTranslationPublicationCoordinator` serializes external publication
-effects, so two global actions cannot paste over one another. The policy is
-side-effect free and can be reviewed independently of any desktop API.
+An atomic `claim_publication` state transition is a non-cancellable barrier:
+once the clipboard effect starts, cancellation is ignored and the eventual
+completion remains consistent with the published outcome. The application-wide
+default `VoiceTranslationPublicationCoordinator` serializes external
+publication effects across separately constructed workflow objects, so two
+global actions cannot paste over one another. The policy is side-effect free
+and can be reviewed independently of any desktop API.
 
 This is intentionally scaffolding, not the packaged feature. A follow-up must
 connect the state machine to recording, global hotkey dispatch, the focus-safe
