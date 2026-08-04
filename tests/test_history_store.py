@@ -429,7 +429,11 @@ class HistoryStoreTests(unittest.TestCase):
             temporary.write_text("{}", encoding="utf-8")
             before = path.read_bytes()
 
-            with patch.object(Path, "glob", side_effect=OSError("locked")):
+            with patch.object(
+                history_store.os,
+                "scandir",
+                side_effect=OSError("locked"),
+            ):
                 with self.assertRaises(HistoryStoreError):
                     store.delete_all()
             self.assertEqual(path.read_bytes(), before)
@@ -568,6 +572,41 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertFalse(path.exists())
             self.assertTrue(first.exists())
             self.assertTrue(second.exists())
+
+    def test_unreadable_snapshot_is_preserved_when_primary_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            candidate = root / ".history.json.unreadable.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [HistoryRecord(
+                    raw_text="must survive", timestamp=NOW,
+                    provider="openai", model="gpt-test").to_mapping()],
+            }), encoding="utf-8")
+            original_read_text = Path.read_text
+
+            def unreadable_snapshot(path_value, *args, **kwargs):
+                if path_value == candidate:
+                    raise OSError("simulated transient snapshot read failure")
+                return original_read_text(path_value, *args, **kwargs)
+
+            with patch.object(
+                history_store.Path,
+                "read_text",
+                autospec=True,
+                side_effect=unreadable_snapshot,
+            ):
+                with self.assertRaises(HistoryStoreError):
+                    HistoryStore(
+                        path,
+                        enabled=True,
+                        retention_days=None,
+                        clock=fixed_clock,
+                    ).list_records()
+
+            self.assertFalse(path.exists())
+            self.assertTrue(candidate.exists())
 
     def test_tied_snapshot_mtimes_are_preserved_when_primary_is_missing(self):
         with tempfile.TemporaryDirectory() as directory:

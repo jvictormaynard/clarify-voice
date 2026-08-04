@@ -187,6 +187,16 @@ publication ordering, shutdown cancellation, and stale-worker rejection without
 constructing Tk widgets. A small app-level harness also verifies Escape cannot
 reset the UI while a terminal publication is blocked.
 
+The voice-translation foundation is covered separately by
+`tests/test_voice_translation.py`. These tests use fake provider, clipboard,
+and monotonic-clock seams to verify language/config round trips, capability
+validation, the state sequence, raw-transcript fallback, copy-only focus and
+clipboard decisions, atomic cancellation/publication races, shared publication
+overlap serialization, and stale-worker operation-ID rejection. They do not
+claim the future recorder, hotkey, packaged Windows, restart, or three-
+application manual acceptance; those checks belong to the integration
+follow-up.
+
 ## Build
 
 ```powershell

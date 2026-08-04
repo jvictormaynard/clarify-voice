@@ -18,6 +18,7 @@ typed record and they are not included in any export format.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -618,12 +619,21 @@ def _read_json_mapping(
     path: Path,
     *,
     strict: bool = False,
+    raise_on_io: bool = False,
 ) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
-    except (OSError, TypeError, ValueError) as error:
+    except OSError as error:
+        if strict or raise_on_io:
+            message = (
+                "The history file is unreadable or corrupt"
+                if strict else "The history snapshot could not be read"
+            )
+            raise HistoryStoreError(message) from error
+        return None
+    except (TypeError, ValueError) as error:
         if strict:
             raise HistoryStoreError(
                 "The history file is unreadable or corrupt") from error
@@ -686,7 +696,12 @@ class HistoryStore:
             ) from error
         pattern = f".{self.path.name}.*.tmp"
         try:
-            return list(self.path.parent.glob(pattern))
+            with os.scandir(self.path.parent) as entries:
+                return [
+                    self.path.parent / entry.name
+                    for entry in entries
+                    if fnmatch.fnmatchcase(entry.name, pattern)
+                ]
         except OSError as error:
             raise HistoryStoreError(
                 "The history snapshots could not be enumerated") from error
@@ -711,7 +726,7 @@ class HistoryStore:
             tuple[float | None, str, Path, dict[str, Any]]
         ] = []
         for candidate in self._temporary_paths():
-            payload = _read_json_mapping(candidate)
+            payload = _read_json_mapping(candidate, raise_on_io=True)
             if payload is None:
                 self._remove_best_effort(candidate)
                 continue
