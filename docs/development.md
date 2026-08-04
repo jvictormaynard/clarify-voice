@@ -95,13 +95,67 @@ credential backend without touching the developer profile:
 .\dist\ClarifyVoice.exe secret-store-self-test
 ```
 
-The command writes non-production markers to a temporary directory, creates a
-fresh store instance to verify restart reads, then deletes every entry. It
-prints only a JSON success flag and provider names when stdout is available.
+The command writes non-production markers to a temporary directory through the
+same `LocalConfigRepository` used by the UI, creates a fresh repository/store
+instance to verify restart reads, constructs the provider connections used by
+the adapters, and then deletes every entry. It also verifies that neither the
+marker values nor `gemini_api_key`, `openai_api_key`, or `groq_api_key` are
+present in the temporary `config.json`. It prints only safe booleans, a success
+flag, and provider names when stdout is available.
 Because the release executable is a `--windowed` PyInstaller package, CI uses
 `secret-store-self-test --result-file <runner-temp-file>` and validates that
 file plus the exit code. A non-zero exit means the packaged backend is
-unavailable or failed its read-back/delete checks.
+unavailable or failed its config-isolation, read-back, provider-use, or
+delete checks.
+
+### Manual provider-key acceptance
+
+The packaged self-test is the automated acceptance gate for the storage
+boundary. It does not prove that the Settings UI, a real Windows restart, or a
+provider request can use a key. Record those remaining checks only with
+revocable, non-production credentials in a disposable Windows account or VM;
+never use a personal production key and never run this procedure against an
+existing ClarifyVoice profile.
+
+Use a temporary profile for the complete manual pass:
+
+```powershell
+$dataRoot = Join-Path ([IO.Path]::GetTempPath()) ("clarifyvoice-secret-accept-" + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $dataRoot | Out-Null
+$env:APPDATA = $dataRoot
+& .\dist\ClarifyVoice.exe
+```
+
+For each of Gemini, OpenAI, and Groq:
+
+1. In **Models → Providers**, enter a revocable test key and validate/save it
+   (use the provider's documented test endpoint or a local provider-compatible
+   fixture when available).
+2. Before closing the app, copy the path shown below and confirm that
+   `config.json` contains no provider key field and no test-key text:
+
+   ```powershell
+   $profile = Join-Path $dataRoot "ClarifyVoice"
+   $config = Get-Content (Join-Path $profile "config.json") -Raw
+   if ($config -match 'gemini_api_key|openai_api_key|groq_api_key') {
+       throw "A provider key field was written to config.json"
+   }
+   ```
+
+3. Close ClarifyVoice completely, launch the same executable again with the
+   same `$env:APPDATA`, and confirm that the provider remains active and can
+   complete one harmless validation/request. The masked key field may remain
+   blank by design; do not overwrite it with a blank value.
+4. Deactivate/clear the provider, repeat for all three providers, close the
+   app, and verify that the secure store is gone or contains no entries. Keep
+   the `config.json` assertion from step 2 after each clear.
+5. Save the exit code, executable SHA-256, Windows version, provider names, and
+   redacted screenshots/logs as evidence. Do not attach key values, request
+   headers, or the DPAPI container.
+
+Delete the disposable `$dataRoot` after the evidence is captured. This manual
+matrix is still required before closing security issue #14 because CI cannot
+provide the real-user UI/restart/request evidence.
 
 Headless orchestration tests live in `tests/test_workflows.py`. They exercise
 dictation, rewrite, translation, overlap prevention, focus-safe target capture,

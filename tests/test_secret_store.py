@@ -158,6 +158,10 @@ class SecretStoreContractTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(
             payload["providers"], ["gemini", "openai", "groq"])
+        self.assertFalse(payload["config_contains_provider_keys"])
+        self.assertTrue(payload["restart_read"])
+        self.assertTrue(payload["provider_connections_ready"])
+        self.assertTrue(payload["delete_verified"])
         self.assertNotIn("clarifyvoice-self-test", output.getvalue())
 
     def test_packaged_cli_self_test_can_write_windowed_result_file(self):
@@ -175,6 +179,10 @@ class SecretStoreContractTests(unittest.TestCase):
             self.assertEqual(output.getvalue(), "")
             payload = json.loads(result_file.read_text(encoding="utf-8"))
             self.assertTrue(payload["ok"])
+            self.assertFalse(payload["config_contains_provider_keys"])
+            self.assertTrue(payload["restart_read"])
+            self.assertTrue(payload["provider_connections_ready"])
+            self.assertTrue(payload["delete_verified"])
             self.assertNotIn("clarifyvoice-self-test", result_file.read_text(
                 encoding="utf-8"))
 
