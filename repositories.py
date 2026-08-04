@@ -899,10 +899,24 @@ class LocalConfigRepository(ConfigRepository):
         current_workflows = current_payload.get("workflows")
         incoming_workflows = incoming.get("workflows")
         merged.update(incoming)
-        if (isinstance(current_workflows, Mapping)
-                and isinstance(incoming_workflows, Mapping)):
-            workflow_values = dict(current_workflows)
-            for scope, route in incoming_workflows.items():
+        if isinstance(incoming_workflows, Mapping):
+            workflow_values: dict[str, Any] = {}
+            if isinstance(current_workflows, Mapping):
+                for raw_scope, route in current_workflows.items():
+                    workflow_values[normalize_workflow_scope(raw_scope)] = route
+            for raw_scope, route in incoming_workflows.items():
+                scope = normalize_workflow_scope(raw_scope)
+                if isinstance(route, Mapping):
+                    route = dict(route)
+                    for canonical, aliases in (
+                            ("provider_id", ("provider",)),
+                            ("model_id", ("model",)),
+                            ("custom_endpoint", ("endpoint", "base_url"))):
+                        if canonical not in route:
+                            for alias in aliases:
+                                if alias in route:
+                                    route[canonical] = route[alias]
+                                    break
                 previous_route = workflow_values.get(scope)
                 if isinstance(previous_route, Mapping) and isinstance(route, Mapping):
                     merged_route = dict(previous_route)
@@ -931,7 +945,10 @@ class LocalConfigRepository(ConfigRepository):
                 normalize_workflow_scope(scope)
                 for scope, route in incoming_workflows.items()
                 if isinstance(route, Mapping)
-                and "custom_endpoint" in route
+                and any(
+                    key in route
+                    for key in ("custom_endpoint", "endpoint", "base_url")
+                )
                 and self._mapping_route_explicitly_changed(
                     scope, route, current_workflows)
             )

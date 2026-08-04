@@ -313,6 +313,49 @@ class WorkflowConfigurationTests(unittest.TestCase):
                 "https://refinement-proxy.example/v1",
             )
 
+    def test_mapping_apply_preserves_endpoint_alias_and_scope_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            candidate = repository.load().to_mapping()
+            candidate["refinement_provider"] = "groq"
+            candidate["refinement_model"] = "llama-3.3-70b-versatile"
+            candidate["workflows"]["cleanup"] = {
+                "provider_id": "groq",
+                "model_id": "llama-3.3-70b-versatile",
+                "base_url": "https://refinement-alias-proxy.example/v1",
+            }
+
+            applied = repository.apply(candidate)
+
+            self.assertEqual(
+                applied.workflow(WorkflowScope.REFINEMENT).custom_endpoint,
+                "https://refinement-alias-proxy.example/v1",
+            )
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("cleanup", persisted["workflows"])
+
+    def test_partial_save_normalizes_scope_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+
+            repository.save({
+                "workflows": {
+                    "cleanup": {"prompt": "alias refinement"},
+                },
+            })
+
+            loaded = repository.load()
+            self.assertEqual(
+                loaded.workflow(WorkflowScope.REFINEMENT).prompt,
+                "alias refinement",
+            )
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("cleanup", persisted["workflows"])
+
     def test_mapping_apply_blank_model_uses_new_provider_default(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
