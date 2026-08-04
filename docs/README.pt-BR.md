@@ -95,6 +95,7 @@ internacional:
 - [Guia de contribuição](../CONTRIBUTING.md)
 - [Ambiente de desenvolvimento](development.md)
 - [Arquitetura](architecture.md)
+- [Dicionário local e snippets](dictionary-snippets.md)
 - [Suporte](../SUPPORT.md)
 - [Política de segurança](../SECURITY.md)
 
