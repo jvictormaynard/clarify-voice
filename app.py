@@ -945,6 +945,24 @@ def _persist_local_asr_cloud_refinement(
     return True
 
 
+def _local_asr_removal_has_transcription_draft_conflict(
+        workflow_controller: WorkflowSettingsController,
+        persisted_provider: str) -> bool:
+    """Reject removal while an unapplied transcription draft still uses local ASR.
+
+    The persisted flat selection can already be cloud-based while the open
+    Workflows page still holds a local route.  Deleting the local assets in
+    that state would leave a later Apply able to restore the unusable route.
+    When the persisted route is local, the removal flow may replace that
+    unchanged draft with the cloud selection immediately before deletion.
+    """
+    if str(persisted_provider or "").strip().lower() == LOCAL_ASR_PROVIDER_ID:
+        return False
+    draft_provider = workflow_controller.route(
+        WorkflowScope.TRANSCRIPTION).provider_id
+    return str(draft_provider or "").strip().lower() == LOCAL_ASR_PROVIDER_ID
+
+
 def _sync_local_asr_refinement_draft(
         workflow_controller: WorkflowSettingsController,
         saved_settings: dict[str, object], enabled: bool) -> None:
@@ -9791,6 +9809,12 @@ class App(ctk.CTk):
                 def remove_local():
                     persisted_provider = str(APP_CONFIG.get(
                         "transcription_provider", "gemini")).strip().lower()
+                    if _local_asr_removal_has_transcription_draft_conflict(
+                            workflow_controller, persisted_provider):
+                        message.configure(
+                            text=("Apply a cloud transcription workflow before "
+                                  "removing the local assets."))
+                        return
                     if persisted_provider == provider:
                         if not _persist_cloud_selection_before_local_removal(
                                 selected, active_options(), model_keys,

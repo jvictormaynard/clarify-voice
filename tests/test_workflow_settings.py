@@ -483,6 +483,32 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             ("openai", "whisper-1"),
         )
 
+    def test_local_removal_detects_unapplied_local_transcription_draft(self):
+        controller = WorkflowSettingsController(self.repository())
+        controller.set_route(
+            WorkflowScope.TRANSCRIPTION,
+            provider_id="local_asr",
+            model_id="ggml-small",
+        )
+
+        self.assertTrue(
+            app._local_asr_removal_has_transcription_draft_conflict(
+                controller, "openai"))
+        # An unchanged local persisted route is handled by the removal flow,
+        # which first forces and persists the selected cloud route.
+        self.assertFalse(
+            app._local_asr_removal_has_transcription_draft_conflict(
+                controller, "local_asr"))
+
+        controller.set_route(
+            WorkflowScope.TRANSCRIPTION,
+            provider_id="openai",
+            model_id="whisper-1",
+        )
+        self.assertFalse(
+            app._local_asr_removal_has_transcription_draft_conflict(
+                controller, "openai"))
+
     def test_live_workflow_form_values_update_draft_and_dirty_state(self):
         controller = WorkflowSettingsController(self.repository())
         saved_settings = {"workflows": controller.workflows}
