@@ -5118,9 +5118,10 @@ class AppWorkflowStatistics:
             "prompt"
             if (transcription_route.provider_id == LOCAL_ASR_PROVIDER_ID
                 and bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))
-            else "voice_translation"
+            else "transcription"
         )
         transcription_context = _recording_usage_context(transcription_mode)
+        transcription_context["mode"] = "voice_translation"
         event = _build_voice_translation_usage_event(
             transcription_context,
             getattr(state, "transcription_provider", ""),

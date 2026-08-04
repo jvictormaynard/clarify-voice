@@ -154,6 +154,8 @@ class WorkflowRecordingIntegrationTests(unittest.TestCase):
             session = sessions[0]
             self.assertIsInstance(provider.audio_source, RecordingSnapshot)
             self.assertEqual(provider.audio_source.audio_bytes, b"a" * 1200)
+            self.assertIsNotNone(provider.audio_source.duration_seconds)
+            self.assertGreaterEqual(provider.audio_source.duration_seconds, 0.0)
             self.assertTrue(provider.path_existed_during_call)
             self.assertFalse(path.exists())
             self.assertTrue(session.audio_snapshot_complete.is_set())
