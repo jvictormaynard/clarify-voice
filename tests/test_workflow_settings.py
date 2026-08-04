@@ -308,6 +308,10 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
                 WorkflowScope.TRANSCRIPTION).provider_id,
             "openai",
         )
+        self.assertEqual(
+            saved_settings["transcription"],
+            ("openai", "whisper-1"),
+        )
 
 
 class WorkflowOperationRoutingTests(unittest.TestCase):
