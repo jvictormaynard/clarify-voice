@@ -44,6 +44,17 @@ input-level test without writing or transmitting audio. A recording resolves
 the same selection again at start, so a hot-plug change cannot silently reuse a
 stale backend index.
 
+## Backend-specific selection safety
+
+On Linux, SoX's PulseAudio driver does not honor a supplied input name. An
+explicit microphone selection therefore fails closed with
+`MicrophoneUnavailableError`; the safe SoX route is the System default.
+
+On Windows, SoX's WaveAudio driver matches non-numeric input names using only
+their first 31 characters. Before starting a recording, the selected name is
+checked with that same prefix rule; a collision with another usable input is
+rejected as ambiguous rather than risking capture from the wrong device.
+
 ## Recording boundaries
 
 `RecordingControls` is versioned and behavior-preserving by default:
