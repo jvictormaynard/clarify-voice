@@ -119,6 +119,23 @@ class WorkflowConfigurationTests(unittest.TestCase):
         self.assertEqual(legacy["refinement_provider"], "groq")
         self.assertTrue(legacy["local_asr_cloud_refinement"])
 
+    def test_nested_transcription_model_updates_legacy_audio_field(self):
+        config = AppConfig.from_mapping({
+            "workflows": {
+                "transcription": {
+                    "provider_id": "groq",
+                    "model_id": "whisper-large-v3",
+                },
+            },
+        })
+
+        self.assertEqual(config.selection.transcription_provider, "groq")
+        self.assertEqual(config.groq.audio_model, "whisper-large-v3")
+        self.assertEqual(
+            config.to_legacy_mapping()["groq_audio_model"],
+            "whisper-large-v3",
+        )
+
     def test_migration_splits_legacy_refinement_into_idempotent_scopes(self):
         legacy = {
             "transcription_provider": "groq",

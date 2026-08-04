@@ -357,6 +357,21 @@ class AppConfig:
                 and isinstance(workflows.local_asr_refinement.enabled, bool)):
             local_asr_cloud_refinement = workflows.local_asr_refinement.enabled
 
+        provider_configs = {
+            name: provider_config(name) for name in PROVIDER_REGISTRY.provider_ids
+        }
+        if "transcription" in workflow_mapping:
+            route = workflows.transcription
+            selected_config = provider_configs.get(route.provider_id)
+            route_model = str(route.model_id or "").strip()
+            if selected_config is not None and route_model:
+                # Keep the flat compatibility field consumed by the current
+                # runtime in lockstep with a nested route's selected model.
+                # Otherwise `audio_model_from_legacy()` would silently use
+                # the provider default after a valid nested route is applied.
+                provider_configs[route.provider_id] = replace(
+                    selected_config, audio_model=route_model)
+
         return cls(
             schema_version=CONFIG_SCHEMA_VERSION,
             selection=ProviderSelection(
@@ -364,10 +379,10 @@ class AppConfig:
                 effective_refinement_provider,
                 effective_refinement_model,
             ),
-            gemini=provider_config("gemini"),
-            openai=provider_config("openai"),
-            groq=provider_config("groq"),
-            local_asr=provider_config("local_asr"),
+            gemini=provider_configs["gemini"],
+            openai=provider_configs["openai"],
+            groq=provider_configs["groq"],
+            local_asr=provider_configs["local_asr"],
             ui=UIPreferences(mode, language),
             startup=StartupSettings(autostart),
             local_asr_cloud_refinement=local_asr_cloud_refinement,
