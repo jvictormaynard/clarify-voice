@@ -197,6 +197,31 @@ class HistoryStoreTests(unittest.TestCase):
             persisted = Path(store.path).read_text(encoding="utf-8")
             self.assertNotIn("nested-secret", persisted)
 
+    def test_escaped_mapping_credentials_with_escaped_quotes_are_fully_redacted(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            store.add(
+                status="error",
+                error='body="{\\"password\\":\\"abc\\\\\\"def\\"}"',
+                record_id="escaped-mapping-quoted-credential-record",
+            )
+
+            error = store.list_records()[0].error
+            self.assertEqual(
+                error,
+                'body="{\\"password\\":\\"<redacted>\\"}"',
+            )
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            for value in ("abc", "def"):
+                self.assertNotIn(value, persisted)
+
     def test_v0_migration_is_idempotent_and_drops_unsupported_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
