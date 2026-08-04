@@ -755,10 +755,12 @@ class HistoryStore:
             try:
                 current_mtime = self.path.stat().st_mtime
             except OSError:
-                # Without a primary mtime, recency cannot be compared. Keep
-                # every snapshot for a later retry instead of letting the
-                # primary win by default and deleting a newer completed copy.
-                return current
+                # Without a primary mtime, recency cannot be compared. Block
+                # reads and writes so add/retention cannot mutate the primary
+                # while a newer completed snapshot remains unresolved.
+                raise HistoryStoreError(
+                    "The primary history mtime could not be read"
+                )
             newest = max(supported_temporary)
             selected: Path | None = None
             if newest[0] > current_mtime:

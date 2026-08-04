@@ -568,9 +568,9 @@ class HistoryStoreTests(unittest.TestCase):
                 autospec=True,
                 side_effect=unreadable_primary_mtime,
             ):
-                records = store.list_records()
+                with self.assertRaises(HistoryStoreError):
+                    store.list_records()
 
-            self.assertEqual([item.raw_text for item in records], ["committed"])
             self.assertEqual(path.read_bytes(), before)
             self.assertTrue(candidate.exists())
 
