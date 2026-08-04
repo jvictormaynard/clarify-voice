@@ -79,7 +79,7 @@ class DictionarySettingsControllerTests(unittest.TestCase):
             LocalDictionarySnippetsRepository(self.path).load(), before)
 
     def test_aliases_with_commas_round_trip_through_edit_and_persistence(self):
-        aliases = ("Acme, Inc", "OW")
+        aliases = (" Acme, Inc ", "OW\u2028Beta")
         self.controller.add_dictionary("Acme", aliases=aliases)
 
         self.controller.update_dictionary(

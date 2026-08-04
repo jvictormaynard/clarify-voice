@@ -1061,6 +1061,9 @@ class ProviderTests(unittest.TestCase):
             app._dictionary_aliases_from_text(" Acme, Inc \n\n OW "),
             (" Acme, Inc ", " OW "))
         self.assertEqual(
+            app._dictionary_aliases_from_text(" Acme, Inc \r\n OW "),
+            (" Acme, Inc ", " OW "))
+        self.assertEqual(
             app._dictionary_aliases_from_text("Acme\u2028Inc\nOW"),
             ("Acme\u2028Inc", "OW"))
         page, pages, visible = app._dictionary_page(tuple(range(1024)), 0)

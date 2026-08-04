@@ -252,8 +252,9 @@ def _dictionary_aliases_from_text(value: str) -> tuple[str, ...]:
     delimiter is structural; empty lines are omitted, while every non-empty
     line is passed to the controller unchanged for validation.
     """
-    return tuple(alias for alias in str(value or "").split("\n")
-                 if alias != "")
+    normalized = str(value or "").replace("\r\n", "\n")
+    return tuple(alias for alias in normalized.split("\n")
+                 if alias.strip())
 
 
 def _dictionary_page(items, page_index: int):
