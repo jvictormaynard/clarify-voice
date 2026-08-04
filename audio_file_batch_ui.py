@@ -61,6 +61,30 @@ def audio_import_provider_options(registry, execution: str) -> tuple[AudioImport
     return tuple(options)
 
 
+def _canonical_audio_path_key(path: str | os.PathLike[str] | Path) -> str:
+    """Return a stable comparison key for picker and service paths.
+
+    The batch service resolves each submitted path before publishing results.
+    On Windows that can also normalize case, ``..`` segments, or a junction
+    target, so the callback path is not necessarily textually equal to the
+    picker path.  Keep the original ``Path`` for display, but compare both
+    sides through the same canonical representation.
+    """
+
+    try:
+        candidate = Path(path).expanduser()
+        resolved = candidate.resolve(strict=False)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        try:
+            resolved = Path(os.path.abspath(os.fspath(path)))
+        except (OSError, TypeError, ValueError):
+            resolved = Path(str(path))
+    try:
+        return os.path.normcase(os.path.abspath(os.fspath(resolved)))
+    except (OSError, TypeError, ValueError):
+        return os.path.normcase(os.path.normpath(str(resolved)))
+
+
 def deduplicate_audio_paths(
         paths: Iterable[str | os.PathLike[str] | Path],
         ) -> tuple[Path, ...]:
@@ -78,7 +102,7 @@ def deduplicate_audio_paths(
             # Preserve an invalid value as a path-like marker so the service
             # can publish a per-file validation error instead of hiding it.
             path = Path(str(raw))
-        key = os.path.normcase(os.path.abspath(str(path)))
+        key = _canonical_audio_path_key(path)
         if key in seen:
             continue
         seen.add(key)
@@ -112,6 +136,7 @@ class AudioFileImportController:
         self._selection: FileTranscriptionSelection | None = None
         self._paths: tuple[Path, ...] = ()
         self._results: dict[Path, AudioFileResult] = {}
+        self._result_paths_by_key: dict[str, Path] = {}
 
     @property
     def job(self) -> AudioBatchJob | None:
@@ -144,11 +169,13 @@ class AudioFileImportController:
                      if item.status is AudioFileStatus.FAILED)
 
     def snapshot(self) -> tuple[AudioFileResult, ...]:
+        self._synchronize_finished_job()
         with self._lock:
             return tuple(self._results[path] for path in self._paths)
 
     @property
     def result(self) -> AudioBatchResult | None:
+        self._synchronize_finished_job()
         with self._lock:
             if self._job is None:
                 return None
@@ -173,6 +200,7 @@ class AudioFileImportController:
             ) -> AudioBatchJob:
         """Retry only failed files and retain successful/other terminal rows."""
 
+        self._synchronize_finished_job()
         with self._lock:
             if self._job is None:
                 raise RuntimeError("No audio import has been started")
@@ -201,6 +229,7 @@ class AudioFileImportController:
         if job is None:
             raise RuntimeError("No audio import has been started")
         job.wait(timeout)
+        self._synchronize_finished_job(job)
         result = self.result
         assert result is not None
         return result
@@ -231,6 +260,9 @@ class AudioFileImportController:
                     path: AudioFileResult(path, AudioFileStatus.PENDING)
                     for path in paths
                 }
+                self._result_paths_by_key = {
+                    _canonical_audio_path_key(path): path for path in paths
+                }
             self._selection = selection
             pending = tuple(self._results[path] for path in selected)
             self._job = None
@@ -254,12 +286,43 @@ class AudioFileImportController:
 
     def _publish(self, generation: int, item: AudioFileResult) -> None:
         with self._lock:
-            if generation != self._generation or item.path not in self._results:
+            if generation != self._generation:
+                return
+            original_path = self._result_paths_by_key.get(
+                _canonical_audio_path_key(item.path))
+            if original_path is None:
                 return
             # A retry cannot allow a late callback from the previous job to
             # overwrite a newer pending/processing state.
-            self._results[item.path] = replace(item)
-        self._notify(item)
+            published = replace(item, path=original_path)
+            self._results[original_path] = published
+        self._notify(published)
+
+    def _synchronize_finished_job(self, job: AudioBatchJob | None = None) -> None:
+        """Reconcile terminal job state even if a callback was not observed.
+
+        The service stores its authoritative ordered result before marking a
+        job done.  A UI snapshot can race the final callback on some runtimes,
+        and a resolved service path can also miss the original picker key.
+        Reconcile only the current finished job and keep the original path in
+        the presentation snapshot.
+        """
+
+        with self._lock:
+            current_job = self._job
+            if (current_job is None or not current_job.done
+                    or (job is not None and current_job is not job)):
+                return
+            finished = current_job.result
+            if finished is None:
+                return
+            for item in finished.files:
+                original_path = self._result_paths_by_key.get(
+                    _canonical_audio_path_key(item.path))
+                if original_path is None:
+                    continue
+                self._results[original_path] = replace(
+                    item, path=original_path)
 
     def _notify(self, item: AudioFileResult) -> None:
         if self._on_update is None:

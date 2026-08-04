@@ -73,7 +73,7 @@ class AudioFileBatchUiSeamTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             audio_import_provider_options(PROVIDER_REGISTRY, "remote")
 
-    def test_picker_paths_are_ordered_and_deduplicated_without_io(self):
+    def test_picker_paths_are_ordered_and_deduplicated(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             first = root / "one.wav"
@@ -81,6 +81,23 @@ class AudioFileBatchUiSeamTests(unittest.TestCase):
             paths = deduplicate_audio_paths((first, first, second, str(second)))
 
         self.assertEqual(paths, (first, second))
+
+    def test_resolved_service_path_updates_original_picker_key(self):
+        gateway = _Gateway()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "nested").mkdir()
+            source = root / "nested" / ".." / "recording.wav"
+            source.resolve().write_bytes(b"audio")
+            service = AudioFileBatchService(gateway, max_workers=1)
+            controller = AudioFileImportController(service)
+
+            controller.start((source,), _selection())
+            result = controller.wait()
+
+        self.assertEqual(result.files[0].path, source)
+        self.assertEqual(result.files[0].status, AudioFileStatus.SUCCEEDED)
+        self.assertEqual(controller.snapshot()[0].path, source)
 
     def test_retry_failed_keeps_success_and_never_deletes_sources(self):
         gateway = _Gateway({"bad.wav": 1})
