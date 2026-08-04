@@ -150,6 +150,11 @@ harness from a normal, non-administrator PowerShell; elevated launch is rejected
 
 ## Benchmark and acceptance plan
 
+The executable acceptance procedure and the current blocked/manual matrix are
+maintained in [`docs/local-asr-acceptance.md`](local-asr-acceptance.md). Use
+that runbook to capture one artifact per Windows gate; the table below remains
+the compact release view.
+
 The harness has a `benchmark` command that reports model startup, inference
 latency, real-time factor, peak Windows working set, transcript, and optional
 word error rate:
