@@ -71,8 +71,16 @@ do not need Python, Node.js, or SoX.
 1. Open the [latest release](https://github.com/jvictormaynard/clarify-voice/releases/latest).
 2. Download `ClarifyVoice.exe` and place it in a folder you control.
 3. Double-click the executable.
-4. Open **Models**, add an API key, validate the provider, and select the
-   transcription and text-refinement models.
+4. Open **Models** and choose the matching onboarding path:
+   - **Cloud provider:** select Gemini, OpenAI, Groq, or a compatible custom
+     endpoint; add and validate an API key; then select the transcription model
+     and, when using Prompt mode, the text-refinement model.
+   - **Local Whisper:** select Local Whisper, review its requirements, and click
+     **Download local ASR**. No API key is required for local transcription.
+     Prompt-mode cloud refinement remains optional: configure a cloud provider
+     and model, then enable **Allow cloud refinement for Prompt mode** only if
+     desired. The Windows/offline acceptance for Local Whisper is still pending;
+     see [Local ASR](docs/local-asr.md).
 
 Published executables through v0.1.2 are not code-signed. Windows SmartScreen may therefore ask
 you to confirm the first launch. Verify the SHA-256 file published with the
