@@ -10298,15 +10298,17 @@ def _run_cli(argv: list[str]) -> int:
         parser.print_help()
         return 0
 
+    transcription_route = _workflow_route(WorkflowScope.TRANSCRIPTION)
+    transcription_provider = transcription_route.provider_id
+
     if args.command == "headless-transcribe-stdin":
-        provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
         raw_audio = sys.stdin.buffer.read()
         if not raw_audio:
             print(json.dumps({
                 "ok": False,
                 "error": "no_audio_stdin",
             }, ensure_ascii=False))
-            _shutdown_cli_transcription_provider(provider)
+            _shutdown_cli_transcription_provider(transcription_provider)
             return 1
 
         temp_path = DATA_DIR / f"headless_stdin_{int(time.time() * 1000)}.wav"
@@ -10317,13 +10319,14 @@ def _run_cli(argv: list[str]) -> int:
                 wav_file.setframerate(16000)
                 wav_file.writeframes(raw_audio)
 
-            text = call_transcription_provider(temp_path, args.mode, args.lang)
+            text = call_transcription_provider(
+                temp_path, args.mode, args.lang, route=transcription_route)
         finally:
             try:
                 temp_path.unlink(missing_ok=True)
             except Exception:
                 pass
-            _shutdown_cli_transcription_provider(provider)
+            _shutdown_cli_transcription_provider(transcription_provider)
 
         if text.startswith("[Error"):
             print(json.dumps({
@@ -10351,11 +10354,11 @@ def _run_cli(argv: list[str]) -> int:
         }, ensure_ascii=False))
         return 1
 
-    provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
     try:
-        text = call_transcription_provider(audio_path, args.mode, args.lang)
+        text = call_transcription_provider(
+            audio_path, args.mode, args.lang, route=transcription_route)
     finally:
-        _shutdown_cli_transcription_provider(provider)
+        _shutdown_cli_transcription_provider(transcription_provider)
     if text.startswith("[Error"):
         print(json.dumps({
             "ok": False,

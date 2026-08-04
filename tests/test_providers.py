@@ -900,6 +900,30 @@ class ProviderTests(unittest.TestCase):
         transcribe.assert_called_once()
         shutdown.assert_called_once_with()
 
+    @patch("app.call_transcription_provider", return_value="scoped text")
+    def test_cli_transcription_passes_authored_route_to_facade(self, transcribe):
+        app.APP_CONFIG.update({
+            "transcription_provider": "gemini",
+            "workflows": {
+                "transcription": {
+                    "provider_id": "groq",
+                    "model_id": "whisper-large-v3",
+                    "independent": True,
+                },
+            },
+        })
+        with patch.object(app.sys, "stdout", io.StringIO()):
+            result = app._run_cli([
+                "transcribe", "--file", str(self.audio_path),
+            ])
+
+        self.assertEqual(result, 0)
+        transcribe.assert_called_once()
+        route = transcribe.call_args.kwargs["route"]
+        self.assertTrue(route.independent)
+        self.assertEqual(route.provider_id, "groq")
+        self.assertEqual(route.model_id, "whisper-large-v3")
+
     @patch("app.PROVIDER_REGISTRY.shutdown")
     @patch("app.call_transcription_provider", return_value="local text")
     def test_headless_local_transcription_shuts_down_registry(
@@ -915,6 +939,33 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result, 0)
         transcribe.assert_called_once()
         shutdown.assert_called_once_with()
+
+    @patch("app.call_transcription_provider", return_value="scoped text")
+    def test_headless_cli_transcription_passes_authored_route_to_facade(
+            self, transcribe):
+        app.APP_CONFIG.update({
+            "transcription_provider": "gemini",
+            "workflows": {
+                "transcription": {
+                    "provider_id": "groq",
+                    "model_id": "whisper-large-v3",
+                    "independent": True,
+                },
+            },
+        })
+        fake_stdin = type("FakeStdin", (), {
+            "buffer": io.BytesIO(b"pcm16"),
+        })()
+        with patch.object(app.sys, "stdin", fake_stdin), \
+                patch.object(app.sys, "stdout", io.StringIO()):
+            result = app._run_cli(["headless-transcribe-stdin"])
+
+        self.assertEqual(result, 0)
+        transcribe.assert_called_once()
+        route = transcribe.call_args.kwargs["route"]
+        self.assertTrue(route.independent)
+        self.assertEqual(route.provider_id, "groq")
+        self.assertEqual(route.model_id, "whisper-large-v3")
 
     def test_all_supported_interface_languages_are_accepted(self):
         for language in app.SUPPORTED_LANGUAGES:
