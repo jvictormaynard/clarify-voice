@@ -73,6 +73,16 @@ class _UnavailableRecording(_Recording):
         raise MicrophoneUnavailableError("no input")
 
 
+class RecordingEncodingError(RuntimeError):
+    """Exception name emitted when a recording has no usable audio."""
+
+
+class _NoAudioRecording(_Recording):
+    def stop(self):
+        self.stopped = True
+        raise RecordingEncodingError("No usable audio")
+
+
 class _Provider:
     def __init__(self):
         self.raw = "Olá"
@@ -206,6 +216,28 @@ class VoiceTranslationRuntimeTests(unittest.TestCase):
         self.assertEqual(
             self.events[-1].error_code, "MicrophoneUnavailableError")
         self.assertIsInstance(recording.failed, MicrophoneUnavailableError)
+        self.assertEqual(self.provider.requests, [])
+
+    def test_no_audio_recording_failure_preserves_exception_code_for_ui_adapters(self):
+        recording = _NoAudioRecording()
+        runtime = VoiceTranslationRuntime(
+            self.provider,
+            self.clipboard,
+            lambda: recording,
+            _Scheduler(),
+            _config,
+            on_state=self.events.append,
+        )
+
+        self.assertTrue(runtime.start("target"))
+        self.assertTrue(runtime.stop())
+
+        self.assertFalse(runtime.active)
+        self.assertEqual(self.events[-1].phase, VoiceTranslationPhase.FAILED)
+        self.assertIsNone(self.events[-1].workflow_state)
+        self.assertEqual(
+            self.events[-1].error_code, "RecordingEncodingError")
+        self.assertIsInstance(recording.failed, RecordingEncodingError)
         self.assertEqual(self.provider.requests, [])
 
 

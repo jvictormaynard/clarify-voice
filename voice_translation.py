@@ -1010,7 +1010,10 @@ class VoiceTranslationWorkflow:
         operation_id: int,
         failure_code: str = "",
         failure_message: str = "",
+        cancel_event: Any | None = None,
     ) -> VoiceTranslationState:
+        if self._cancelled(cancel_event):
+            return self._cancel_operation(operation_id)
         if decision.disposition is VoiceTranslationPublication.NONE:
             try:
                 return self.state_machine.fail(
@@ -1022,6 +1025,8 @@ class VoiceTranslationWorkflow:
                 )
             except VoiceTranslationStateError:
                 return self._state_for_operation(operation_id)
+        if self._cancelled(cancel_event):
+            return self._cancel_operation(operation_id)
         try:
             # Claim the state-machine barrier before taking the shared
             # coordinator.  This ordering makes cancel-vs-publish atomic: a
@@ -1160,6 +1165,7 @@ class VoiceTranslationWorkflow:
                 operation_id=operation_id,
                 failure_code="translation_failed",
                 failure_message=str(error) or type(error).__name__,
+                cancel_event=cancel_event,
             )
         if not translated:
             try:
@@ -1180,6 +1186,7 @@ class VoiceTranslationWorkflow:
                 operation_id=operation_id,
                 failure_code="empty_translation",
                 failure_message="translation returned no usable text",
+                cancel_event=cancel_event,
             )
 
         if self._cancelled(cancel_event):
@@ -1213,12 +1220,14 @@ class VoiceTranslationWorkflow:
         if target_capture_reason and reason == "target_not_current":
             reason = target_capture_reason
             decision = PublicationDecision(decision.disposition, decision.text, reason)
-        # Clipboard/focus inspection can run after the user requests Escape.
-        # Re-check before claiming publication so a cancellation that wins
-        # during that inspection cannot copy or paste a result.
-        if self._cancelled(cancel_event):
-            return self._cancel_operation(operation_id)
-        return self._publish(target, decision, operation_id=operation_id)
+        # Clipboard/focus inspection can run after the user requests Escape;
+        # _publish re-checks immediately before claiming publication.
+        return self._publish(
+            target,
+            decision,
+            operation_id=operation_id,
+            cancel_event=cancel_event,
+        )
 
 
 __all__ = [
