@@ -41,6 +41,8 @@ memory to version 1 when loaded.  Unknown future versions are rejected for
 import and are never overwritten by a save.  Entries are bounded to 512
 dictionary entries and 512 snippets.  Terms, aliases, pronunciation, and
 triggers are single-line Unicode strings with a 256-character limit;
+aliases are stored as separate strings and may contain commas.  The Settings
+editor shows one alias per line so punctuation round-trips without ambiguity;
 replacements may contain Unicode and newlines up to 4096 characters.  Empty
 replacements are allowed when a trigger should be removed.
 
@@ -76,11 +78,19 @@ transcription adapters forward that context through the typed
 diagnostics boundary logs only provider metadata and redacts request bodies,
 so dictionary content and credentials are not written to provider logs.
 
-## Current scope and follow-up
+## Settings workflow
 
-The persistence, import/export, matching, and typed request context are
-implemented without a UI dependency.  Settings search/add/edit/delete/reset,
-preview controls, and Windows manual evidence remain a follow-up in issue
-[#50](https://github.com/jvictormaynard/clarify-voice/issues/50).  This staged
-PR is intentionally marked `Part of #50`; it does not claim the complete
-settings acceptance matrix.
+The Settings window exposes the local profile under **Dictionary**.  It can
+search terms, aliases, pronunciation metadata, snippet triggers, and
+replacement text; add or edit either item; enable/disable entries; and delete
+individual rows.  The **Reset all** action clears both collections only after
+confirmation.  Every change is validated and atomically persisted before the
+UI reports success.
+
+The same page includes a snippet preview, plus JSON **Import** and **Export**
+actions.  Import uses the all-or-nothing validation boundary described above,
+so malformed or future-schema documents cannot replace the active profile.
+The profile remains local and is excluded from usage statistics and provider
+diagnostics.  Windows manual acceptance of the complete workflow is still a
+release-check item; it does not change the documented file format or runtime
+guarantees.

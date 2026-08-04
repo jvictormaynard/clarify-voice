@@ -368,8 +368,11 @@ the active Unicode database and walks a bounded prefix trie, so it is
 provider-neutral and does not scale with every rule at every input character;
 cloud adapters receive optional vocabulary through the typed
 `TranscriptionRequest`, while offline adapters can ignore it. Usage statistics
-never receive dictionary or snippet content. The settings UI and complete
-Windows manual acceptance matrix remain staged in issue #50.
+never receive dictionary or snippet content. `DictionarySettingsController`
+keeps the Settings page's search, CRUD, reset, preview, and import/export
+callbacks independent from Tk and delegates every mutation to the same
+validated atomic service boundary. The complete Windows manual acceptance
+matrix remains a release-check item for issue #50.
 
 ### `secret_store.py`
 
