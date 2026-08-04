@@ -86,7 +86,7 @@ _SOX_INPUT_TYPES = {
     ".oga": "ogg",
     ".ogg": "ogg",
     ".wav": "wav",
-    ".wv": "wavpack",
+    ".wv": "wv",
 }
 
 
