@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 import subprocess
 import threading
@@ -17,6 +18,7 @@ from audio_file_batch import (
     AudioFileBatchService,
     AudioFileStatus,
     AudioFileValidationError,
+    DictionaryAwareAudioTranscriptionGateway,
     FileTranscriptionSelection,
     RegistryAudioTranscriptionGateway,
     RetryableAudioBatchError,
@@ -575,6 +577,95 @@ class RegistryGatewayTests(unittest.TestCase):
         self.assertEqual(seen["provider_id"], "local_asr")
         self.assertIs(seen["request"], request)
         self.assertIs(seen["connection"], selection.connection)
+        self.assertIs(seen["cancel_token"], token)
+
+    def test_dictionary_gateway_adds_context_and_expands_result(self):
+        seen = {}
+
+        class Registry:
+            def transcribe(self, provider_id, request, connection, cancel_token):
+                seen.update({
+                    "provider_id": provider_id,
+                    "request": request,
+                    "connection": connection,
+                    "cancel_token": cancel_token,
+                })
+                return TranscriptionResult("brb", provider_id, request.model)
+
+        class Dictionary:
+            def apply_context(self, request):
+                return replace(request, dictionary_context="term: BRB")
+
+            def expand(self, text):
+                return text.replace("brb", "be right back")
+
+        gateway = DictionaryAwareAudioTranscriptionGateway(
+            RegistryAudioTranscriptionGateway(Registry()), Dictionary())
+        token = CancellationToken()
+        request = TranscriptionRequest(
+            Path("input.wav"), "model", "en", "instruction", "prompt", 0.0)
+
+        result = gateway.transcribe(request, _selection(), token)
+
+        self.assertEqual(result.text, "be right back")
+        self.assertIs(seen["cancel_token"], token)
+        self.assertEqual(seen["request"].dictionary_context, "term: BRB")
+        self.assertIsNot(seen["request"], request)
+
+    def test_dictionary_gateway_does_not_expand_error_sentinels(self):
+        expanded = []
+
+        class Registry:
+            def transcribe(self, provider_id, request, connection, cancel_token):
+                return TranscriptionResult(
+                    "[Error: brb]", provider_id, request.model)
+
+        class Dictionary:
+            def apply_context(self, request):
+                return request
+
+            def expand(self, text):
+                expanded.append(text)
+                return "expanded error"
+
+        gateway = DictionaryAwareAudioTranscriptionGateway(
+            RegistryAudioTranscriptionGateway(Registry()), Dictionary())
+        result = gateway.transcribe(
+            TranscriptionRequest(
+                Path("input.wav"), "model", "en", "instruction", "prompt", 0.0),
+            _selection(),
+            CancellationToken(),
+        )
+
+        self.assertEqual(result.text, "[Error: brb]")
+        self.assertEqual(expanded, [])
+
+    def test_dictionary_gateway_propagates_provider_cancellation(self):
+        token = CancellationToken()
+        token.cancel()
+        seen = {}
+
+        class Registry:
+            def transcribe(self, provider_id, request, connection, cancel_token):
+                seen["cancel_token"] = cancel_token
+                raise AudioBatchCancelledError("cancelled")
+
+        class Dictionary:
+            def apply_context(self, request):
+                return request
+
+            def expand(self, text):
+                raise AssertionError("cancelled results must not be expanded")
+
+        gateway = DictionaryAwareAudioTranscriptionGateway(
+            RegistryAudioTranscriptionGateway(Registry()), Dictionary())
+        with self.assertRaises(AudioBatchCancelledError):
+            gateway.transcribe(
+                TranscriptionRequest(
+                    Path("input.wav"), "model", "en", "instruction", "prompt", 0.0),
+                _selection(),
+                token,
+            )
         self.assertIs(seen["cancel_token"], token)
 
 

@@ -39,6 +39,7 @@ from audio_file_batch import (
     AudioFileBatchService,
     AudioFileResult,
     AudioFileStatus,
+    DictionaryAwareAudioTranscriptionGateway,
     FileTranscriptionSelection,
     RegistryAudioTranscriptionGateway,
     SUPPORTED_AUDIO_EXTENSIONS,
@@ -5808,7 +5809,10 @@ class App(ctk.CTk):
 
         self.recorder = Recorder()
         self._audio_file_batch_service = AudioFileBatchService(
-            RegistryAudioTranscriptionGateway(PROVIDER_REGISTRY))
+            DictionaryAwareAudioTranscriptionGateway(
+                RegistryAudioTranscriptionGateway(PROVIDER_REGISTRY),
+                DICTIONARY_SERVICE,
+            ))
         self._audio_file_import_controller = None
         self._audio_file_import_window = None
         local_adapter = PROVIDER_REGISTRY.adapter(LOCAL_ASR_PROVIDER_ID)

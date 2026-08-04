@@ -230,6 +230,33 @@ class RegistryAudioTranscriptionGateway:
         )
 
 
+class DictionaryAwareAudioTranscriptionGateway:
+    """Add the desktop dictionary policy around an existing audio gateway."""
+
+    def __init__(self, gateway: AudioTranscriptionGateway, dictionary_service: Any):
+        self.gateway = gateway
+        self.dictionary_service = dictionary_service
+
+    def transcribe(
+        self,
+        request: TranscriptionRequest,
+        selection: FileTranscriptionSelection,
+        cancel_token: CancellationToken,
+    ) -> TranscriptionResult:
+        contextual_request = self.dictionary_service.apply_context(request)
+        result = self.gateway.transcribe(
+            contextual_request, selection, cancel_token)
+        # Keep provider/refinement error sentinels out of snippet expansion,
+        # matching the microphone transcription path.  Exceptions, including
+        # cooperative cancellation, intentionally pass through unchanged.
+        if isinstance(result.text, str) and result.text.startswith("[Error"):
+            return result
+        return replace(
+            result,
+            text=self.dictionary_service.expand(result.text),
+        )
+
+
 def _default_sox_path() -> str:
     """Resolve the bundled SoX executable, with PATH as the source fallback."""
 
