@@ -25,6 +25,7 @@ for _provider_variable in (
 import app
 from desktop_state import WorkflowController
 from provider_http import AuthenticationError
+from repositories import LocalConfigRepository
 from version import __version__
 from update_security import UpdateTransportError
 import windows_hotkeys
@@ -82,6 +83,17 @@ class ProviderTests(unittest.TestCase):
             payload = json.loads(destination.read_text(encoding="utf-8"))
 
         self.assertEqual(payload["application"]["version"], __version__)
+
+    def test_app_first_run_defaults_include_voice_translation_hotkey(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = LocalConfigRepository(
+                Path(directory) / "config.json", defaults=app.DEFAULT_CONFIG)
+            settings = repository.load().hotkeys
+
+        self.assertEqual(
+            settings.definition("voice_translation_hotkey").display,
+            "Alt+V",
+        )
 
     def test_typed_http_errors_are_localized_without_response_content(self):
         app.APP_CONFIG["ui_language"] = "pt"

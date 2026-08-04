@@ -427,6 +427,8 @@ class ConfigurationRepositoryTests(unittest.TestCase):
         self.assertFalse(hasattr(config, "unknown_future_setting"))
 
     def test_legacy_config_does_not_gain_voice_hotkey_on_upgrade(self):
+        import app
+
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             path.write_text(json.dumps({
@@ -434,7 +436,8 @@ class ConfigurationRepositoryTests(unittest.TestCase):
                 "ui_language": "en",
             }), encoding="utf-8")
 
-            config = LocalConfigRepository(path).load()
+            config = LocalConfigRepository(
+                path, defaults=app.DEFAULT_CONFIG).load()
 
         self.assertNotIn(HotkeyAction.VOICE_TRANSLATION, config.hotkeys.hotkeys)
 

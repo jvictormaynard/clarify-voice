@@ -252,6 +252,7 @@ DEFAULT_CONFIG = {
     "ui_language": "en",
     "history_enabled": False,
     "history_retention_days": DEFAULT_RETENTION_DAYS,
+    "hotkeys": HotkeySettings.defaults().to_mapping(),
     "voice_translation": VoiceTranslationConfig().to_mapping(),
 }
 
