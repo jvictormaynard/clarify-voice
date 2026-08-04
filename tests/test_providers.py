@@ -3426,6 +3426,116 @@ class UsageStatisticsTests(unittest.TestCase):
         self.assertNotIn("text", event)
         self.assertNotIn("transcript", event)
 
+    def test_voice_translation_statistics_include_transcription_and_translation(self):
+        context = {
+            "provider": "groq",
+            "model": "whisper-large-v3-turbo",
+            "mode": "voice_translation",
+            "execution": "cloud",
+            "refinement_provider": "",
+            "refinement_model": "",
+        }
+        config = SimpleNamespace(
+            route=SimpleNamespace(
+                provider_id="openai", model_id="gpt-4o-mini"),
+            target_language="en",
+        )
+        state = SimpleNamespace(
+            raw_transcript="Olá do microfone",
+            translated_text="Hello from the microphone",
+        )
+
+        with patch.object(app, "_workflow_route",
+                          return_value=SimpleNamespace(provider_id="groq")), \
+                patch.object(app, "_recording_usage_context",
+                             return_value=context), \
+                patch.object(app, "_record_usage_event") as record_usage:
+            app.AppWorkflowStatistics(object()).record_voice_translation(
+                config, state, 45.0)
+
+        record_usage.assert_called_once()
+        event = record_usage.call_args.args[0]
+        self.assertEqual(event["type"], "voice_translation")
+        self.assertEqual(event["duration_seconds"], 45.0)
+        self.assertEqual(
+            [(entry["provider"], entry["model"], entry["purpose"])
+             for entry in event["models"]],
+            [
+                ("groq", "whisper-large-v3-turbo", "transcription"),
+                ("openai", "gpt-4o-mini", "translation"),
+            ],
+        )
+        self.assertGreater(event["estimated_cost_usd"], 0.0)
+
+        summary = app._usage_summary([event], now=event["timestamp"])
+        self.assertEqual(summary["recordings"], 1)
+        self.assertEqual(summary["translations"], 1)
+        self.assertEqual(summary["total_seconds"], 45.0)
+        self.assertEqual(summary["model_calls"], 2)
+
+    def test_voice_translation_usage_tracks_audio_and_text_legs(self):
+        config = app.VoiceTranslationConfig()
+        state = SimpleNamespace(
+            transcription_provider="openai",
+            transcription_model="whisper-1",
+            raw_transcript="A short source transcript",
+            translated_text="Um texto curto traduzido",
+        )
+        with patch.object(
+                app, "_recording_usage_context", return_value={
+                    "provider": "groq",
+                    "model": "whisper-large-v3",
+                    "mode": "voice_translation",
+                    "refinement_provider": "",
+                    "refinement_model": "",
+                }), patch.object(app, "_record_usage_event") as record_usage:
+            app.AppWorkflowStatistics(None).record_voice_translation(
+                config, state, 45.5)
+
+        record_usage.assert_called_once()
+        event = record_usage.call_args.args[0]
+        self.assertEqual(event["type"], "voice_translation")
+        self.assertEqual(event["duration_seconds"], 45.5)
+        self.assertEqual(event["transcription_provider"], "openai")
+        self.assertEqual(event["transcription_model"], "whisper-1")
+        self.assertEqual(event["translation_provider"], "openai")
+        self.assertEqual(event["translation_model"], "gpt-4o-mini")
+        self.assertEqual(
+            [(entry["provider"], entry["model"], entry["purpose"])
+             for entry in event["models"]],
+            [
+                ("openai", "whisper-1", "transcription"),
+                ("openai", "gpt-4o-mini", "translation"),
+            ],
+        )
+        self.assertGreater(event["estimated_cost_usd"], 0.0045)
+        self.assertNotIn("text", event)
+        self.assertNotIn("transcript", event)
+
+    def test_summary_counts_voice_translation_as_recording_and_translation(self):
+        now = 2_000_000.0
+        summary = app._usage_summary([
+            {
+                "timestamp": now,
+                "type": "voice_translation",
+                "duration_seconds": 45.5,
+                "word_count": 5,
+                "estimated_cost_usd": 0.02,
+                "cost_complete": True,
+                "models": [
+                    {"provider": "openai", "model": "whisper-1"},
+                    {"provider": "openai", "model": "gpt-4o-mini"},
+                ],
+            },
+        ], now=now)
+
+        self.assertEqual(summary["recordings"], 1)
+        self.assertEqual(summary["translations"], 1)
+        self.assertEqual(summary["total_seconds"], 45.5)
+        self.assertEqual(summary["total_words"], 5)
+        self.assertEqual(summary["model_calls"], 2)
+        self.assertEqual(summary["total_cost_usd"], 0.02)
+
     def test_summary_ranks_models_and_aggregates_recording_metrics(self):
         now = 2_000_000.0
         events = [

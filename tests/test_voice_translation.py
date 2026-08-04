@@ -325,6 +325,8 @@ class VoiceTranslationWorkflowTests(unittest.TestCase):
         self.assertEqual(state.phase, VoiceTranslationPhase.COMPLETED)
         self.assertEqual(state.raw_transcript, "Olá do microfone")
         self.assertEqual(state.translated_text, "Hello from the microphone")
+        self.assertEqual(state.transcription_provider, "gemini")
+        self.assertEqual(state.transcription_model, "gemini-test")
         self.assertEqual(state.publication, VoiceTranslationPublication.PASTED)
         self.assertEqual(self.provider.transcribe_calls, [(b"audio", "auto")])
         request = self.provider.translation_requests[0]

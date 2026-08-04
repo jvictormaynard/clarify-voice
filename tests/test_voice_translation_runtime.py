@@ -29,7 +29,8 @@ class _Scheduler:
 
 class _Recording:
     def __init__(self):
-        self.snapshot = SimpleNamespace(cancel_token=CancellationToken())
+        self.snapshot = SimpleNamespace(
+            cancel_token=CancellationToken(), duration_seconds=12.5)
         self.started = False
         self.stopped = False
         self.completed = False
@@ -144,7 +145,8 @@ class VoiceTranslationRuntimeTests(unittest.TestCase):
             _Scheduler(),
             _config,
             on_state=self.events.append,
-            on_usage=lambda config, state: self.usage.append((config, state)),
+            on_usage=lambda config, state, duration: self.usage.append(
+                (config, state, duration)),
         )
 
     def test_start_stop_runs_once_with_dedicated_route_and_publication(self):
@@ -157,6 +159,7 @@ class VoiceTranslationRuntimeTests(unittest.TestCase):
         self.assertTrue(self.recording.stopped)
         self.assertTrue(self.recording.completed)
         self.assertEqual(len(self.usage), 1)
+        self.assertEqual(self.usage[0][2], 12.5)
         self.assertEqual(
             [event.phase for event in self.events],
             [

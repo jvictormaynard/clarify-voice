@@ -686,6 +686,56 @@ def _build_translation_usage_event(provider: str, model: str, source: str,
     return event
 
 
+def _build_voice_translation_usage_event(
+        transcription_context: dict,
+        transcription_provider: str,
+        transcription_model: str,
+        translation_provider: str,
+        translation_model: str,
+        duration_seconds: float,
+        source: str,
+        result: str,
+        target_language: str) -> dict:
+    """Combine the audio and text legs into one anonymous usage event."""
+
+    context = dict(transcription_context or {})
+    if transcription_provider:
+        context["provider"] = transcription_provider
+    if transcription_model:
+        context["model"] = transcription_model
+    recording = _build_recording_usage_event(context, duration_seconds, source)
+    translation = _build_translation_usage_event(
+        translation_provider, translation_model, source, result, target_language)
+    translation_models = [
+        {**entry, "purpose": "translation"}
+        for entry in translation.get("models", [])
+        if isinstance(entry, dict)
+    ]
+    return {
+        "timestamp": time.time(),
+        "type": "voice_translation",
+        "mode": "voice_translation",
+        "workflow": "voice_translation",
+        "duration_seconds": recording["duration_seconds"],
+        "transcription_provider": str(context.get("provider", "")),
+        "transcription_model": str(context.get("model", "")),
+        "translation_provider": str(translation_provider or ""),
+        "translation_model": str(translation_model or ""),
+        "target_language": target_language,
+        "models": recording.get("models", []) + translation_models,
+        "word_count": recording.get("word_count", 0),
+        "character_count": recording.get("character_count", 0),
+        "translation_character_count": len(str(result or "")),
+        "estimated_cost_usd": round(
+            recording.get("estimated_cost_usd", 0.0)
+            + translation.get("estimated_cost_usd", 0.0),
+            8,
+        ),
+        "cost_complete": bool(recording.get("cost_complete", False))
+        and bool(translation.get("cost_complete", False)),
+    }
+
+
 def _storage_repositories(repositories=None):
     """Use injected repositories, retaining path patchability for old callers."""
     if repositories is not None:
@@ -750,7 +800,8 @@ def _record_pending_recording_usage(session, repositories=None) -> None:
 def _usage_summary(events=None, now=None, repositories=None) -> dict:
     events = (_load_usage_events(repositories) if events is None else list(events))
     now = time.time() if now is None else float(now)
-    recordings = [event for event in events if event.get("type") == "recording"]
+    recordings = [event for event in events if event.get("type") in (
+        "recording", "voice_translation")]
     model_counts = {}
     for event in events:
         for entry in event.get("models", []):
@@ -769,7 +820,8 @@ def _usage_summary(events=None, now=None, repositories=None) -> dict:
     return {
         "recordings": len(recordings),
         "rewrites": sum(event.get("type") == "rewrite" for event in events),
-        "translations": sum(event.get("type") == "translation" for event in events),
+        "translations": sum(event.get("type") in (
+            "translation", "voice_translation") for event in events),
         "total_seconds": total_seconds,
         "average_seconds": total_seconds / len(recordings) if recordings else 0.0,
         "total_words": sum(max(0, int(event.get("word_count", 0) or 0))
@@ -4086,6 +4138,7 @@ class RecordingSession:
             audio_path=self.audio_path,
             audio_bytes=self.audio_path.read_bytes(),
             cancel_token=self.provider_cancel_token,
+            duration_seconds=max(0.0, time.time() - self.started_at),
         )
         self.mark_audio_snapshot_complete()
         if self.cancel_event.is_set():
@@ -5055,6 +5108,31 @@ class AppWorkflowStatistics:
                 provider, model, source, result, target_language),
             self.repositories,
         )
+
+    def record_voice_translation(
+            self, config: VoiceTranslationConfig, state, duration_seconds):
+        """Record both provider calls made by the voice workflow."""
+
+        transcription_route = _workflow_route(WorkflowScope.TRANSCRIPTION)
+        transcription_mode = (
+            "prompt"
+            if (transcription_route.provider_id == LOCAL_ASR_PROVIDER_ID
+                and bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))
+            else "voice_translation"
+        )
+        transcription_context = _recording_usage_context(transcription_mode)
+        event = _build_voice_translation_usage_event(
+            transcription_context,
+            getattr(state, "transcription_provider", ""),
+            getattr(state, "transcription_model", ""),
+            config.route.provider_id,
+            config.route.model_id,
+            duration_seconds,
+            state.raw_transcript,
+            state.translated_text,
+            config.target_language,
+        )
+        _record_usage_event(event, self.repositories)
 
 
 # ---------------------------------------------------------------------------
@@ -7289,14 +7367,12 @@ class App(ctk.CTk):
                 raise
 
     def _record_voice_translation_usage(
-            self, config: VoiceTranslationConfig, state):
+            self, config: VoiceTranslationConfig, state, duration_seconds):
         """Record anonymous metadata without persisting transcript contents."""
-        AppWorkflowStatistics(self.repositories).record_translation(
-            config.route.provider_id,
-            config.route.model_id,
-            state.raw_transcript,
-            state.translated_text,
-            config.target_language,
+        AppWorkflowStatistics(self.repositories).record_voice_translation(
+            config,
+            state,
+            duration_seconds,
         )
 
     # -- Selected-text translation --

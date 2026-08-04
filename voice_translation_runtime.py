@@ -10,6 +10,7 @@ It deliberately does not know about Tk, Win32, or provider names.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
@@ -77,7 +78,7 @@ class VoiceTranslationRuntime:
         config_factory: Callable[[], VoiceTranslationConfig],
         *,
         on_state: Callable[[VoiceTranslationRuntimeState], None] | None = None,
-        on_usage: Callable[[VoiceTranslationConfig, VoiceTranslationState], None]
+        on_usage: Callable[[VoiceTranslationConfig, VoiceTranslationState, float], None]
         | None = None,
     ) -> None:
         self._provider = provider
@@ -86,7 +87,7 @@ class VoiceTranslationRuntime:
         self._scheduler = scheduler
         self._config_factory = config_factory
         self._on_state = on_state or (lambda _state: None)
-        self._on_usage = on_usage or (lambda _config, _state: None)
+        self._on_usage = on_usage or (lambda _config, _state, _duration: None)
         self._lock = threading.RLock()
         self._active = False
         self._phase = VoiceTranslationPhase.READY
@@ -209,6 +210,21 @@ class VoiceTranslationRuntime:
             if not self._current(operation_id):
                 return
             snapshot = recording.stop()
+            recording_duration = getattr(snapshot, "duration_seconds", None)
+            if recording_duration is None:
+                started_at = getattr(recording, "started_at", None)
+                try:
+                    recording_duration = max(0.0, time.time() - float(started_at))
+                except (TypeError, ValueError):
+                    # Small embedding/test recording owners may not expose a
+                    # wall-clock start marker. Keep usage best-effort without
+                    # making an otherwise successful translation fail.
+                    recording_duration = 0.0
+            else:
+                try:
+                    recording_duration = max(0.0, float(recording_duration))
+                except (TypeError, ValueError):
+                    recording_duration = 0.0
             with self._lock:
                 cancel_event = self._cancel_event
                 target = self._target
@@ -236,7 +252,7 @@ class VoiceTranslationRuntime:
                 return
             if result.raw_transcript and result.translated_text:
                 try:
-                    self._on_usage(config, result)
+                    self._on_usage(config, result, recording_duration)
                 except OSError:
                     # Usage persistence is anonymous and best effort; never
                     # turn a successful publication into a failed workflow.

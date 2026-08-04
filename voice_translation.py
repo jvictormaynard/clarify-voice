@@ -511,6 +511,11 @@ class VoiceTranslationState:
     operation_id: int = 0
     source_language: str = AUTO_LANGUAGE
     target_language: str = DEFAULT_TARGET_LANGUAGE
+    # Provider metadata is retained for anonymous usage accounting.  Keeping
+    # it on the immutable workflow snapshot avoids reconstructing the route
+    # from mutable desktop settings after a worker has completed.
+    transcription_provider: str = ""
+    transcription_model: str = ""
     raw_transcript: str = ""
     translated_text: str = ""
     published_text: str = ""
@@ -595,6 +600,12 @@ class VoiceTranslationStateMachine:
                 target_language=changes.pop(
                     "target_language", self._state.target_language
                 ),
+                transcription_provider=changes.pop(
+                    "transcription_provider", self._state.transcription_provider
+                ),
+                transcription_model=changes.pop(
+                    "transcription_model", self._state.transcription_model
+                ),
                 raw_transcript=changes.pop(
                     "raw_transcript", self._state.raw_transcript
                 ),
@@ -654,6 +665,8 @@ class VoiceTranslationStateMachine:
                 operation_id=operation_id,
                 source_language=self._config.source_language,
                 target_language=self._config.target_language,
+                transcription_provider="",
+                transcription_model="",
                 raw_transcript="",
                 translated_text="",
                 published_text="",
@@ -671,7 +684,12 @@ class VoiceTranslationStateMachine:
             return self._set(phase=VoiceTranslationPhase.TRANSCRIBING)
 
     def transcript_received(
-        self, text: str, operation_id: int
+        self,
+        text: str,
+        operation_id: int,
+        *,
+        provider: str = "",
+        model: str = "",
     ) -> VoiceTranslationState:
         with self._lock:
             self._require_operation(operation_id)
@@ -685,6 +703,8 @@ class VoiceTranslationStateMachine:
                 )
             return self._set(
                 phase=VoiceTranslationPhase.TRANSLATING,
+                transcription_provider=str(provider or "").strip(),
+                transcription_model=str(model or "").strip(),
                 raw_transcript=transcript,
             )
 
@@ -1101,9 +1121,16 @@ class VoiceTranslationWorkflow:
             target, target_capture_reason = self._target_snapshot()
         try:
             self.state_machine.begin_transcription(operation_id)
-            raw = self._text(
-                self.provider.transcribe(audio_source, self.config.source_language)
+            transcription_result = self.provider.transcribe(
+                audio_source, self.config.source_language
             )
+            raw = self._text(transcription_result)
+            transcription_provider = str(
+                getattr(transcription_result, "provider_id", "") or ""
+            ).strip()
+            transcription_model = str(
+                getattr(transcription_result, "model", "") or ""
+            ).strip()
         except Exception as error:
             if self._cancelled(cancel_event):
                 return self._cancel_operation(operation_id)
@@ -1120,12 +1147,22 @@ class VoiceTranslationWorkflow:
             return self._cancel_operation(operation_id)
         if not raw:
             try:
-                return self.state_machine.transcript_received(raw, operation_id)
+                return self.state_machine.transcript_received(
+                    raw,
+                    operation_id,
+                    provider=transcription_provider,
+                    model=transcription_model,
+                )
             except VoiceTranslationStateError:
                 return self._state_for_operation(operation_id)
 
         try:
-            self.state_machine.transcript_received(raw, operation_id)
+            self.state_machine.transcript_received(
+                raw,
+                operation_id,
+                provider=transcription_provider,
+                model=transcription_model,
+            )
         except VoiceTranslationStateError:
             return self._state_for_operation(operation_id)
         current = self.state
