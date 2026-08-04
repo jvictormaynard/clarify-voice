@@ -388,6 +388,25 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertTrue(candidate.exists())
 
+    def test_corrupt_primary_is_preserved_when_only_future_snapshot_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            path.write_text('{"schema_version": 1,', encoding="utf-8")
+            before = path.read_bytes()
+            candidate = root / ".history.json.future.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION + 1,
+                "records": [{"raw_text": "future"}],
+            }), encoding="utf-8")
+
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            with self.assertRaises(HistoryStoreError):
+                store.list_records()
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(candidate.exists())
+
     def test_corrupt_primary_fails_closed_and_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"

@@ -517,6 +517,18 @@ class HistoryStore:
         if supported_temporary:
             candidates = supported_temporary
         else:
+            try:
+                primary_exists = self.path.exists()
+            except OSError as error:
+                raise HistoryStoreError(
+                    "The history file could not be inspected") from error
+            if primary_exists:
+                # A corrupt primary is recoverable only from a snapshot this
+                # executable understands. Preserve its original bytes when
+                # the only intact candidates use a future schema.
+                _read_json_mapping(self.path, strict=True)
+                raise HistoryStoreError(
+                    "The history file is unreadable or corrupt")
             future_temporary = [
                 item for item in temporary_payloads
                 if _version(item[3].get(
