@@ -13,12 +13,12 @@ import os
 import tempfile
 import threading
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
 from provider_registry import PROVIDER_IDS, PROVIDER_REGISTRY
-from provider_types import ProviderCapability
+from provider_types import ProviderCapability, ProviderError
 from hotkey_config import HotkeySettings
 from secret_store import (
     SecretStore,
@@ -26,9 +26,33 @@ from secret_store import (
     SecretStoreUnavailableError,
     create_secret_store,
 )
+from workflow_config import (
+    DEFAULT_WORKFLOW_PROMPTS,
+    WORKFLOW_SCOPES,
+    WorkflowConfig,
+    WorkflowConfigurationError,
+    WorkflowRoute,
+    WorkflowScope,
+    WorkflowTestResult,
+    normalize_workflow_scope,
+    test_workflow_configuration,
+    validate_workflow_config,
+    validate_workflow_route,
+)
+
+__all__ = [
+    "AppConfig", "ApplicationRepositories", "ConfigRepository",
+    "LocalConfigRepository", "LocalUsageStatsRepository", "ProviderConfig",
+    "ProviderSelection", "StartupSettings", "UIPreferences",
+    "WorkflowConfig", "WorkflowConfigurationError", "WorkflowRoute",
+    "WorkflowScope", "WorkflowTestResult", "environment_defaults",
+    "migrate_config_payload", "normalize_workflow_scope",
+    "test_workflow_configuration", "validate_workflow_config",
+    "validate_workflow_route",
+]
 
 
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
 STATS_SCHEMA_VERSION = 1
 SUPPORTED_PROVIDERS = PROVIDER_IDS
 PROVIDER_SECRET_KEYS = {
@@ -65,8 +89,6 @@ def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[s
         "groq_audio_model": env.get("GROQ_AUDIO_MODEL", "whisper-large-v3-turbo"),
         "groq_text_model": env.get("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile"),
         "local_asr_model": env.get("LOCAL_ASR_MODEL", "ggml-small"),
-        # Local transcription never sends text to a cloud refinement provider
-        # unless the user explicitly opts in from Settings.
         "local_asr_cloud_refinement": False,
         "refinement_provider": env.get("REFINEMENT_PROVIDER", ""),
         "refinement_model": env.get("REFINEMENT_MODEL", ""),
@@ -130,6 +152,7 @@ class AppConfig:
     startup: StartupSettings = field(default_factory=StartupSettings)
     local_asr_cloud_refinement: bool = False
     hotkeys: HotkeySettings = field(default_factory=HotkeySettings.defaults)
+    workflows: WorkflowConfig = field(default_factory=WorkflowConfig)
 
     @classmethod
     def from_mapping(
@@ -137,7 +160,13 @@ class AppConfig:
         values: Mapping[str, Any] | None,
         defaults: Mapping[str, Any] | None = None,
     ) -> "AppConfig":
-        """Build a safe config from legacy flat JSON, ignoring bad fields."""
+        """Build a safe config from flat or workflow-scoped JSON.
+
+        The flat fields remain the compatibility source for the current UI,
+        while the nested ``workflows`` object is authoritative whenever a
+        route explicitly supplies a value.  This lets the migration land
+        without forcing a product UI rewrite in the same change.
+        """
 
         source: dict[str, Any] = {}
         if defaults:
@@ -234,22 +263,135 @@ class AppConfig:
                     hotkeys.hotkeys, source["recording_activation_mode"])
             except ValueError:
                 pass
+        route_defaults = WorkflowConfig(
+            transcription=WorkflowRoute(
+                provider_id=provider,
+                model_id=PROVIDER_REGISTRY.canonical_audio_model(
+                    provider,
+                    provider_config(provider).audio_model,
+                ),
+                prompt=DEFAULT_WORKFLOW_PROMPTS[
+                    WorkflowScope.TRANSCRIPTION.value
+                ],
+            ),
+            refinement=WorkflowRoute(
+                provider_id=refinement_provider,
+                model_id=refinement_model,
+                prompt=DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.REFINEMENT.value],
+            ),
+            rewrite=WorkflowRoute(
+                provider_id=refinement_provider,
+                model_id=refinement_model,
+                prompt=DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.REWRITE.value],
+            ),
+            translation=WorkflowRoute(
+                provider_id=refinement_provider,
+                model_id=refinement_model,
+                prompt=DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.TRANSLATION.value],
+            ),
+            local_asr_refinement=WorkflowRoute(
+                provider_id=refinement_provider,
+                model_id=refinement_model,
+                prompt=DEFAULT_WORKFLOW_PROMPTS[
+                    WorkflowScope.LOCAL_ASR_REFINEMENT.value
+                ],
+                enabled=local_asr_cloud_refinement,
+            ),
+        )
+        workflow_values = source.get("workflows")
+        workflows = WorkflowConfig.from_mapping(
+            workflow_values if isinstance(workflow_values, Mapping) else None,
+            defaults=route_defaults,
+        )
+        # Canonicalize persisted audio aliases while leaving unsupported
+        # combinations for the explicit apply/test validation boundary.
+        try:
+            transcription = workflows.transcription
+            workflows = workflows.with_route(
+                WorkflowScope.TRANSCRIPTION,
+                replace(
+                    transcription,
+                    model_id=PROVIDER_REGISTRY.canonical_audio_model(
+                        transcription.provider_id, transcription.model_id
+                    ),
+                ),
+            )
+        except (ProviderError, ValueError):
+            pass
+
+        workflow_mapping: dict[str, Any] = {}
+        if isinstance(workflow_values, Mapping):
+            # Mirror WorkflowConfig.from_mapping() here so compatibility
+            # fields are derived from the same effective route regardless of
+            # whether callers used canonical scopes or a documented alias.
+            canonical_values: dict[str, Any] = {}
+            alias_values: dict[str, Any] = {}
+            for raw_scope, route in workflow_values.items():
+                normalized = normalize_workflow_scope(raw_scope)
+                if normalized not in WORKFLOW_SCOPES:
+                    continue
+                raw_value = (
+                    raw_scope.value
+                    if isinstance(raw_scope, WorkflowScope)
+                    else str(raw_scope or "")
+                ).strip().lower()
+                if raw_value == normalized:
+                    canonical_values[normalized] = route
+                else:
+                    alias_values[normalized] = route
+            workflow_mapping.update(alias_values)
+            workflow_mapping.update(canonical_values)
+        effective_transcription_provider = (
+            workflows.transcription.provider_id
+            if "transcription" in workflow_mapping else provider
+        )
+        effective_refinement_provider = (
+            workflows.refinement.provider_id
+            if "refinement" in workflow_mapping else refinement_provider
+        )
+        effective_refinement_model = (
+            workflows.refinement.model_id
+            if "refinement" in workflow_mapping else refinement_model
+        )
+        if ("local_asr_refinement" in workflow_mapping
+                and isinstance(workflows.local_asr_refinement.enabled, bool)):
+            local_asr_cloud_refinement = workflows.local_asr_refinement.enabled
+
+        provider_configs = {
+            name: provider_config(name) for name in PROVIDER_REGISTRY.provider_ids
+        }
+        if "transcription" in workflow_mapping:
+            route = workflows.transcription
+            selected_config = provider_configs.get(route.provider_id)
+            route_model = str(route.model_id or "").strip()
+            if selected_config is not None and route_model:
+                # Keep the flat compatibility field consumed by the current
+                # runtime in lockstep with a nested route's selected model.
+                # Otherwise `audio_model_from_legacy()` would silently use
+                # the provider default after a valid nested route is applied.
+                provider_configs[route.provider_id] = replace(
+                    selected_config, audio_model=route_model)
 
         return cls(
             schema_version=CONFIG_SCHEMA_VERSION,
-            selection=ProviderSelection(provider, refinement_provider, refinement_model),
-            gemini=provider_config("gemini"),
-            openai=provider_config("openai"),
-            groq=provider_config("groq"),
-            local_asr=provider_config("local_asr"),
+            selection=ProviderSelection(
+                effective_transcription_provider,
+                effective_refinement_provider,
+                effective_refinement_model,
+            ),
+            gemini=provider_configs["gemini"],
+            openai=provider_configs["openai"],
+            groq=provider_configs["groq"],
+            local_asr=provider_configs["local_asr"],
             ui=UIPreferences(mode, language),
             startup=StartupSettings(autostart),
             local_asr_cloud_refinement=local_asr_cloud_refinement,
             hotkeys=hotkeys,
+            workflows=workflows,
         )
 
     def to_mapping(self) -> dict[str, Any]:
-        """Serialize using the existing flat keys plus an explicit version."""
+        """Serialize nested workflow routes plus legacy compatibility fields."""
 
         return {
             "schema_version": CONFIG_SCHEMA_VERSION,
@@ -273,6 +415,7 @@ class AppConfig:
             "ui_language": self.ui.language,
             "autostart": self.startup.autostart,
             "hotkeys": self.hotkeys.to_mapping(),
+            "workflows": self.workflows.to_mapping(),
         }
 
     def to_legacy_mapping(self) -> dict[str, Any]:
@@ -281,6 +424,173 @@ class AppConfig:
         values = self.to_mapping()
         values.pop("schema_version", None)
         return values
+
+    def synchronize_legacy_routes(
+        self,
+        legacy_config: "AppConfig",
+        changed_keys: set[str],
+        *,
+        preserve_endpoint_scopes: set[str] | frozenset[str] = frozenset(),
+    ) -> "AppConfig":
+        """Reflect changed flat UI fields without erasing custom routes.
+
+        The legacy desktop surface edits a mapping in place and does not yet
+        know about ``workflows``.  Repository saves pass the previous on-disk
+        flat values to this method, so a route is synchronized only when the
+        corresponding flat value actually changed.  A typed ``AppConfig``
+        save remains authoritative for fully independent workflow routes.
+        """
+        workflows = self.workflows
+        selection = self.selection
+        provider_updates: dict[str, ProviderConfig] = {}
+        selected_audio_key = PROVIDER_REGISTRY.describe(
+            legacy_config.selection.transcription_provider).audio_model_key
+        if {"transcription_provider", selected_audio_key} & changed_keys:
+            current = workflows.transcription
+            transcription_route = legacy_config.workflow(
+                WorkflowScope.TRANSCRIPTION)
+            endpoint = current.custom_endpoint
+            if (current.provider_id != transcription_route.provider_id
+                    and WorkflowScope.TRANSCRIPTION.value
+                    not in preserve_endpoint_scopes):
+                endpoint = ""
+            workflows = workflows.with_route(
+                WorkflowScope.TRANSCRIPTION,
+                replace(
+                    current,
+                    provider_id=transcription_route.provider_id,
+                    model_id=transcription_route.model_id,
+                    custom_endpoint=endpoint,
+                ),
+            )
+            selection = replace(
+                selection,
+                transcription_provider=(
+                    legacy_config.selection.transcription_provider),
+            )
+            selected_config = getattr(
+                self, legacy_config.selection.transcription_provider, None)
+            route_model = str(transcription_route.model_id or "").strip()
+            if isinstance(selected_config, ProviderConfig) and route_model:
+                # Keep flat consumers in lockstep with the route after a
+                # legacy provider/model edit. Without this, a stale nested
+                # route can overwrite the selected provider's audio model
+                # while synchronization updates only the typed route.
+                provider_updates[
+                    legacy_config.selection.transcription_provider
+                ] = replace(selected_config, audio_model=route_model)
+        if {"refinement_provider", "refinement_model"} & changed_keys:
+            previous_shared = workflows.refinement
+            legacy_route = legacy_config.workflow(WorkflowScope.REFINEMENT)
+            for scope in (
+                    WorkflowScope.REFINEMENT.value,
+                    WorkflowScope.REWRITE.value,
+                    WorkflowScope.TRANSLATION.value,
+                    WorkflowScope.LOCAL_ASR_REFINEMENT.value):
+                current = workflows[scope]
+                if (current.provider_id == previous_shared.provider_id
+                        and current.model_id == previous_shared.model_id):
+                    # A custom endpoint is part of an independently selected
+                    # route.  Do not move that route to a different provider
+                    # while retaining a provider-specific proxy URL.  The
+                    # primary legacy refinement route remains synchronized,
+                    # but its endpoint is cleared when the provider changes
+                    # so the route cannot combine incompatible settings. A
+                    # model-only edit keeps the same provider-specific proxy.
+                    if (current.custom_endpoint
+                            and scope != WorkflowScope.REFINEMENT.value):
+                        continue
+                    endpoint = current.custom_endpoint
+                    if (scope == WorkflowScope.REFINEMENT.value
+                            and current.provider_id
+                            != legacy_route.provider_id
+                            and scope not in preserve_endpoint_scopes):
+                        endpoint = ""
+                    workflows = workflows.with_route(
+                        scope,
+                        replace(
+                            current,
+                            provider_id=legacy_route.provider_id,
+                            model_id=legacy_route.model_id,
+                            custom_endpoint=endpoint,
+                        ),
+                    )
+            selection = replace(
+                selection,
+                refinement_provider=legacy_config.selection.refinement_provider,
+                refinement_model=legacy_config.selection.refinement_model,
+            )
+        if "local_asr_cloud_refinement" in changed_keys:
+            workflows = workflows.with_route(
+                WorkflowScope.LOCAL_ASR_REFINEMENT,
+                replace(
+                    workflows.local_asr_refinement,
+                    enabled=legacy_config.local_asr_cloud_refinement,
+                ),
+            )
+        return replace(
+            self,
+            selection=selection,
+            workflows=workflows,
+            **provider_updates,
+            local_asr_cloud_refinement=(
+                legacy_config.local_asr_cloud_refinement
+                if "local_asr_cloud_refinement" in changed_keys
+                else self.local_asr_cloud_refinement),
+        )
+
+    def workflow(self, scope: WorkflowScope | str) -> WorkflowRoute:
+        return self.workflows.route(scope)
+
+    def diagnostic_mapping(self) -> dict[str, Any]:
+        """Return effective routing metadata without prompts or credentials."""
+        return {
+            "schema_version": self.schema_version,
+            "workflows": self.workflows.diagnostic_mapping(),
+        }
+
+    def reset_workflow(
+        self,
+        scope: WorkflowScope | str,
+        *,
+        registry=PROVIDER_REGISTRY,
+    ) -> "AppConfig":
+        """Reset one route to the current provider/model defaults."""
+        normalized = normalize_workflow_scope(scope)
+        if normalized not in WORKFLOW_SCOPES:
+            raise WorkflowConfigurationError(
+                normalized, f"Unknown workflow scope: {normalized}", field="scope"
+            )
+        selection = self.selection
+        if normalized == WorkflowScope.TRANSCRIPTION.value:
+            provider_id = selection.transcription_provider
+            metadata = registry.describe(provider_id)
+            route = WorkflowRoute(
+                provider_id=provider_id,
+                model_id=registry.canonical_audio_model(
+                    provider_id, metadata.default_audio_model
+                ),
+                prompt=DEFAULT_WORKFLOW_PROMPTS[normalized],
+            )
+        else:
+            provider_id = selection.refinement_provider
+            metadata = registry.describe(provider_id)
+            route = WorkflowRoute(
+                provider_id=provider_id,
+                model_id=metadata.default_text_model,
+                prompt=DEFAULT_WORKFLOW_PROMPTS[normalized],
+                enabled=(
+                    self.local_asr_cloud_refinement
+                    if normalized == WorkflowScope.LOCAL_ASR_REFINEMENT.value
+                    else True
+                ),
+            )
+        workflows = self.workflows.with_route(normalized, route)
+        return replace(self, workflows=workflows,
+                       local_asr_cloud_refinement=(
+                           route.enabled
+                           if normalized == WorkflowScope.LOCAL_ASR_REFINEMENT.value
+                           else self.local_asr_cloud_refinement))
 
 
 def _version(value: Any) -> int:
@@ -293,7 +603,181 @@ def _migrate_legacy_to_v1(payload: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
-CONFIG_MIGRATIONS = {0: _migrate_legacy_to_v1}
+def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
+    """Split the shared legacy refinement route into workflow scopes."""
+    migrated = dict(payload)
+    existing = migrated.get("workflows")
+    workflows: dict[str, Any] = {}
+    if isinstance(existing, Mapping):
+        # Canonical scope names must win over aliases when both are present;
+        # otherwise a generated canonical default below can hide an authored
+        # route such as ``dictation`` or ``text_refinement``.
+        canonical_values: dict[str, Any] = {}
+        alias_values: dict[str, Any] = {}
+        for raw_scope, route in existing.items():
+            normalized = normalize_workflow_scope(raw_scope)
+            if normalized not in WORKFLOW_SCOPES:
+                workflows[str(raw_scope)] = route
+                continue
+            raw_value = (
+                raw_scope.value
+                if isinstance(raw_scope, WorkflowScope)
+                else str(raw_scope or "")
+            ).strip().lower()
+            if raw_value == normalized:
+                canonical_values[normalized] = route
+            else:
+                alias_values[normalized] = route
+        workflows.update(alias_values)
+        workflows.update(canonical_values)
+
+    def string(key: str, fallback: str = "") -> str:
+        value = migrated.get(key, fallback)
+        return value.strip() if isinstance(value, str) else fallback
+
+    transcription_provider = string("transcription_provider", "gemini").lower()
+    if transcription_provider not in SUPPORTED_PROVIDERS:
+        transcription_provider = "gemini"
+    requested_refinement_provider = string("refinement_provider").lower()
+    refinement_provider = requested_refinement_provider
+    refinement_fallback = False
+    if refinement_provider not in SUPPORTED_PROVIDERS:
+        refinement_fallback = True
+        refinement_provider = (
+            transcription_provider
+            if transcription_provider in ("openai", "groq")
+            else "openai"
+        )
+    if not PROVIDER_REGISTRY.supports(
+            refinement_provider, ProviderCapability.TEXT_GENERATION):
+        refinement_fallback = True
+        refinement_provider = (
+            transcription_provider
+            if (PROVIDER_REGISTRY.supports(
+                    transcription_provider, ProviderCapability.TEXT_GENERATION)
+                and not PROVIDER_REGISTRY.supports(
+                    transcription_provider,
+                    ProviderCapability.MULTIMODAL_AUDIO))
+            else "openai"
+        )
+    defaults = {
+        "gemini": ("gemini-2.5-flash", "gemini-2.5-flash"),
+        "openai": ("whisper-1", "gpt-4o-mini"),
+        "groq": ("whisper-large-v3-turbo", "llama-3.3-70b-versatile"),
+        "local_asr": ("ggml-small", ""),
+    }
+    transcription_model = string(
+        "gemini_model" if transcription_provider == "gemini"
+        else f"{transcription_provider}_audio_model",
+        defaults.get(transcription_provider, ("", ""))[0],
+    )
+    if transcription_provider == "gemini":
+        transcription_model = transcription_model or defaults["gemini"][0]
+    refinement_model = "" if refinement_fallback else string(
+        "refinement_model",
+        string(f"{refinement_provider}_text_model",
+               defaults.get(refinement_provider, ("", ""))[1]),
+    )
+    local_enabled = migrated.get("local_asr_cloud_refinement", False)
+    local_enabled = local_enabled if isinstance(local_enabled, bool) else False
+
+    defaults_for_scope = {
+        WorkflowScope.TRANSCRIPTION.value: {
+            "provider_id": transcription_provider,
+            "model_id": transcription_model,
+            "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.TRANSCRIPTION.value],
+            "custom_endpoint": "",
+            "enabled": True,
+        },
+        WorkflowScope.REFINEMENT.value: {
+            "provider_id": refinement_provider,
+            "model_id": refinement_model,
+            "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.REFINEMENT.value],
+            "custom_endpoint": "",
+            "enabled": True,
+        },
+        WorkflowScope.REWRITE.value: {
+            "provider_id": refinement_provider,
+            "model_id": refinement_model,
+            "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.REWRITE.value],
+            "custom_endpoint": "",
+            "enabled": True,
+        },
+        WorkflowScope.TRANSLATION.value: {
+            "provider_id": refinement_provider,
+            "model_id": refinement_model,
+            "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.TRANSLATION.value],
+            "custom_endpoint": "",
+            "enabled": True,
+        },
+        WorkflowScope.LOCAL_ASR_REFINEMENT.value: {
+            "provider_id": refinement_provider,
+            "model_id": refinement_model,
+            "prompt": DEFAULT_WORKFLOW_PROMPTS[
+                WorkflowScope.LOCAL_ASR_REFINEMENT.value
+            ],
+            "custom_endpoint": "",
+            "enabled": local_enabled,
+        },
+    }
+    for scope, default in defaults_for_scope.items():
+        if not str(default.get("model_id", "")).strip():
+            try:
+                metadata = PROVIDER_REGISTRY.describe(default["provider_id"])
+                default["model_id"] = (
+                    metadata.default_audio_model
+                    if scope == WorkflowScope.TRANSCRIPTION.value
+                    else metadata.default_text_model
+                )
+            except (ProviderError, KeyError, ValueError):
+                pass
+        if not isinstance(workflows.get(scope), Mapping):
+            workflows[scope] = default
+        else:
+            # Do not overwrite a partially authored future route.  Missing
+            # fields receive deterministic defaults and the migration remains
+            # idempotent when called again.
+            route = dict(workflows[scope])
+            # A v1 route may override the shared legacy provider while
+            # omitting its model.  Canonicalize route aliases before filling
+            # missing fields, then derive that model from the route provider;
+            # otherwise a Groq route could inherit OpenAI's text model and
+            # fail only when the workflow is first used.
+            for canonical, aliases in (
+                    ("provider_id", ("provider",)),
+                    ("model_id", ("model",)),
+                    ("custom_endpoint", ("endpoint", "base_url"))):
+                if canonical not in route:
+                    for alias in aliases:
+                        if alias in route:
+                            route[canonical] = route[alias]
+                            break
+            route_provider = route.get("provider_id", default["provider_id"])
+            if not isinstance(route_provider, str) or not route_provider.strip():
+                route_provider = default["provider_id"]
+            route_provider = route_provider.strip().lower()
+            route_model = str(route.get("model_id", "") or "").strip()
+            if not route_model:
+                try:
+                    metadata = PROVIDER_REGISTRY.describe(route_provider)
+                    route["model_id"] = (
+                        metadata.default_audio_model
+                        if scope == WorkflowScope.TRANSCRIPTION.value
+                        else metadata.default_text_model
+                    )
+                except (ProviderError, KeyError, ValueError):
+                    # Preserve the legacy fallback for unknown providers; the
+                    # normal validation boundary will report that bad route.
+                    pass
+            for key, value in default.items():
+                route.setdefault(key, value)
+            workflows[scope] = route
+    migrated["workflows"] = workflows
+    migrated["schema_version"] = 2
+    return migrated
+
+
+CONFIG_MIGRATIONS = {0: _migrate_legacy_to_v1, 1: _migrate_v1_to_v2}
 
 
 def migrate_config_payload(payload: Any) -> dict[str, Any]:
@@ -503,10 +987,165 @@ class LocalConfigRepository(ConfigRepository):
             runtime = self._load_runtime_mapping(raw_mapping, migrated)
             return AppConfig.from_mapping(runtime, self.defaults)
 
-    def save(self, config: AppConfig | Mapping[str, Any]) -> None:
+    def _model_from_mapping(
+        self,
+        config: Mapping[str, Any],
+        current_payload: Mapping[str, Any],
+        *,
+        preserve_explicit_endpoints: bool = False,
+        synchronize_legacy: bool = True,
+    ) -> AppConfig:
+        """Merge partial legacy input with disk before normalizing routes."""
+        merged = dict(current_payload)
+        incoming = dict(config)
+        current_workflows = current_payload.get("workflows")
+        incoming_workflows = incoming.get("workflows")
+        merged.update(incoming)
+
+        def split_workflow_values(values: Any):
+            """Split aliases so canonical scope names have deterministic precedence."""
+            unknown: dict[str, Any] = {}
+            aliases: dict[str, Any] = {}
+            canonical: dict[str, Any] = {}
+            if not isinstance(values, Mapping):
+                return unknown, aliases, canonical
+            for raw_scope, route in values.items():
+                scope = normalize_workflow_scope(raw_scope)
+                if scope not in WORKFLOW_SCOPES:
+                    unknown[scope] = route
+                    continue
+                raw_value = (
+                    raw_scope.value
+                    if isinstance(raw_scope, WorkflowScope)
+                    else str(raw_scope or "")
+                ).strip().lower()
+                target = canonical if raw_value == scope else aliases
+                target[scope] = route
+            return unknown, aliases, canonical
+
+        def canonicalize_route(route: Any):
+            if not isinstance(route, Mapping):
+                return route
+            route = dict(route)
+            for canonical, aliases in (
+                    ("provider_id", ("provider",)),
+                    ("model_id", ("model",)),
+                    ("custom_endpoint", ("endpoint", "base_url"))):
+                if canonical not in route:
+                    for alias in aliases:
+                        if alias in route:
+                            route[canonical] = route[alias]
+                            break
+            return route
+
+        current_unknown, current_aliases, current_canonical = (
+            split_workflow_values(current_workflows))
+        incoming_unknown, incoming_aliases, incoming_canonical = (
+            split_workflow_values(incoming_workflows))
+        current_route_values = dict(current_unknown)
+        current_route_values.update(current_aliases)
+        current_route_values.update(current_canonical)
+        if isinstance(incoming_workflows, Mapping):
+            workflow_values: dict[str, Any] = dict(current_route_values)
+            # If a payload contains both spellings, the canonical route is
+            # authoritative, matching WorkflowConfig.from_mapping() and
+            # migrations. Each selected route still deep-merges with the
+            # persisted route so partial updates retain omitted fields.
+            incoming_route_values = dict(incoming_unknown)
+            incoming_route_values.update(incoming_aliases)
+            incoming_route_values.update(incoming_canonical)
+            for scope, route in incoming_route_values.items():
+                route = canonicalize_route(route)
+                previous_route = workflow_values.get(scope)
+                if isinstance(previous_route, Mapping) and isinstance(route, Mapping):
+                    merged_route = dict(previous_route)
+                    merged_route.update(dict(route))
+                    workflow_values[scope] = merged_route
+                else:
+                    workflow_values[scope] = route
+            merged["workflows"] = workflow_values
+        model = AppConfig.from_mapping(merged, self.defaults)
+        legacy_workflow_keys = {
+            "transcription_provider",
+            "refinement_provider",
+            "refinement_model",
+            "local_asr_cloud_refinement",
+        }
+        legacy_workflow_keys.update(
+            metadata.audio_model_key for metadata in PROVIDER_REGISTRY.metadata
+        )
+        changed_keys = {
+            key for key in legacy_workflow_keys
+            if key in config and config.get(key) != current_payload.get(key)
+        }
+        explicit_endpoint_scopes: frozenset[str] = frozenset()
+        if preserve_explicit_endpoints and isinstance(incoming_workflows, Mapping):
+            explicit_endpoint_scopes = frozenset(
+                scope
+                for scope, route in {
+                    **incoming_aliases, **incoming_canonical
+                }.items()
+                if isinstance(route, Mapping)
+                and any(
+                    key in route
+                    for key in ("custom_endpoint", "endpoint", "base_url")
+                )
+                and self._mapping_route_explicitly_changed(
+                    scope, route, current_route_values)
+            )
+        if changed_keys and synchronize_legacy:
+            legacy_values = dict(current_payload)
+            legacy_values.update(dict(config))
+            legacy_values.pop("workflows", None)
+            legacy_model = AppConfig.from_mapping(legacy_values, self.defaults)
+            model = model.synchronize_legacy_routes(
+                legacy_model,
+                changed_keys,
+                preserve_endpoint_scopes=explicit_endpoint_scopes,
+            )
+        return model
+
+    @staticmethod
+    def _mapping_route_explicitly_changed(
+        scope: str,
+        route: Mapping[str, Any],
+        current_workflows: Any,
+    ) -> bool:
+        """Detect an intentional nested route edit in a compatibility mapping."""
+        if not isinstance(current_workflows, Mapping):
+            return True
+        previous = current_workflows.get(scope)
+        if not isinstance(previous, Mapping):
+            return True
+
+        def value(values: Mapping[str, Any], *keys: str) -> str:
+            for key in keys:
+                if key in values and isinstance(values[key], str):
+                    return values[key].strip()
+            return ""
+
+        incoming_endpoint = value(route, "custom_endpoint", "endpoint", "base_url")
+        previous_endpoint = value(
+            previous, "custom_endpoint", "endpoint", "base_url")
+        if incoming_endpoint.rstrip("/") != previous_endpoint.rstrip("/"):
+            return True
+        return any(
+            key in route
+            and value(route, key) != value(previous, key)
+            for key in ("provider_id", "provider", "model_id", "model")
+        )
+
+    def save(
+        self,
+        config: AppConfig | Mapping[str, Any],
+        *,
+        _synchronize_legacy: bool = True,
+    ) -> None:
         with self._lock:
             _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
-            current_payload = _read_json_mapping(self.path) or {}
+            current_payload = migrate_config_payload(
+                _read_json_mapping(self.path) or {}
+            )
             if isinstance(config, AppConfig):
                 if config.schema_version > CONFIG_SCHEMA_VERSION:
                     raise UnsupportedSchemaVersionError(
@@ -520,9 +1159,20 @@ class LocalConfigRepository(ConfigRepository):
                     raise UnsupportedSchemaVersionError(
                         f"Cannot save schema version {supplied_version} "
                         f"with supported version {CONFIG_SCHEMA_VERSION}")
-                model = AppConfig.from_mapping(config, self.defaults)
+                model = self._model_from_mapping(
+                    config,
+                    current_payload,
+                    synchronize_legacy=_synchronize_legacy,
+                )
                 supplied_keys = set(config)
 
+            # ``save`` is also a public application-facing write path (the
+            # legacy UI still uses it), so it must enforce the same route
+            # boundary as ``apply`` before serializing any endpoint or model.
+            model = replace(
+                model,
+                workflows=validate_workflow_config(model.workflows),
+            )
             values = model.to_mapping()
             changes: dict[str, str] = {}
             preserve_legacy: set[str] = set()
@@ -585,6 +1235,60 @@ class LocalConfigRepository(ConfigRepository):
                 self._restore_secrets(previous)
                 raise SecretStoreUnavailableError(
                     "The credential store could not be updated") from None
+
+    def apply(self, config: AppConfig | Mapping[str, Any]) -> AppConfig:
+        """Validate routes, then persist config as one rollback-capable unit.
+
+        ``save`` already coordinates secret-store verification and the atomic
+        JSON replacement.  Keeping this higher-level operation separate lets
+        settings callers validate every workflow before touching a provider,
+        sidecar, or credential backend.
+        """
+        with self._lock:
+            if isinstance(config, AppConfig):
+                model = config
+                supplied_keys = None
+            else:
+                _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
+                supplied_version = _version(config.get("schema_version"))
+                if supplied_version > CONFIG_SCHEMA_VERSION:
+                    raise UnsupportedSchemaVersionError(
+                        f"Cannot save schema version {supplied_version} "
+                        f"with supported version {CONFIG_SCHEMA_VERSION}")
+                current_payload = migrate_config_payload(
+                    _read_json_mapping(self.path) or {}
+                )
+                model = self._model_from_mapping(
+                    config,
+                    current_payload,
+                    preserve_explicit_endpoints=True,
+                )
+                supplied_keys = set(config)
+            validated = replace(
+                model,
+                workflows=validate_workflow_config(model.workflows),
+            )
+            if supplied_keys is None:
+                self.save(validated)
+                return self.load()
+            persisted = validated.to_mapping()
+            for key in PROVIDER_SECRET_KEYS.values():
+                if key not in supplied_keys:
+                    persisted.pop(key, None)
+            self.save(persisted, _synchronize_legacy=False)
+            return self.load()
+
+    def reset_workflow(self, scope: WorkflowScope | str) -> AppConfig:
+        """Reset and persist one workflow route while retaining other settings."""
+        current = self.load()
+        return self.apply(current.reset_workflow(scope))
+
+    def test_workflow(
+        self,
+        scope: WorkflowScope | str | None = None,
+    ) -> WorkflowTestResult | tuple[WorkflowTestResult, ...]:
+        """Return a safe local route check without making network requests."""
+        return test_workflow_configuration(self.load().workflows, scope)
 
 
 class LocalUsageStatsRepository(UsageStatsRepository):

@@ -113,6 +113,15 @@ class ProviderRegistry:
             )).strip(),
         )
 
+    def connection_for_route(
+            self, provider_id: str, connection: ProviderConnection,
+            custom_endpoint: str = "") -> ProviderConnection:
+        """Apply a workflow endpoint without coupling adapters to the UI."""
+        endpoint = str(custom_endpoint or "").strip().rstrip("/")
+        if endpoint:
+            self.adapter(provider_id, ProviderCapability.CUSTOM_BASE_URL)
+        return ProviderConnection(connection.api_key, endpoint or connection.base_url)
+
     def audio_model_from_legacy(self, provider_id: str,
             config: Mapping[str, object]) -> str:
         metadata = self.describe(provider_id)
