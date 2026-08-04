@@ -548,6 +548,54 @@ class RecordingSessionTests(unittest.TestCase):
 
             popen.assert_not_called()
 
+    def test_settings_hides_waveaudio_prefix_collisions_and_clears_selection(self):
+        prefix = "x" * 31
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": prefix + "-a",
+                "host_api": "WASAPI",
+                "native_id": "endpoint-a",
+                "index": 3,
+                "max_input_channels": 1,
+            },
+            {
+                "name": prefix + "-b",
+                "host_api": "WASAPI",
+                "native_id": "endpoint-b",
+                "index": 7,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "System default",
+                "host_api": "WASAPI",
+                "native_id": "endpoint-default",
+                "index": 9,
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "USB microphone",
+                "host_api": "WASAPI",
+                "index": 11,
+                "max_input_channels": 1,
+            },
+        ])
+        colliding_id = inventory.devices[0].stable_id
+
+        with patch.object(app, "IS_WIN", True), patch.object(app, "IS_MAC", False):
+            selectable = app._selectable_microphone_devices(inventory)
+
+            self.assertEqual(
+                [device.name for device in selectable],
+                ["System default", "USB microphone"],
+            )
+            self.assertIsNone(
+                app._sanitize_microphone_selection(inventory, colliding_id))
+            self.assertEqual(
+                app._sanitize_microphone_selection(inventory, "stale-id"),
+                "stale-id",
+            )
+
     def test_raw_input_stream_failure_still_enforces_max_duration(self):
         controls = app.RecordingControls(max_duration_seconds=5, warning_seconds=1)
         clock = FakeBoundaryClock()

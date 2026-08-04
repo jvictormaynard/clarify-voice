@@ -2166,6 +2166,41 @@ def find_sox():
 SOX_EXE = find_sox()
 SOX_WAVE_AUDIO_NAME_MAX_CHARS = 31
 
+
+def _sox_microphone_name_key(value):
+    normalized = value.casefold()
+    if IS_WIN and not normalized.isdigit():
+        return normalized[:SOX_WAVE_AUDIO_NAME_MAX_CHARS]
+    return normalized
+
+
+def _selectable_microphone_devices(inventory):
+    """Return inventory devices whose SoX input name is unambiguous."""
+    devices = inventory.available_devices
+    name_counts = {}
+    for device in devices:
+        key = _sox_microphone_name_key(device.name)
+        name_counts[key] = name_counts.get(key, 0) + 1
+    return tuple(
+        device for device in devices
+        if name_counts[_sox_microphone_name_key(device.name)] == 1
+    )
+
+
+def _sanitize_microphone_selection(inventory, selected_id):
+    """Clear a present endpoint that Settings cannot safely route through SoX."""
+    if selected_id is None:
+        return None
+    present = any(device.stable_id == selected_id for device in inventory.devices)
+    if not present:
+        # Preserve stale preferences so the normal fallback warning remains
+        # available to the Settings surface.
+        return selected_id
+    selectable_ids = {
+        device.stable_id for device in _selectable_microphone_devices(inventory)
+    }
+    return selected_id if selected_id in selectable_ids else None
+
 def get_primary_monitor():
     """Return (width, height) of the primary monitor work area."""
     if IS_WIN:
@@ -4058,21 +4093,9 @@ class Recorder:
             # safe to request through this SoX route.
             return "default"
         if inventory is not None:
-            def sox_name_key(value):
-                normalized = value.casefold()
-                if IS_WIN and not normalized.isdigit():
-                    # SoX WaveAudio matches non-numeric names using only the
-                    # first 31 characters. Treat prefix collisions as
-                    # ambiguous before launching a process that could capture
-                    # the wrong endpoint.
-                    return normalized[:SOX_WAVE_AUDIO_NAME_MAX_CHARS]
-                return normalized
-
-            name_key = sox_name_key(name)
-            same_name = tuple(
-                device for device in inventory.available_devices
-                if sox_name_key(device.name) == name_key)
-            if len(same_name) != 1:
+            if not any(
+                    device.stable_id == selection.device.stable_id
+                    for device in _selectable_microphone_devices(inventory)):
                 raise MicrophoneUnavailableError(
                     "Selected microphone has no unambiguous backend name")
         return name
@@ -11112,7 +11135,10 @@ class App(ctk.CTk):
                     text_color=DIM)
                 return
             if supports_explicit_microphone:
-                for device in inventory.available_devices:
+                microphone_state["selection"] = _sanitize_microphone_selection(
+                    inventory, microphone_state["selection"])
+                selection = inventory.resolve(microphone_state["selection"])
+                for device in _selectable_microphone_devices(inventory):
                     label = device.name
                     if device.host_api:
                         label = f"{label} · {device.host_api}"
@@ -11157,9 +11183,13 @@ class App(ctk.CTk):
                 microphone_status.configure(
                     text="Input test unavailable without PortAudio.", text_color=DIM)
                 return
-            selection = inventory.resolve(
+            selected_id = (
                 microphone_state["selection"]
                 if _sox_supports_explicit_microphone_selection() else None)
+            if selected_id is not None:
+                selected_id = _sanitize_microphone_selection(inventory, selected_id)
+                microphone_state["selection"] = selected_id
+            selection = inventory.resolve(selected_id)
             if not selection.can_record:
                 microphone_status.configure(
                     text="No safe microphone to test.", text_color="#d17878")
