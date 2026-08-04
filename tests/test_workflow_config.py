@@ -231,7 +231,7 @@ class WorkflowConfigurationTests(unittest.TestCase):
                         },
                     },
                 }).workflows)
-        for port in ("notaport", "99999"):
+        for port in ("0", "notaport", "99999"):
             with self.assertRaises(WorkflowConfigurationError):
                 validate_workflow_config(AppConfig.from_mapping({
                     "workflows": {
@@ -313,6 +313,18 @@ class WorkflowConfigurationTests(unittest.TestCase):
                 )
             )
         self.assertEqual(endpoint_error.exception.field, "custom_endpoint")
+
+        with self.assertRaises(WorkflowConfigurationError) as model_error:
+            validate_workflow_config(AppConfig.from_mapping({
+                "workflows": {
+                    "transcription": {
+                        "provider_id": "local_asr",
+                        "model_id": "ggml-medium",
+                    },
+                },
+            }).workflows)
+        self.assertEqual(model_error.exception.provider_id, "local_asr")
+        self.assertEqual(model_error.exception.field, "model_id")
 
     def test_repository_apply_rolls_back_file_and_secret_on_persistence_failure(self):
         with tempfile.TemporaryDirectory() as directory:

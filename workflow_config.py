@@ -388,6 +388,13 @@ def validate_workflow_route(
                 normalized_scope, "The audio model is not valid for this provider.",
                 provider_id=provider, capability=capability, field="model_id",
             ) from error
+        pinned_model = str(metadata.default_audio_model or "").strip()
+        if provider == "local_asr" and model != pinned_model:
+            raise WorkflowConfigurationError(
+                normalized_scope,
+                f"Local Whisper supports only the pinned {pinned_model} model.",
+                provider_id=provider, capability=capability, field="model_id",
+            )
     endpoint = str(route.custom_endpoint or "").strip().rstrip("/")
     if endpoint:
         if not metadata.supports(ProviderCapability.CUSTOM_BASE_URL):
@@ -424,7 +431,13 @@ def validate_workflow_route(
             )
             # Accessing .port is what makes urllib reject non-numeric and
             # out-of-range ports; hostname alone does not perform that check.
-            _ = endpoint_parts.port
+            port = endpoint_parts.port
+            if port is not None and not 1 <= port <= 65535:
+                raise WorkflowConfigurationError(
+                    normalized_scope,
+                    "Custom endpoint port must be between 1 and 65535.",
+                    provider_id=provider, field="custom_endpoint",
+                )
             # Provider adapters append operation paths to the configured
             # endpoint.  Keeping a query or fragment here would either put
             # that path inside the query (``...?region=eu/v1``) or discard it
