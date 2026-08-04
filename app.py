@@ -4340,6 +4340,12 @@ class RecordingSession:
         self._boundary_callback = callback
 
     def _start_boundary_monitor(self):
+        # A lifecycle observer has no work to perform until a consumer is
+        # registered. In particular, test doubles and integrations that only
+        # expose a boundary event must not create a thread that can outlive
+        # their session cleanup.
+        if self._boundary_callback is None:
+            return
         event = getattr(self.recorder, "boundary_event", None)
         # ``Mock`` dynamically manufactures any attribute, including a
         # callable ``wait``. Require the concrete Event contract so test

@@ -94,6 +94,7 @@ class RecordingSessionTests(unittest.TestCase):
             session.start()
             # The boundary observer is lifecycle-only; provider/file
             # ownership must remain empty while capture is still active.
+            self.assertIsNone(session._boundary_monitor)
             self.assertFalse(session._active_workers())
             session.cancel()
 
@@ -694,10 +695,7 @@ class RecordingSessionTests(unittest.TestCase):
             worker.start()
             self.assertTrue(provider_started.wait(1))
 
-            cleanup_calls = []
-
             def delete(path_to_remove, *, strict=False):
-                cleanup_calls.append(path_to_remove)
                 path_to_remove.unlink(missing_ok=True)
 
             with patch.object(app, "SESSION_WORKER_JOIN_SECONDS", 0.01), \
@@ -715,13 +713,7 @@ class RecordingSessionTests(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
                 self.assertTrue(session.wait_for_shutdown(1))
 
-            target_calls = [path_to_remove for path_to_remove in cleanup_calls
-                            if path_to_remove == path]
-            self.assertEqual(
-                target_calls,
-                [path],
-                f"expected one cleanup for {path}, observed {cleanup_calls}",
-            )
+            self.assertEqual(cleanup.call_count, 1)
             self.assertFalse(path.exists())
 
     def test_snapshot_releases_wav_before_unbounded_provider_returns(self):
