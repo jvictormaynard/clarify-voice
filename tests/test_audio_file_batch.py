@@ -291,6 +291,29 @@ class AudioFileBatchTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
         self.assertGreaterEqual(call_times[1] - call_times[0], 0.02)
 
+    def test_retry_skips_when_announced_delay_exceeds_bounded_cap(self):
+        attempts = 0
+
+        class LongWaitGateway:
+            def transcribe(self, request, selection, cancel_token):
+                nonlocal attempts
+                attempts += 1
+                error = RetryableAudioBatchError("try later")
+                error.retry_after_seconds = 30.0
+                raise error
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"fixture")
+            result = AudioFileBatchService(
+                LongWaitGateway(),
+                max_attempts=3,
+                retry_delay_seconds=0.001,
+            ).run([path], _selection())
+            self.assertEqual(result.files[0].status, AudioFileStatus.FAILED)
+            self.assertEqual(result.files[0].attempts, 1)
+        self.assertEqual(attempts, 1)
+
     def test_retry_backoff_is_cancelled_before_next_attempt(self):
         first_attempt = threading.Event()
         attempts = 0

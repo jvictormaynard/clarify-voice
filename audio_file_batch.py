@@ -368,15 +368,26 @@ def _retry_delay_seconds(
         error: BaseException,
         attempt: int,
         base_seconds: float,
-        ) -> float:
+        ) -> float | None:
     """Return a bounded delay, preferring provider-announced retry timing."""
 
     announced = getattr(error, "retry_after_seconds", None)
     if announced is None:
         announced = getattr(error, "retry_delay_seconds", None)
+    if announced is not None:
+        try:
+            delay = float(announced)
+        except (TypeError, ValueError, OverflowError):
+            delay = None
+        else:
+            # Never retry before a server-requested wait.  If it exceeds our
+            # bounded worker policy, let the caller surface the typed error
+            # instead of hammering a throttled endpoint early.
+            if delay > MAX_RETRY_DELAY_SECONDS:
+                return None
+            return max(0.0, delay)
     try:
-        delay = float(announced) if announced is not None else float(
-            base_seconds * (2 ** max(0, attempt - 1)))
+        delay = float(base_seconds * (2 ** max(0, attempt - 1)))
     except (TypeError, ValueError, OverflowError):
         delay = float(base_seconds * (2 ** max(0, attempt - 1)))
     return min(MAX_RETRY_DELAY_SECONDS, max(0.0, delay))
@@ -747,6 +758,8 @@ class AudioBatchJob:
                             attempts,
                             self._service.retry_delay_seconds,
                         )
+                        if delay is None:
+                            break
                         if token.wait(delay):
                             return replace(
                                 current, status=AudioFileStatus.CANCELLED,
