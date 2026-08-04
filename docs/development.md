@@ -72,14 +72,14 @@ Run the same core checks used in CI:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q app.py workflows.py repositories.py workflow_config.py voice_translation.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
+.\.venv\Scripts\python.exe -m compileall -q app.py workflows.py repositories.py workflow_config.py voice_translation.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py history_store.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
 ```
 
 From Linux or WSL with the dependencies installed:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q app.py workflows.py repositories.py workflow_config.py voice_translation.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
+python3 -m compileall -q app.py workflows.py repositories.py workflow_config.py voice_translation.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py history_store.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
 ```
 
 Repository-specific tests live in `tests/test_repositories.py` and
