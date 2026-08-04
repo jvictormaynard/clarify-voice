@@ -284,7 +284,7 @@ class WorkflowTestResult:
             "provider_id": self.provider_id,
             "model_id": self.model_id,
             "capability": self.capability,
-            "endpoint": self.endpoint,
+            "endpoint": _safe_endpoint_for_diagnostics(self.endpoint),
             "enabled": self.enabled,
             "ok": self.ok,
         }

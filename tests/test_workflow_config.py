@@ -211,6 +211,8 @@ class WorkflowConfigurationTests(unittest.TestCase):
             "https://proxy.example/v1",
         )
         self.assertNotIn("region", json.dumps(diagnostic))
+        result = test_workflow_configuration(config.workflows, "rewrite")
+        self.assertNotIn("region", json.dumps(result.to_mapping()))
 
     def test_capability_errors_are_actionable_before_provider_work(self):
         workflows = AppConfig.from_mapping({
