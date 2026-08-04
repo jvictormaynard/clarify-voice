@@ -1436,7 +1436,11 @@ class LocalASRSidecarManager:
                     "--request-path", request_path,
                     "--threads", str(threads),
                     "--language", "auto",
-                    "--no-context",
+                    # whisper.cpp v1.9.1 does not implement the newer
+                    # --no-context alias.  A zero context size preserves the
+                    # intended stateless transcription behavior on the
+                    # pinned runtime.
+                    "--max-context", "0",
                     "--no-timestamps",
                     "--no-gpu",
                 ]
