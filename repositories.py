@@ -859,7 +859,22 @@ class LocalConfigRepository(ConfigRepository):
     ) -> AppConfig:
         """Merge partial legacy input with disk before normalizing routes."""
         merged = dict(current_payload)
-        merged.update(dict(config))
+        incoming = dict(config)
+        current_workflows = current_payload.get("workflows")
+        incoming_workflows = incoming.get("workflows")
+        merged.update(incoming)
+        if (isinstance(current_workflows, Mapping)
+                and isinstance(incoming_workflows, Mapping)):
+            workflow_values = dict(current_workflows)
+            for scope, route in incoming_workflows.items():
+                previous_route = workflow_values.get(scope)
+                if isinstance(previous_route, Mapping) and isinstance(route, Mapping):
+                    merged_route = dict(previous_route)
+                    merged_route.update(dict(route))
+                    workflow_values[scope] = merged_route
+                else:
+                    workflow_values[scope] = route
+            merged["workflows"] = workflow_values
         model = AppConfig.from_mapping(merged, self.defaults)
         legacy_workflow_keys = {
             "transcription_provider",
@@ -988,13 +1003,13 @@ class LocalConfigRepository(ConfigRepository):
             )
             if supplied_keys is None:
                 self.save(validated)
-            else:
-                persisted = validated.to_mapping()
-                for key in PROVIDER_SECRET_KEYS.values():
-                    if key not in supplied_keys:
-                        persisted.pop(key, None)
-                self.save(persisted)
-            return validated
+                return validated
+            persisted = validated.to_mapping()
+            for key in PROVIDER_SECRET_KEYS.values():
+                if key not in supplied_keys:
+                    persisted.pop(key, None)
+            self.save(persisted)
+            return self.load()
 
     def reset_workflow(self, scope: WorkflowScope | str) -> AppConfig:
         """Reset and persist one workflow route while retaining other settings."""

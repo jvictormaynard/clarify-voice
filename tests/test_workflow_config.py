@@ -113,11 +113,17 @@ class WorkflowConfigurationTests(unittest.TestCase):
                 "custom_endpoint": "https://proxy.example/v1",
             }
             repository.save(independent)
+            repository.save({
+                "workflows": {
+                    "translation": {"prompt": "partial translation"},
+                },
+            })
             repository.save({"ui_language": "pt"})
             preserved = repository.load().workflow(WorkflowScope.TRANSLATION)
             self.assertEqual(preserved.provider_id, "groq")
             self.assertEqual(preserved.custom_endpoint,
                              "https://proxy.example/v1")
+            self.assertEqual(preserved.prompt, "partial translation")
 
             legacy = repository.load().to_legacy_mapping()
             legacy.update({
@@ -291,6 +297,19 @@ class WorkflowConfigurationTests(unittest.TestCase):
 
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(secrets.get("openai"), "old-test-key")
+
+    def test_partial_apply_returns_secret_restored_from_secure_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            secrets = MemorySecretStore()
+            repository = LocalConfigRepository(path, secret_store=secrets)
+            repository.save({"openai_api_key": "keep-test-key"})
+
+            applied = repository.apply({"ui_language": "pt"})
+
+            self.assertEqual(applied.ui.language, "pt")
+            self.assertEqual(applied.openai.api_key, "keep-test-key")
+            self.assertEqual(secrets.get("openai"), "keep-test-key")
 
     def test_reset_and_test_are_local_and_preserve_other_routes(self):
         with tempfile.TemporaryDirectory() as directory:
