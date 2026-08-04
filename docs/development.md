@@ -72,14 +72,14 @@ Run the same core checks used in CI:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q app.py workflows.py repositories.py workflow_config.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
+.\.venv\Scripts\python.exe -m compileall -q app.py workflows.py repositories.py workflow_config.py voice_translation.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
 ```
 
 From Linux or WSL with the dependencies installed:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q app.py workflows.py repositories.py workflow_config.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
+python3 -m compileall -q app.py workflows.py repositories.py workflow_config.py voice_translation.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
 ```
 
 Repository-specific tests live in `tests/test_repositories.py` and
@@ -186,6 +186,16 @@ dictation, rewrite, translation, overlap prevention, focus-safe target capture,
 publication ordering, shutdown cancellation, and stale-worker rejection without
 constructing Tk widgets. A small app-level harness also verifies Escape cannot
 reset the UI while a terminal publication is blocked.
+
+The voice-translation foundation is covered separately by
+`tests/test_voice_translation.py`. These tests use fake provider, clipboard,
+and monotonic-clock seams to verify language/config round trips, capability
+validation, the state sequence, raw-transcript fallback, copy-only focus and
+clipboard decisions, atomic cancellation/publication races, shared publication
+overlap serialization, and stale-worker operation-ID rejection. They do not
+claim the future recorder, hotkey, packaged Windows, restart, or three-
+application manual acceptance; those checks belong to the integration
+follow-up.
 
 ## Build
 

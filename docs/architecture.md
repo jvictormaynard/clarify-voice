@@ -89,6 +89,42 @@ URLs at rest. Its
 `test_workflow_configuration` result is local and diagnostic-safe: it makes no
 provider request and does not persist prompt text.
 
+### Voice translation foundation (`voice_translation.py`)
+
+Issue #49 adds a separate, UI-free contract for voice translation rather than
+coupling a new hotkey to the selected-text `WorkflowService`. The versioned
+`VoiceTranslationConfig` stores an automatic or explicit source language, one
+explicit target language, and a dedicated provider/model/prompt route. Route
+validation delegates to the provider capability registry and therefore rejects
+providers without `TEXT_GENERATION` before a request can start; it performs no
+network call and keeps prompts out of diagnostics.
+
+`VoiceTranslationWorkflow` is a deterministic transaction seam for the future
+recorder and Windows adapters. Its immutable state machine retains the raw
+transcript across translation, focus, clipboard, and publication failures. A
+translation failure or empty result produces an explicit `COPY_ONLY` decision
+containing that raw transcript. A successful translation is only `PASTED` when
+both the captured target is still current and the clipboard adapter says it
+owns the publication transaction; otherwise it is explicitly `COPY_ONLY`.
+An atomic `claim_publication` state transition is a non-cancellable barrier:
+once the clipboard effect starts, cancellation is ignored and the eventual
+completion remains consistent with the published outcome. The application-wide
+default `VoiceTranslationPublicationCoordinator` serializes external
+publication effects across separately constructed workflow objects, so two
+global actions cannot paste over one another. The policy is side-effect free
+and can be reviewed independently of any desktop API. Every worker carries the
+operation ID captured when it starts; all transitions and publication claims
+verify that ID, so a late completion from a cancelled run fails closed instead
+of mutating or publishing into a newer operation. Its caller receives the
+originating operation's terminal snapshot, never the newer operation's state.
+
+This is intentionally scaffolding, not the packaged feature. A follow-up must
+connect the state machine to recording, global hotkey dispatch, the focus-safe
+Windows clipboard transaction, visible local/cloud routing and local-ASR
+cloud-refinement opt-in, settings persistence, shutdown/cancellation, and
+manual acceptance in three real applications. No `app.py` route or packaged
+Windows claim is made by this foundation.
+
 #### Adding an OpenAI-compatible provider
 
 1. Add `ProviderMetadata` with a canonical lowercase API ID, a separate display

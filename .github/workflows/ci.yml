@@ -85,6 +85,7 @@ jobs:
       - name: Compile Python sources
         run: >-
           python -m compileall -q app.py workflows.py desktop_state.py repositories.py workflow_config.py
+          voice_translation.py
           secret_store.py update_security.py version.py windows_clipboard.py
           windows_hotkeys.py provider_types.py provider_adapters.py provider_http.py
           provider_registry.py scripts/create_release_manifest.py tests
