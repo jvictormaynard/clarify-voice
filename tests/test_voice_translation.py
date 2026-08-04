@@ -82,6 +82,11 @@ class FakeClipboard:
         self.published.append((text, target, disposition))
 
 
+class FailingClipboard(FakeClipboard):
+    def publish(self, _text, _target, _disposition):
+        raise RuntimeError("clipboard busy")
+
+
 class BlockingClipboard(FakeClipboard):
     def __init__(self) -> None:
         super().__init__()
@@ -354,6 +359,17 @@ class VoiceTranslationWorkflowTests(unittest.TestCase):
         self.assertEqual(state.failure_code, "empty_translation")
         self.assertEqual(state.raw_transcript, "Olá do microfone")
         self.assertEqual(state.publication, VoiceTranslationPublication.COPY_ONLY)
+
+    def test_publication_failure_retains_translated_and_raw_text(self):
+        self.clipboard = FailingClipboard()
+        state = self.workflow().run(b"audio")
+
+        self.assertEqual(state.phase, VoiceTranslationPhase.FAILED)
+        self.assertEqual(state.failure_code, "publication_failed")
+        self.assertEqual(state.raw_transcript, "Olá do microfone")
+        self.assertEqual(state.translated_text, "Hello from the microphone")
+        self.assertEqual(state.published_text, "")
+        self.assertEqual(state.publication, VoiceTranslationPublication.NONE)
 
     def test_focus_loss_downgrades_to_copy_only(self):
         self.clipboard.target_current = False

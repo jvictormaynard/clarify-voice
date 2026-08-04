@@ -502,6 +502,38 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(app._language_display_name("fr-FR"), "fr-FR")
 
     @patch("app.PROVIDER_HTTP.session.post")
+    def test_openai_whisper_normalizes_regional_language_hint(self, post):
+        app.APP_CONFIG.update({
+            "openai_api_key": "openai-key",
+            "openai_base_url": "https://api.openai.com/v1",
+            "openai_audio_model": "whisper-1",
+        })
+        post.return_value = FakeResponse({"text": "transcript"})
+
+        self.assertEqual(
+            app.call_openai(self.audio_path, "transcription", "pt-BR"),
+            "transcript",
+        )
+
+        self.assertEqual(post.call_args.kwargs["data"]["language"], "pt")
+
+    @patch("app.PROVIDER_HTTP.session.post")
+    def test_groq_whisper_normalizes_regional_language_hint(self, post):
+        app.APP_CONFIG.update({
+            "groq_api_key": "groq-key",
+            "groq_base_url": "https://api.groq.com/openai/v1",
+            "groq_audio_model": "whisper-large-v3-turbo",
+        })
+        post.return_value = FakeResponse({"text": "transcript"})
+
+        self.assertEqual(
+            app.call_groq(self.audio_path, "transcription", "de-DE"),
+            "transcript",
+        )
+
+        self.assertEqual(post.call_args.kwargs["data"]["language"], "de")
+
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_gemini_custom_proxy_uses_bearer_and_v1beta(self, post):
         app.APP_CONFIG.update({
             "gemini_api_key": "proxy-key",
@@ -1600,6 +1632,48 @@ class WorkflowAppBridgeTests(unittest.TestCase):
         )
 
         set_state.assert_called_once_with("microphone_unavailable")
+
+    def test_voice_translation_failure_shows_retained_translation_or_raw_text(self):
+        show_result = Mock()
+        set_state = Mock()
+
+        def set_state_and_finish(*args, **kwargs):
+            set_state(*args, **kwargs)
+            callback = kwargs.get("after_ready")
+            if callback is not None:
+                callback()
+
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _set_state=set_state_and_finish,
+            _show_result=show_result,
+            _t=lambda key: key,
+            after=lambda _delay, callback: callback(),
+        )
+        for translated, expected in (
+                ("translated text", "translated text"),
+                ("", "raw transcript")):
+            with self.subTest(expected=expected):
+                state = SimpleNamespace(
+                    published_text="",
+                    translated_text=translated,
+                    raw_transcript="raw transcript",
+                )
+                app.App._on_voice_translation_state(
+                    harness,
+                    app.VoiceTranslationRuntimeState(
+                        app.VoiceTranslationPhase.FAILED,
+                        2,
+                        workflow_state=state,
+                    ),
+                )
+
+        self.assertEqual(set_state.call_count, 2)
+        self.assertEqual(
+            show_result.call_args_list,
+            [call("translated text"), call("raw transcript")],
+        )
 
     def test_dictation_uses_platform_copy_and_paste_on_non_windows(self):
         target = app.SelectionTarget(77, "editor.exe")

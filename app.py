@@ -2459,6 +2459,15 @@ def _language_display_name(value: str) -> str:
     base = key.split("-", 1)[0]
     return LANG_NAMES.get(base, text)
 
+
+def _provider_language_hint(value: str) -> str:
+    """Return the base ISO hint accepted by Whisper-compatible endpoints."""
+    text = str(value or "").strip().replace("_", "-")
+    if not text or text.casefold() == "auto":
+        return ""
+    return text.split("-", 1)[0].lower()
+
+
 STRINGS = {
     "en": {
         "ready": "Ready", "processing": "Processing\u2026", "too_short": "Too short",
@@ -3341,7 +3350,7 @@ def _call_provider_audio(
             language=(
                 str(lang).strip()
                 if provider == LOCAL_ASR_PROVIDER_ID
-                else ("" if str(lang).strip().casefold() in ("", "auto") else lang)
+                else _provider_language_hint(lang)
             ),
             instruction=instruction,
             prompt=(route.prompt or ("Transcribe this audio."
@@ -7204,6 +7213,8 @@ class App(ctk.CTk):
                     self._set_state("microphone_unavailable")
                     return
                 text = result.published_text if result is not None else ""
+                if not text and result is not None:
+                    text = result.translated_text or result.raw_transcript
                 self._set_state(
                     "ready",
                     self._t("translation_failed"),
