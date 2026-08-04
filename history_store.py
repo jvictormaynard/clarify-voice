@@ -91,25 +91,24 @@ def _format_timestamp(value: datetime) -> str:
         timespec="microseconds").replace("+00:00", "Z")
 
 
-_SENSITIVE_ERROR_PATTERNS = (
-    (
-        re.compile(
-            r"(?i)(['\"]?(?:api[_ -]?key|access[_ -]?token|"
-            r"authorization|bearer|client[_ -]?secret|password|secret)"
-            r"['\"]?\s*[:=]\s*(?:['\"]?[a-z]+\s+)?['\"]?)"
-            r"([^\s,;&'\"}]+)(['\"]?)"),
-        r"\1<redacted>\3",
-    ),
-    (
-        re.compile(r"(?i)(bearer)\s+([^\s,;&]+)"),
-        r"\1 <redacted>",
-    ),
-    (
-        re.compile(r"(?i)([?&](?:api[_-]?key|access[_-]?token|token)=)"
-                   r"[^&#\s]+"),
-        r"\1<redacted>",
-    ),
-)
+_SENSITIVE_AUTH_PATTERN = re.compile(
+    r"(?is)(['\"]?(?:authorization|bearer)['\"]?\s*[:=]\s*"
+    r"(?:[a-z]+\s+)?)(?:(['\"])(.*?)\2|([^,;&}\n]+))")
+_SENSITIVE_FIELD_PATTERN = re.compile(
+    r"(?is)(['\"]?(?:api[_ -]?key|access[_ -]?token|"
+    r"client[_ -]?secret|password|secret)['\"]?\s*[:=]\s*)"
+    r"(?:(['\"])(.*?)\2|([^,;&}\n]+))")
+_SENSITIVE_BEARER_PATTERN = re.compile(r"(?i)(bearer)\s+([^\s,;&]+)")
+_SENSITIVE_QUERY_PATTERN = re.compile(
+    r"(?i)([?&](?:api[_-]?key|access[_-]?token|token)=)[^&#\s]+")
+
+
+def _redact_field_match(match: re.Match[str]) -> str:
+    prefix = match.group(1)
+    quote = match.group(2)
+    if quote is not None:
+        return f"{prefix}{quote}<redacted>{quote}"
+    return f"{prefix}<redacted>"
 
 
 def _safe_error(value: str | None) -> str | None:
@@ -122,8 +121,10 @@ def _safe_error(value: str | None) -> str | None:
     if not value:
         return None
     sanitized = value
-    for pattern, replacement in _SENSITIVE_ERROR_PATTERNS:
-        sanitized = pattern.sub(replacement, sanitized)
+    sanitized = _SENSITIVE_AUTH_PATTERN.sub(_redact_field_match, sanitized)
+    sanitized = _SENSITIVE_FIELD_PATTERN.sub(_redact_field_match, sanitized)
+    sanitized = _SENSITIVE_BEARER_PATTERN.sub(r"\1 <redacted>", sanitized)
+    sanitized = _SENSITIVE_QUERY_PATTERN.sub(r"\1<redacted>", sanitized)
     return sanitized
 
 
@@ -473,13 +474,22 @@ class HistoryStore:
                 raise HistoryStoreError(
                     "The history file is unreadable or corrupt")
             return None
-        _, _, selected, payload = max(temporary_payloads)
+        supported_temporary = [
+            item for item in temporary_payloads
+            if _version(item[3].get(
+                "schema_version", item[3].get("version")))
+            <= HISTORY_SCHEMA_VERSION
+        ]
+        # Prefer a snapshot this executable understands. Unknown/future
+        # snapshots remain untouched so a newer executable can recover them.
+        candidates = supported_temporary or temporary_payloads
+        _, _, selected, payload = max(candidates)
         try:
             os.replace(selected, self.path)
         except OSError as error:
             raise HistoryStoreError(
                 "The interrupted history write could not be recovered") from error
-        for _, _, candidate, _ in temporary_payloads:
+        for _, _, candidate, _ in supported_temporary:
             if candidate != selected:
                 self._remove_best_effort(candidate)
         return payload

@@ -111,6 +111,25 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertNotIn("basic-secret", persisted)
             self.assertNotIn("another-secret", persisted)
 
+    def test_quoted_multiword_credentials_are_redacted_as_one_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            store.add(
+                status="error",
+                error="password='correct horse battery staple'",
+            )
+
+            error = store.list_records()[0].error
+            self.assertEqual(error, "password='<redacted>'")
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            for value in ("correct", "horse", "battery", "staple"):
+                self.assertNotIn(value, persisted)
+
     def test_v0_migration_is_idempotent_and_drops_unsupported_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
@@ -233,6 +252,35 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual([item.raw_text for item in records], ["recovered"])
             self.assertTrue(path.exists())
             self.assertFalse(candidate.exists())
+
+    def test_future_snapshot_is_preserved_when_supported_snapshot_is_recovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            supported_candidate = root / ".history.json.supported.tmp"
+            future_candidate = root / ".history.json.future.tmp"
+            supported = HistoryRecord(
+                raw_text="supported", timestamp=NOW, provider="openai",
+                model="gpt-test")
+            supported_candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [supported.to_mapping()],
+            }), encoding="utf-8")
+            future_candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION + 1,
+                "records": [{"raw_text": "future"}],
+            }), encoding="utf-8")
+
+            records = HistoryStore(path, enabled=True, retention_days=None,
+                                   clock=fixed_clock).list_records()
+            self.assertEqual([item.raw_text for item in records], ["supported"])
+            self.assertFalse(supported_candidate.exists())
+            self.assertTrue(future_candidate.exists())
+            self.assertEqual(
+                json.loads(future_candidate.read_text(encoding="utf-8"))[
+                    "schema_version"],
+                HISTORY_SCHEMA_VERSION + 1,
+            )
 
     def test_newer_interrupted_snapshot_wins_over_an_older_primary(self):
         with tempfile.TemporaryDirectory() as directory:
