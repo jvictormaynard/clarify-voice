@@ -85,6 +85,18 @@ def _canonical_audio_path_key(path: str | os.PathLike[str] | Path) -> str:
         return os.path.normcase(os.path.normpath(str(resolved)))
 
 
+def _service_fallback_path(path: str | os.PathLike[str] | Path) -> Path:
+    """Mirror the service's path used when validation cannot expand input."""
+
+    try:
+        raw = os.fspath(path)
+        if isinstance(raw, bytes):
+            raw = os.fsdecode(raw)
+        return Path(raw).expanduser()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return Path("<invalid>")
+
+
 def deduplicate_audio_paths(
         paths: Iterable[str | os.PathLike[str] | Path],
         ) -> tuple[Path, ...]:
@@ -137,6 +149,8 @@ class AudioFileImportController:
         self._paths: tuple[Path, ...] = ()
         self._results: dict[Path, AudioFileResult] = {}
         self._result_paths_by_key: dict[str, Path] = {}
+        self._submission_paths: tuple[Path, ...] = ()
+        self._fallback_paths_by_key: dict[str, list[Path]] = {}
 
     @property
     def job(self) -> AudioBatchJob | None:
@@ -263,6 +277,15 @@ class AudioFileImportController:
                 self._result_paths_by_key = {
                     _canonical_audio_path_key(path): path for path in paths
                 }
+            self._submission_paths = selected
+            self._fallback_paths_by_key = {}
+            for path in selected:
+                fallback_key = _canonical_audio_path_key(
+                    _service_fallback_path(path))
+                if fallback_key == _canonical_audio_path_key(path):
+                    continue
+                self._fallback_paths_by_key.setdefault(
+                    fallback_key, []).append(path)
             self._selection = selection
             pending = tuple(self._results[path] for path in selected)
             self._job = None
@@ -288,8 +311,14 @@ class AudioFileImportController:
         with self._lock:
             if generation != self._generation:
                 return
-            original_path = self._result_paths_by_key.get(
-                _canonical_audio_path_key(item.path))
+            item_key = _canonical_audio_path_key(item.path)
+            original_path = self._result_paths_by_key.get(item_key)
+            if original_path is None:
+                fallback_paths = self._fallback_paths_by_key.get(item_key)
+                if fallback_paths:
+                    original_path = fallback_paths.pop(0)
+                    if not fallback_paths:
+                        self._fallback_paths_by_key.pop(item_key, None)
             if original_path is None:
                 return
             # A retry cannot allow a late callback from the previous job to
@@ -316,11 +345,8 @@ class AudioFileImportController:
             finished = current_job.result
             if finished is None:
                 return
-            for item in finished.files:
-                original_path = self._result_paths_by_key.get(
-                    _canonical_audio_path_key(item.path))
-                if original_path is None:
-                    continue
+            for original_path, item in zip(
+                    self._submission_paths, finished.files):
                 self._results[original_path] = replace(
                     item, path=original_path)
 

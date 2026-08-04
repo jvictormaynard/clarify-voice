@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
 import unittest
+from unittest.mock import patch
 
 from audio_file_batch import (
     AudioBatchCancelledError,
@@ -98,6 +99,37 @@ class AudioFileBatchUiSeamTests(unittest.TestCase):
         self.assertEqual(result.files[0].path, source)
         self.assertEqual(result.files[0].status, AudioFileStatus.SUCCEEDED)
         self.assertEqual(controller.snapshot()[0].path, source)
+
+    def test_invalid_service_fallback_updates_original_and_is_retryable(self):
+        gateway = _Gateway()
+        updates = []
+        source = Path("~clarifyvoice-missing-user/input.wav")
+        service = AudioFileBatchService(gateway, max_workers=1)
+        controller = AudioFileImportController(
+            service, on_update=updates.append)
+
+        with patch.object(
+                Path, "expanduser", side_effect=RuntimeError("unknown user")):
+            controller.start((source,), _selection())
+            first = controller.wait()
+            controller.retry_failed()
+            retried = controller.wait()
+
+        self.assertEqual(first.files[0].path, source)
+        self.assertEqual(first.files[0].status, AudioFileStatus.FAILED)
+        self.assertEqual(retried.files[0].path, source)
+        self.assertEqual(retried.files[0].status, AudioFileStatus.FAILED)
+        self.assertEqual(controller.failed_paths, (source,))
+        self.assertEqual(
+            [item.status for item in updates],
+            [
+                AudioFileStatus.PENDING,
+                AudioFileStatus.FAILED,
+                AudioFileStatus.PENDING,
+                AudioFileStatus.FAILED,
+            ],
+        )
+        self.assertEqual(gateway.requests, [])
 
     def test_retry_failed_keeps_success_and_never_deletes_sources(self):
         gateway = _Gateway({"bad.wav": 1})
