@@ -2,6 +2,7 @@
 
 import argparse
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import replace
 import json
 import math
@@ -779,7 +780,7 @@ def _provider_key_candidate(provider, entered=""):
 
 def _deactivate_provider_transaction(provider, default_base, repositories=None):
     """Delete a provider credential without leaving compatibility state stale."""
-    previous_config = APP_CONFIG.copy()
+    previous_config = deepcopy(APP_CONFIG)
     try:
         APP_CONFIG[f"{provider}_api_key"] = ""
         APP_CONFIG[f"{provider}_base_url"] = default_base
@@ -925,7 +926,9 @@ def _persist_autostart_preference(
         enabled: bool, repositories=None, registry=None,
         previous_config=None, previous_registry_state=None) -> None:
     """Keep the Windows startup entry and persisted preference in sync."""
-    previous_config = APP_CONFIG.copy() if previous_config is None else dict(previous_config)
+    previous_config = (
+        deepcopy(APP_CONFIG) if previous_config is None
+        else deepcopy(previous_config))
     previous_registry_state = (
         _autostart_registry_state(registry)
         if previous_registry_state is None else previous_registry_state)
@@ -978,7 +981,7 @@ def _persist_cloud_selection_before_local_removal(
     model_key = model_keys.get(provider)
     if not model_key:
         return False
-    previous_config = APP_CONFIG.copy()
+    previous_config = deepcopy(APP_CONFIG)
     APP_CONFIG["transcription_provider"] = provider
     APP_CONFIG[model_key] = _canonical_audio_model(provider, model)
     try:
@@ -1192,7 +1195,7 @@ def _apply_settings_transaction(
         workflow_mapping=None, history_enabled=None,
         history_retention_days=_UNSET):
     """Apply model and startup selections as one rollback-capable operation."""
-    previous_config = APP_CONFIG.copy()
+    previous_config = deepcopy(APP_CONFIG)
     previous_registry_state = _autostart_registry_state(registry)
     try:
         if workflow_mapping is not None:
@@ -1218,6 +1221,67 @@ def _apply_settings_transaction(
         raise
 
 
+def _restore_settings_apply_state(
+        previous_config, previous_registry_state, repositories=None,
+        registry=None) -> None:
+    """Restore the persisted state captured before a Settings Apply.
+
+    The model/workflow/history/autostart transaction persists before the
+    native hotkey transaction can run. Keep the outer rollback explicit so a
+    rejected shortcut cannot leave the repository on a newer, partially
+    applied configuration.
+    """
+    APP_CONFIG.clear()
+    APP_CONFIG.update(deepcopy(previous_config))
+    _restore_autostart_registry_state(previous_registry_state, registry)
+    _save_app_config(repositories)
+
+
+def _apply_settings_with_hotkeys_transaction(
+        apply_general, apply_hotkeys, repositories=None, registry=None,
+        restore_hotkeys=None, on_rollback=None):
+    """Run general Settings and hotkeys as one rollback-capable operation.
+
+    ``apply_hotkeys`` is deliberately last: its native adapter owns the
+    shortcut-hook rollback. If that final step rejects a combination, this
+    outer transaction restores the config repository and autostart state, then
+    restores the native shortcut set and lets the caller restore its live
+    runtime/UI draft.
+    """
+    # APP_CONFIG contains nested workflow/hotkey mappings. A shallow copy can
+    # share a route with the draft and make rollback appear to succeed while
+    # retaining one of the newly edited nested values.
+    previous_config = deepcopy(APP_CONFIG)
+    previous_registry_state = _autostart_registry_state(registry)
+    try:
+        apply_general()
+        return apply_hotkeys()
+    except Exception as error:
+        rollback_error = None
+        try:
+            _restore_settings_apply_state(
+                previous_config, previous_registry_state, repositories, registry)
+        except Exception as candidate:
+            rollback_error = candidate
+        if restore_hotkeys is not None:
+            try:
+                restore_hotkeys()
+            except Exception:
+                # The hotkey transaction normally performs this restoration
+                # itself; this is a final runtime-hook safety net.
+                pass
+        if on_rollback is not None:
+            try:
+                on_rollback()
+            except Exception:
+                # The original Apply error remains the actionable user-facing
+                # failure; the next open of Settings can rebuild the UI.
+                pass
+        if rollback_error is not None:
+            raise rollback_error from error
+        raise
+
+
 def _apply_hotkey_settings_transaction(
         settings, repositories=None, tray_icon=None) -> HotkeySettings:
     """Register then persist hotkeys as one rollback-capable transaction.
@@ -1234,7 +1298,7 @@ def _apply_hotkey_settings_transaction(
         raise HotkeyValidationError(
             "Push-to-talk is unavailable because the native input layer does not provide key-release events",
             code="unsupported_activation_mode")
-    previous = APP_CONFIG.get("hotkeys")
+    previous = deepcopy(APP_CONFIG.get("hotkeys"))
     previous_settings = HotkeySettings.from_mapping(previous)
     tray = tray_icon
     if tray is None:
@@ -10890,7 +10954,8 @@ class App(ctk.CTk):
         def apply_settings():
             if apply_feedback_job["active"]:
                 return
-            try:
+
+            def apply_general_settings():
                 store_workflow_form()
                 _apply_settings_transaction(
                     selected, selected_refinement, active_options(),
@@ -10909,11 +10974,32 @@ class App(ctk.CTk):
                 workflow_controller.reload()
                 load_workflow_form(workflow_scope_state["scope"])
                 history_records()
-                # Apply hotkeys last.  The native/config transaction is itself
-                # rollback-capable; deferring it until the rest of Settings
-                # succeeds prevents a later provider/workflow failure from
-                # leaving only the shortcut draft active.
-                self.apply_hotkey_settings(hotkey_settings_controller.settings)
+
+            def restore_after_failed_apply():
+                # The outer transaction has restored APP_CONFIG and the
+                # repository before this callback runs. Rebuild live runtime
+                # objects and the Settings draft from the unchanged baseline.
+                self._configure_history_store()
+                try:
+                    workflow_controller.reload()
+                except (OSError, ValueError, ProviderError):
+                    pass
+                restore_saved_settings()
+                history_records()
+
+            def restore_hotkeys_after_failed_apply():
+                # The native transaction already rolls back on its own error;
+                # reapply the saved set as a final guard for adapters that may
+                # have failed after changing their runtime registration.
+                self.apply_hotkey_settings(saved_settings["hotkeys"])
+
+            try:
+                _apply_settings_with_hotkeys_transaction(
+                    apply_general_settings,
+                    lambda: self.apply_hotkey_settings(hotkey_settings_controller.settings),
+                    repositories=self.repositories,
+                    restore_hotkeys=restore_hotkeys_after_failed_apply,
+                    on_rollback=restore_after_failed_apply)
             except (HotkeyRegistrationError, HotkeyValidationError) as error:
                 if getattr(error, "code", "") == "unsupported_activation_mode":
                     message = self._t("hotkey_ptt_unsupported")

@@ -1,5 +1,6 @@
 """Headless contracts for the user-facing hotkey Settings flow (#48)."""
 
+from copy import deepcopy
 import inspect
 import unittest
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from hotkey_config import (
     HotkeySettingsController,
     HotkeyValidationError,
 )
+from windows_hotkeys import HotkeyRegistrationError
 
 
 class _KeyEvent:
@@ -41,6 +43,20 @@ class _KeyboardHook:
 
     def remove_hotkey(self, handle):
         self.removed.append(handle)
+
+
+class _RejectingTray:
+    def __init__(self, rejected):
+        self.rejected = rejected
+        self.calls = []
+        self.active = HotkeySettings.defaults()
+
+    def reconfigure_hotkeys(self, settings):
+        self.calls.append(settings)
+        if settings == self.rejected:
+            raise HotkeyRegistrationError(
+                (HotkeyAction.RECORDING.value,), reason="already registered")
+        self.active = settings
 
 
 class HotkeySettingsControllerUiTests(unittest.TestCase):
@@ -88,6 +104,9 @@ class HotkeySettingsIntegrationTests(unittest.TestCase):
                 "capture_event(action, event)",
                 "reset_hotkey(action)",
                 "hotkey_mode_menu",
+                "_apply_settings_with_hotkeys_transaction(",
+                "restore_after_failed_apply",
+                "restore_hotkeys_after_failed_apply",
                 "self.apply_hotkey_settings(hotkey_settings_controller.settings)"):
             with self.subTest(expected=expected):
                 self.assertIn(expected, source)
@@ -127,6 +146,98 @@ class HotkeySettingsIntegrationTests(unittest.TestCase):
 
         self.assertEqual(config["hotkeys"], previous.to_mapping())
         self.assertEqual(tray.applied, [selected, previous])
+
+    def test_full_apply_rolls_back_general_changes_when_hotkeys_fail(self):
+        previous = HotkeySettings.defaults()
+        selected = previous.with_hotkey(HotkeyAction.RECORDING, "Ctrl+L")
+        baseline = {
+            "transcription_provider": "gemini",
+            "history_enabled": False,
+            "autostart": False,
+            "workflows": {
+                "transcription": {"prompt": "original"},
+            },
+            "hotkeys": previous.to_mapping(),
+        }
+        config = deepcopy(baseline)
+        persisted = []
+        saved_settings = deepcopy(baseline)
+        ui_state = {
+            "transcription_provider": "gemini",
+            "history_enabled": False,
+            "workflows": {"transcription": {"prompt": "original"}},
+        }
+        tray = _RejectingTray(selected)
+
+        def save_config(_repositories=None):
+            persisted.append(deepcopy(config))
+
+        def apply_general():
+            config["transcription_provider"] = "openai"
+            config["history_enabled"] = True
+            config["autostart"] = True
+            config["workflows"]["transcription"]["prompt"] = "draft"
+            ui_state["transcription_provider"] = "openai"
+            ui_state["history_enabled"] = True
+            ui_state["workflows"]["transcription"]["prompt"] = "draft"
+            app._save_app_config()
+
+        def apply_hotkeys():
+            return app._apply_hotkey_settings_transaction(
+                selected, tray_icon=tray)
+
+        def restore_ui():
+            ui_state["transcription_provider"] = saved_settings[
+                "transcription_provider"]
+            ui_state["history_enabled"] = saved_settings["history_enabled"]
+            ui_state["workflows"] = deepcopy(saved_settings["workflows"])
+
+        with patch.object(app, "APP_CONFIG", config), \
+                patch.object(app, "_save_app_config", side_effect=save_config):
+            with self.assertRaises(HotkeyRegistrationError):
+                app._apply_settings_with_hotkeys_transaction(
+                    apply_general, apply_hotkeys,
+                    restore_hotkeys=lambda: tray.reconfigure_hotkeys(previous),
+                    on_rollback=restore_ui)
+
+        self.assertEqual(config, baseline)
+        self.assertEqual(persisted[-1], baseline)
+        self.assertEqual(saved_settings, baseline)
+        self.assertEqual(ui_state, {
+            "transcription_provider": "gemini",
+            "history_enabled": False,
+            "workflows": {"transcription": {"prompt": "original"}},
+        })
+        self.assertEqual(tray.active, previous)
+        self.assertEqual(tray.calls, [selected, previous, previous])
+
+    def test_full_apply_commits_general_and_hotkey_changes(self):
+        previous = HotkeySettings.defaults()
+        selected = previous.with_hotkey(HotkeyAction.RECORDING, "Ctrl+L")
+        config = {
+            "transcription_provider": "gemini",
+            "hotkeys": previous.to_mapping(),
+        }
+        tray = _Tray()
+
+        def save_config(_repositories=None):
+            return None
+
+        def apply_general():
+            config["transcription_provider"] = "openai"
+            app._save_app_config()
+
+        with patch.object(app, "APP_CONFIG", config), \
+                patch.object(app, "_save_app_config", side_effect=save_config):
+            result = app._apply_settings_with_hotkeys_transaction(
+                apply_general,
+                lambda: app._apply_hotkey_settings_transaction(
+                    selected, tray_icon=tray))
+
+        self.assertEqual(result, selected)
+        self.assertEqual(config["transcription_provider"], "openai")
+        self.assertEqual(config["hotkeys"], selected.to_mapping())
+        self.assertEqual(tray.applied, [selected])
 
     def test_apply_rejects_push_to_talk_without_native_key_release(self):
         selected = HotkeySettings.defaults().with_activation_mode(
