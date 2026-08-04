@@ -358,9 +358,9 @@ class HistoryRecord:
     """A single raw/refined result and safe provider metadata.
 
     ``raw_text`` and ``refined_text`` may be absent for partial, failed, or
-    cancelled operations.  ``provider`` and ``model`` are identifiers only;
-    API credentials and complete provider responses are deliberately not part
-    of this type.
+    cancelled operations.  ``provider``/``model`` and optional refinement
+    identifiers are safe route metadata only; API credentials and complete
+    provider responses are deliberately not part of this type.
     """
 
     raw_text: str | None = None
@@ -369,6 +369,8 @@ class HistoryRecord:
     timestamp: datetime = field(default_factory=_utc_now)
     provider: str = "unknown"
     model: str = "unknown"
+    refinement_provider: str | None = None
+    refinement_model: str | None = None
     status: HistoryStatus = "success"
     error: str | None = None
     record_id: str = field(default_factory=_new_record_id)
@@ -389,6 +391,13 @@ class HistoryRecord:
                 raise HistoryValidationError(f"{field_name} must be text")
             object.__setattr__(
                 self, field_name, value.strip() or "unknown")
+
+        for field_name in ("refinement_provider", "refinement_model"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, str):
+                raise HistoryValidationError(f"{field_name} must be text or None")
+            if isinstance(value, str):
+                object.__setattr__(self, field_name, value.strip() or None)
 
         value = self.record_id
         if not isinstance(value, str) or not value.strip():
@@ -416,7 +425,7 @@ class HistoryRecord:
     def to_mapping(self) -> dict[str, Any]:
         """Return only the versioned, privacy-safe persistence fields."""
 
-        return {
+        mapping = {
             "id": self.record_id,
             "raw_text": self.raw_text,
             "refined_text": self.refined_text,
@@ -427,6 +436,13 @@ class HistoryRecord:
             "status": self.status,
             "error": self.error,
         }
+        # Keep schema-v1 compatibility for records without a second route,
+        # while persisting optional refinement provenance when it exists.
+        if self.refinement_provider is not None:
+            mapping["refinement_provider"] = self.refinement_provider
+        if self.refinement_model is not None:
+            mapping["refinement_model"] = self.refinement_model
+        return mapping
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "HistoryRecord":
@@ -443,6 +459,8 @@ class HistoryRecord:
         timestamp = payload.get("timestamp", payload.get("time", _utc_now()))
         provider = payload.get("provider", "")
         model = payload.get("model", "")
+        refinement_provider = payload.get("refinement_provider")
+        refinement_model = payload.get("refinement_model")
         status = payload.get("status", "success")
         error = payload.get("error")
 
@@ -460,6 +478,8 @@ class HistoryRecord:
             timestamp=timestamp,
             provider=provider,
             model=model,
+            refinement_provider=refinement_provider,
+            refinement_model=refinement_model,
             status=status,
             error=error,
             record_id=record_id,
@@ -635,7 +655,7 @@ def _migrate_v0(payload: Mapping[str, Any]) -> dict[str, Any]:
             for key in (
                 "id", "record_id", "raw_text", "raw", "text", "refined_text",
                 "refined", "workflow", "mode", "timestamp", "time", "provider",
-                "model", "status", "error",
+                "model", "refinement_provider", "refinement_model", "status", "error",
             )
             if key in item
         })
@@ -1136,6 +1156,8 @@ class HistoryStore:
         timestamp: datetime | str | None = None,
         provider: str = "unknown",
         model: str = "unknown",
+        refinement_provider: str | None = None,
+        refinement_model: str | None = None,
         status: HistoryStatus = "success",
         error: str | None = None,
         record_id: str | None = None,
@@ -1149,6 +1171,8 @@ class HistoryStore:
             timestamp=self._now() if timestamp is None else timestamp,
             provider=provider,
             model=model,
+            refinement_provider=refinement_provider,
+            refinement_model=refinement_model,
             status=status,
             error=error,
             record_id=_new_record_id() if record_id is None else record_id,
@@ -1196,6 +1220,11 @@ class HistoryStore:
                 f"Model: {record.model}",
                 f"Status: {record.status}",
             ])
+            if record.refinement_provider or record.refinement_model:
+                chunks.extend([
+                    f"Refinement provider: {record.refinement_provider or '<unknown>'}",
+                    f"Refinement model: {record.refinement_model or '<unknown>'}",
+                ])
             chunks.append("Raw transcript:")
             chunks.append(record.raw_text if record.raw_text is not None else "<not available>")
             chunks.append("Refined output:")
@@ -1222,6 +1251,12 @@ class HistoryStore:
                 f"- **Record ID:** `{record.record_id}`",
                 "",
             ])
+            if record.refinement_provider or record.refinement_model:
+                chunks.extend([
+                    f"- **Refinement provider:** `{record.refinement_provider or 'unknown'}`",
+                    f"- **Refinement model:** `{record.refinement_model or 'unknown'}`",
+                    "",
+                ])
             for label, value in (
                 ("Raw transcript", record.raw_text),
                 ("Refined output", record.refined_text),

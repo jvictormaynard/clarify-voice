@@ -97,8 +97,11 @@ class WorkflowState:
     # opt-in history entry without coupling the orchestration layer to a
     # storage implementation.  Existing consumers can ignore these fields.
     source_text: str | None = None
+    refined_text: str | None = None
     provider_id: str | None = None
     model: str | None = None
+    refinement_provider_id: str | None = None
+    refinement_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -441,8 +444,11 @@ class WorkflowService:
         result_text: str | None = None,
         status_key: str | None = None,
         source_text: str | None = None,
+        refined_text: str | None = None,
         provider_id: str | None = None,
         model: str | None = None,
+        refinement_provider_id: str | None = None,
+        refinement_model: str | None = None,
         after_delivery: Callable[[], None] | None = None,
     ) -> bool:
         with self._lock:
@@ -456,8 +462,11 @@ class WorkflowService:
                 result_text=result_text,
                 status_key=status_key,
                 source_text=source_text,
+                refined_text=refined_text,
                 provider_id=provider_id,
                 model=model,
+                refinement_provider_id=refinement_provider_id,
+                refinement_model=refinement_model,
             )
             self._state = state
         def deliver_then_publish() -> None:
@@ -674,9 +683,18 @@ class WorkflowService:
                 session,
                 WorkflowPhase.COMPLETED,
                 result_text=result,
-                source_text=result,
+                source_text=(
+                    getattr(provider_result, "raw_text", None)
+                    if getattr(provider_result, "raw_text", None) is not None
+                    else result
+                ),
+                refined_text=getattr(provider_result, "refined_text", None),
                 provider_id=provider_result.provider_id,
                 model=provider_result.model,
+                refinement_provider_id=getattr(
+                    provider_result, "refinement_provider_id", None),
+                refinement_model=getattr(
+                    provider_result, "refinement_model", None),
                 after_delivery=lambda: self._scheduler.run_in_background(
                     lambda: self._write_dictation_if_current(
                         session, result, elapsed

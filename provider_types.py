@@ -110,6 +110,13 @@ class TranscriptionResult:
     text: str
     provider_id: str
     model: str
+    # Optional desktop-runtime provenance. Provider adapters that only return
+    # one transcription leave these unset; the prompt-mode adapter fills them
+    # when a separate refinement route transforms the raw transcript.
+    raw_text: str | None = None
+    refined_text: str | None = None
+    refinement_provider_id: str | None = None
+    refinement_model: str | None = None
 
 
 @dataclass(frozen=True)

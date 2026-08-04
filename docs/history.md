@@ -20,8 +20,8 @@ Each `HistoryRecord` contains only:
 
 - raw transcript text (optional for partial/error records);
 - refined output (optional);
-- workflow, UTC timestamp, provider ID, model ID, status, and a concise error
-  summary.
+- workflow, UTC timestamp, transcription provider/model, optional refinement
+  provider/model, status, and a concise error summary.
 
 The type has no audio path/bytes, API-key field, request headers, provider
 payload, or telemetry metadata. Unknown fields from a legacy document are
@@ -85,6 +85,12 @@ retry action yet: the current workflow contract does not retain audio or a
 focus-safe source target after completion, so silently replaying a record would
 be unsafe. The page labels this boundary rather than pretending that retry is
 available.
+
+Prompt-mode dictation through a non-multimodal transcription provider keeps
+the raw provider transcript in `raw_text`, the second-route output in
+`refined_text`, and both route identifiers in the metadata. Multimodal and
+plain transcription paths leave the refined field empty rather than labeling
+the final text as a separate refinement.
 
 The normal profile stores `history.json` beside `config.json`. Injected
 repository bundles use that same profile-relative rule only when their config

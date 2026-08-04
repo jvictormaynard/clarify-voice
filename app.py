@@ -2911,8 +2911,10 @@ def _call_provider_audio(
         provider: str, audio_path: Path, mode: str, lang: str = "en",
         audio_bytes: bytes | None = None,
         cancel_token: CancellationToken | None = None,
-        route: WorkflowRoute | None = None) -> str:
+        route: WorkflowRoute | None = None,
+        details: bool = False) -> str | TranscriptionResult:
     provider = str(provider or "").strip().lower()
+    model = ""
     try:
         metadata = PROVIDER_REGISTRY.describe(provider)
         route = route or _workflow_route(WorkflowScope.TRANSCRIPTION)
@@ -2943,17 +2945,20 @@ def _call_provider_audio(
             audio_bytes=audio_bytes,
         )
         request = DICTIONARY_SERVICE.apply_context(request)
-        transcript = PROVIDER_REGISTRY.transcribe(
+        raw_transcript = PROVIDER_REGISTRY.transcribe(
             provider, request, connection, cancel_token).text
+        transcript = raw_transcript
         refinement_scope = (
             WorkflowScope.LOCAL_ASR_REFINEMENT
             if provider == LOCAL_ASR_PROVIDER_ID else WorkflowScope.REFINEMENT)
         refinement_route = _workflow_route(refinement_scope)
+        refinement_used = False
         if (mode == "prompt" and not metadata.supports(
                 ProviderCapability.MULTIMODAL_AUDIO)
                 and (provider != LOCAL_ASR_PROVIDER_ID
                      or bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))
                 and refinement_route.enabled):
+            refinement_used = True
             transcript = _refine_transcript(
                 transcript, lang, cancel_token,
                 route=refinement_route)
@@ -2962,6 +2967,21 @@ def _call_provider_audio(
         # successful-looking transcript before the workflow publishes it.
         if not (isinstance(transcript, str) and transcript.startswith("[Error")):
             transcript = DICTIONARY_SERVICE.expand(transcript)
+        if details:
+            return TranscriptionResult(
+                transcript,
+                provider,
+                model,
+                # Only a second stage creates a distinct source/result pair.
+                # For every other route, leaving this unset lets the workflow
+                # preserve its existing final-text history behavior.
+                raw_text=(raw_transcript if refinement_used else None),
+                refined_text=(transcript if refinement_used else None),
+                refinement_provider_id=(
+                    refinement_route.provider_id if refinement_used else None),
+                refinement_model=(
+                    refinement_route.model_id if refinement_used else None),
+            )
         return transcript
     except Exception as error:
         try:
@@ -2971,7 +2991,10 @@ def _call_provider_audio(
                 label = f"{label} Whisper"
         except ProviderError:
             label = "Provider"
-        return _http_error(label, error)
+        error_text = _http_error(label, error)
+        if details:
+            return TranscriptionResult(error_text, provider, model)
+        return error_text
 
 
 def _rewrite_openai_compatible(
@@ -3142,7 +3165,8 @@ def call_transcription_provider(
         audio_path: Path, mode: str, lang: str = "en",
         audio_bytes: bytes | None = None,
         cancel_token: CancellationToken | None = None,
-        route: WorkflowRoute | None = None) -> str:
+        route: WorkflowRoute | None = None,
+        details: bool = False) -> str | TranscriptionResult:
     # Recording/CLI callers retain the legacy selector behavior when no
     # route is supplied.  Typed workflow callers pass their resolved route so
     # the effective provider and model cannot be replaced by stale flat keys
@@ -3156,7 +3180,10 @@ def call_transcription_provider(
     }
     if route is not None:
         call_kwargs["route"] = route
+    if details:
+        call_kwargs["details"] = True
     return _call_provider_audio(provider, audio_path, mode, lang, **call_kwargs)
+
 
 # ---------------------------------------------------------------------------
 # Recorder
@@ -4201,18 +4228,23 @@ class AppWorkflowProvider:
         provider = route.provider_id
         if not route.enabled:
             raise RuntimeError("Transcription workflow is disabled")
-        text = call_transcription_provider(
+        result = call_transcription_provider(
             audio_source.audio_path,
             mode,
             language,
             audio_bytes=audio_source.audio_bytes,
             cancel_token=audio_source.cancel_token,
             route=route,
+            details=True,
         )
+        if isinstance(result, TranscriptionResult):
+            typed_result = result
+        else:
+            typed_result = TranscriptionResult(str(result), provider, route.model_id)
+        text = typed_result.text
         if not text or text.startswith("[Error"):
             raise RuntimeError(text or "Transcription returned no text")
-        model = route.model_id
-        return TranscriptionResult(text, provider, model)
+        return typed_result
 
     @staticmethod
     def rewrite(text):
@@ -6944,10 +6976,11 @@ class App(ctk.CTk):
 
         The workflow service owns source capture and route metadata; the UI
         only commits the terminal state.  Audio bytes, credentials, and
-        provider payloads never enter the history boundary.  Dictation has no
-        separate text refinement stage today, so its transcript is stored as
-        ``raw_text``.  Rewrite/translation retain the selected source and
-        generated output separately.
+        provider payloads never enter the history boundary. Dictation stores
+        the provider transcript as ``raw_text`` and, when Prompt mode runs a
+        second route, keeps its output and route metadata in the refined
+        fields. Rewrite/translation retain the selected source and generated
+        output separately.
         """
 
         store = getattr(self, "history_store", None)
@@ -6956,10 +6989,16 @@ class App(ctk.CTk):
         kind = state.kind.value if state.kind is not None else "transcription"
         provider = str(state.provider_id or "unknown")
         model = str(state.model or "unknown")
+        refinement_provider = getattr(state, "refinement_provider_id", None)
+        refinement_model = getattr(state, "refinement_model", None)
         try:
             if state.phase is WorkflowPhase.COMPLETED:
                 if state.kind is WorkflowKind.DICTATION:
-                    raw_text, refined_text = state.result_text, None
+                    raw_text = (
+                        state.source_text
+                        if state.source_text is not None else state.result_text
+                    )
+                    refined_text = getattr(state, "refined_text", None)
                 else:
                     raw_text, refined_text = state.source_text, state.result_text
                 store.add(
@@ -6968,6 +7007,8 @@ class App(ctk.CTk):
                     workflow=kind,
                     provider=provider,
                     model=model,
+                    refinement_provider=refinement_provider,
+                    refinement_model=refinement_model,
                     status="success",
                 )
             elif state.phase is WorkflowPhase.FAILED:
@@ -6975,6 +7016,8 @@ class App(ctk.CTk):
                     workflow=kind,
                     provider=provider,
                     model=model,
+                    refinement_provider=refinement_provider,
+                    refinement_model=refinement_model,
                     status="error",
                     error=state.status_key or "error",
                 )

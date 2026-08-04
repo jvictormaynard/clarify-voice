@@ -2,10 +2,16 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import app
 from history_store import HistoryStore, HistoryStoreError
-from repositories import AppConfig, ApplicationRepositories
+from repositories import (
+    AppConfig,
+    ApplicationRepositories,
+    WorkflowRoute,
+    WorkflowScope,
+)
 from workflows import WorkflowKind, WorkflowPhase, WorkflowState
 
 
@@ -76,6 +82,112 @@ class HistoryRuntimeTests(unittest.TestCase):
             record = store.list_records()[0]
             self.assertEqual(record.raw_text, "spoken words")
             self.assertIsNone(record.refined_text)
+
+    def test_prompt_mode_dictation_keeps_refinement_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(Path(directory) / "history.json", enabled=True)
+            harness = SimpleNamespace(history_store=store)
+            app.App._record_history_state(
+                harness,
+                WorkflowState(
+                    phase=WorkflowPhase.COMPLETED,
+                    operation_id=5,
+                    kind=WorkflowKind.DICTATION,
+                    source_text="raw transcript",
+                    result_text="refined transcript",
+                    refined_text="refined transcript",
+                    provider_id="gemini",
+                    model="gemini-audio",
+                    refinement_provider_id="openai",
+                    refinement_model="gpt-test",
+                ),
+            )
+
+            record = store.list_records()[0]
+            self.assertEqual(record.raw_text, "raw transcript")
+            self.assertEqual(record.refined_text, "refined transcript")
+            self.assertEqual(record.provider, "gemini")
+            self.assertEqual(record.model, "gemini-audio")
+            self.assertEqual(record.refinement_provider, "openai")
+            self.assertEqual(record.refinement_model, "gpt-test")
+
+            exported = store.export(
+                Path(directory) / "history.txt", format="txt").read_text()
+            self.assertIn("Refinement provider: openai", exported)
+            self.assertIn("Refinement model: gpt-test", exported)
+
+    def test_audio_details_preserve_raw_and_refined_routes(self):
+        transcription_route = WorkflowRoute(
+            provider_id="gemini", model_id="gemini-audio", prompt="")
+        refinement_route = WorkflowRoute(
+            provider_id="openai", model_id="gpt-test", prompt="")
+        metadata = SimpleNamespace(
+            supports=lambda capability: capability
+            != app.ProviderCapability.MULTIMODAL_AUDIO)
+        with patch.object(
+                app.PROVIDER_REGISTRY, "describe", return_value=metadata), \
+                patch.object(
+                    app.PROVIDER_REGISTRY, "transcribe",
+                    return_value=SimpleNamespace(text="raw transcript")), \
+                patch.object(
+                    app, "_provider_connection", return_value=object()), \
+                patch.object(
+                    app, "_workflow_route",
+                    side_effect=lambda scope: (
+                        refinement_route
+                        if scope == WorkflowScope.REFINEMENT
+                        else transcription_route)), \
+                patch.object(
+                    app.DICTIONARY_SERVICE, "apply_context",
+                    side_effect=lambda request: request), \
+                patch.object(
+                    app.DICTIONARY_SERVICE, "expand",
+                    side_effect=lambda text: text), \
+                patch.object(
+                    app, "_refine_transcript", return_value="refined transcript"):
+            result = app._call_provider_audio(
+                "gemini", Path("audio.wav"), "prompt",
+                route=transcription_route, details=True)
+
+        self.assertEqual(result.raw_text, "raw transcript")
+        self.assertEqual(result.refined_text, "refined transcript")
+        self.assertEqual(result.provider_id, "gemini")
+        self.assertEqual(result.model, "gemini-audio")
+        self.assertEqual(result.refinement_provider_id, "openai")
+        self.assertEqual(result.refinement_model, "gpt-test")
+
+    def test_audio_details_without_refinement_keep_legacy_history_shape(self):
+        transcription_route = WorkflowRoute(
+            provider_id="gemini", model_id="gemini-audio", prompt="")
+        metadata = SimpleNamespace(
+            supports=lambda capability: capability
+            == app.ProviderCapability.MULTIMODAL_AUDIO)
+        with patch.object(
+                app.PROVIDER_REGISTRY, "describe", return_value=metadata), \
+                patch.object(
+                    app.PROVIDER_REGISTRY, "transcribe",
+                    return_value=SimpleNamespace(text="final transcript")), \
+                patch.object(
+                    app, "_provider_connection", return_value=object()), \
+                patch.object(
+                    app, "_workflow_route", return_value=transcription_route), \
+                patch.object(
+                    app.DICTIONARY_SERVICE, "apply_context",
+                    side_effect=lambda request: request), \
+                patch.object(
+                    app.DICTIONARY_SERVICE, "expand",
+                    side_effect=lambda text: text), \
+                patch.object(app, "_refine_transcript") as refine:
+            result = app._call_provider_audio(
+                "gemini", Path("audio.wav"), "prompt",
+                route=transcription_route, details=True)
+
+        self.assertEqual(result.text, "final transcript")
+        self.assertIsNone(result.raw_text)
+        self.assertIsNone(result.refined_text)
+        self.assertIsNone(result.refinement_provider_id)
+        self.assertIsNone(result.refinement_model)
+        refine.assert_not_called()
 
     def test_disabled_history_does_not_create_a_file(self):
         with tempfile.TemporaryDirectory() as directory:
