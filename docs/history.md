@@ -1,18 +1,20 @@
 # Local transcription history boundary
 
-This document describes the UI-independent groundwork for issue #53. The
-history boundary is deliberately not connected to `app.py`, Settings, or the
-packaged Windows executable in this stage. It is therefore a `Part of #53`
-implementation, not a claim that the product currently exposes a history
-toggle.
+This document describes the local history boundary and its current desktop
+integration for issue #53. The Settings window now exposes a reversible,
+disabled-by-default toggle, retention policy, refresh, export, and delete-all
+actions. Successful workflow results and terminal error summaries are written
+only after the workflow publishes its terminal state. This remains a `Part of
+#53` implementation: packaged Windows acceptance is still a separate manual
+gate.
 
 ## Privacy contract
 
-`HistoryStore` is disabled unless a caller explicitly constructs it with
-`enabled=True`. A disabled store does not read the history path, create a
+`HistoryStore` is disabled unless the user explicitly enables **Local history**
+in Settings. A disabled store does not read the history path, create a
 directory, or retain transcript text in memory. `delete_all()` remains
-available while disabled so a future Settings toggle can erase an existing
-history immediately.
+available while disabled so turning the feature off does not prevent a user
+from erasing an existing history immediately.
 
 Each `HistoryRecord` contains only:
 
@@ -77,10 +79,16 @@ The export destination must differ from the history file. Export is unavailable
 while the store is disabled, and neither export nor persistence includes
 telemetry or provider credentials.
 
+The desktop page offers separate **Copy source** and **Copy result** actions
+when the corresponding field exists. It deliberately does not offer a live
+retry action yet: the current workflow contract does not retain audio or a
+focus-safe source target after completion, so silently replaying a record would
+be unsafe. The page labels this boundary rather than pretending that retry is
+available.
+
 ## Follow-up needed for #53
 
-The application still needs a visible, reversible Settings toggle, a chosen
-per-user data path, startup construction of the store, copy/retry commands,
-and packaged Windows acceptance covering restart recovery and proving that
-usage statistics contain no transcript text. Those changes belong in a later
-integration PR and must keep the default-off behavior above.
+Packaged Windows acceptance remains: verify the installed Settings path,
+restart recovery, retention/delete-all, export destinations, and that usage
+statistics contain no transcript text. A future issue can add safe retry only
+after the workflow layer defines an explicit retained source contract.
