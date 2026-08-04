@@ -18,6 +18,7 @@ from repositories import (
     UnsupportedSchemaVersionError,
     migrate_config_payload,
 )
+from microphone_controls import MicrophoneSettings, RecordingControls, VADSettings
 from secret_store import (
     MemorySecretStore,
     SecretStore,
@@ -65,6 +66,56 @@ class ConfigurationRepositoryTests(unittest.TestCase):
         self.assertEqual(
             loaded.to_mapping()["voice_translation"]["target_language"], "de-DE"
         )
+
+    def test_microphone_and_recording_controls_round_trip(self):
+        config = AppConfig.from_mapping({
+            "microphone": {"selected_id": "mic-v1-usb"},
+            "recording_controls": {
+                "max_duration_seconds": 120,
+                "warning_seconds": 15,
+                "vad": {
+                    "enabled": True,
+                    "level_threshold": 0.12,
+                    "minimum_speech_seconds": 0.4,
+                    "silence_duration_seconds": 1.1,
+                },
+            },
+        })
+
+        self.assertEqual(config.microphone, MicrophoneSettings("mic-v1-usb"))
+        self.assertEqual(
+            config.recording_controls.vad,
+            VADSettings(
+                enabled=True,
+                level_threshold=0.12,
+                minimum_speech_seconds=0.4,
+                silence_duration_seconds=1.1,
+            ),
+        )
+        mapped = config.to_mapping()
+        self.assertEqual(mapped["microphone"]["selected_id"], "mic-v1-usb")
+        self.assertEqual(
+            AppConfig.from_mapping(mapped).recording_controls,
+            config.recording_controls,
+        )
+
+    def test_invalid_microphone_controls_fall_back_to_safe_defaults(self):
+        config = AppConfig.from_mapping({
+            "microphone": {"schema_version": 99, "selected_id": "bad"},
+            "recording_controls": {
+                "max_duration_seconds": 1,
+                "warning_seconds": 2,
+            },
+        })
+
+        self.assertEqual(config.microphone, MicrophoneSettings.defaults())
+        self.assertEqual(
+            config.recording_controls, RecordingControls.defaults())
+
+    def test_legacy_microphone_id_is_migrated_to_typed_mapping(self):
+        config = AppConfig.from_mapping({"microphone_id": "mic-v1-legacy"})
+        self.assertEqual(config.microphone.selected_id, "mic-v1-legacy")
+        self.assertNotIn("microphone_id", config.to_mapping())
 
     def test_local_asr_selection_and_cloud_refinement_opt_in_round_trip(self):
         config = AppConfig.from_mapping({

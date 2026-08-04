@@ -64,6 +64,16 @@ from dictionary_snippets import (
     DictionarySnippetService,
     LocalDictionarySnippetsRepository,
 )
+from microphone_controls import (
+    MicrophoneDevice,
+    MicrophoneInventory,
+    MicrophoneSelection,
+    MicrophoneSelectionState,
+    MicrophoneSettings,
+    RecordingBoundaryPolicy,
+    RecordingControls,
+    SoundDeviceMicrophoneInventory,
+)
 from dictionary_settings import DictionarySettingsController
 from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
 from local_asr_product import (
@@ -1337,7 +1347,8 @@ def _apply_settings_transaction(
         selected, selected_refinement, audio_options, text_options, model_keys,
         autostart_enabled, repositories=None, registry=None,
         workflow_mapping=None, history_enabled=None,
-        history_retention_days=_UNSET):
+        history_retention_days=_UNSET, microphone=None,
+        recording_controls=None):
     """Apply model and startup selections as one rollback-capable operation."""
     previous_config = deepcopy(APP_CONFIG)
     previous_registry_state = _autostart_registry_state(registry)
@@ -1349,6 +1360,10 @@ def _apply_settings_transaction(
         if history_retention_days is not _UNSET:
             APP_CONFIG["history_retention_days"] = _history_retention_days(
                 history_retention_days)
+        if microphone is not None:
+            APP_CONFIG["microphone"] = microphone.to_mapping()
+        if recording_controls is not None:
+            APP_CONFIG["recording_controls"] = recording_controls.to_mapping()
         _apply_selected_models(
             selected, selected_refinement, audio_options, text_options, model_keys)
         _persist_autostart_preference(
@@ -3705,6 +3720,9 @@ SESSION_WORKER_JOIN_SECONDS = 5.0
 SESSION_CLEANUP_RETRY_ATTEMPTS = 3
 SESSION_CLEANUP_RETRY_DELAY_SECONDS = 0.25
 TRANSCRIPTION_REQUEST_TIMEOUT_SECONDS = sum(TIMEOUTS["transcription"])
+# Boundary decisions must not depend on the optional sounddevice level meter:
+# packaged SoX capture remains supported when PortAudio is missing or fails.
+RECORDING_BOUNDARY_POLL_SECONDS = 0.05
 # Keep a non-daemon cleanup owner alive through the provider's bounded request
 # window after the initial UI shutdown join expires. This is finite even when
 # a streaming endpoint never yields a final response.
@@ -3721,28 +3739,76 @@ def _new_recording_path() -> Path:
     return path
 
 
-def _has_active_microphone():
-    """Return whether PortAudio can see a usable default input device.
+def _microphone_inventory() -> MicrophoneInventory | None:
+    """Return one safe PortAudio inventory snapshot for selection and UI.
 
-    ``None`` means the lightweight meter is unavailable, so SoX remains the
-    source of truth instead of rejecting a recording pre-emptively.
+    A missing ``sounddevice`` module remains a supported source-only mode:
+    SoX is still allowed to be the recording source and returns ``None`` here.
+    Once PortAudio is present, enumeration failures are explicit unavailable
+    states rather than permission to route to an arbitrary endpoint.
     """
     if sd is None:
         return None
+    return SoundDeviceMicrophoneInventory(sd).snapshot()
+
+
+def _microphone_settings() -> MicrophoneSettings:
     try:
-        device = sd.query_devices(kind="input")
-        return int(device.get("max_input_channels", 0)) > 0
-    except Exception:
-        return False
+        return MicrophoneSettings.from_mapping(APP_CONFIG.get("microphone"))
+    except (TypeError, ValueError):
+        return MicrophoneSettings.defaults()
+
+
+def _recording_controls() -> RecordingControls:
+    try:
+        return RecordingControls.from_mapping(APP_CONFIG.get("recording_controls"))
+    except (TypeError, ValueError):
+        return RecordingControls.defaults()
+
+
+def _resolve_microphone_selection(
+        inventory: MicrophoneInventory | None = None,
+        settings: MicrophoneSettings | None = None) -> tuple[
+            MicrophoneInventory | None, MicrophoneSelection | None]:
+    inventory = _microphone_inventory() if inventory is None else inventory
+    if inventory is None:
+        return None, None
+    settings = settings or _microphone_settings()
+    return inventory, inventory.resolve(settings.selected_id)
+
+
+def _has_active_microphone():
+    """Return whether the selected/current-default input is usable.
+
+    ``None`` means the optional PortAudio inventory is unavailable, so SoX
+    remains the source of truth instead of rejecting a recording pre-emptively.
+    """
+    _inventory, selection = _resolve_microphone_selection()
+    if selection is None:
+        return None
+    return selection.can_record
 
 
 class Recorder:
-    def __init__(self):
+    def __init__(self, microphone_source=None, controls=None, boundary_clock=None):
         self.proc = None
         self._process_job = None
         self.mic_stream = None
         self.mic_level = 0.0
         self.audio_path = None
+        self.microphone_source = microphone_source
+        self.microphone_inventory = None
+        self.microphone_selection = None
+        self._controls_override = controls is not None
+        self.controls = controls or _recording_controls()
+        self._boundary_clock = time if boundary_clock is None else boundary_clock
+        self.boundary_policy = None
+        self.boundary_event = threading.Event()
+        self.boundary_reason = None
+        self.boundary_warning = False
+        self._boundary_signal_lock = threading.Lock()
+        self._boundary_worker_stop = threading.Event()
+        self._boundary_worker = None
         self._lifecycle_lock = threading.RLock()
         self._cancel_requested = False
         # WMI process discovery can take one or two seconds on Windows. Do it
@@ -3751,11 +3817,33 @@ class Recorder:
         self._stop_stale_windows_recorders()
         self._cleanup_orphaned_recordings()
 
-    def start(self, audio_path=None, cancel_event=None):
+    def start(self, audio_path=None, cancel_event=None, microphone=None):
         """Start SoX for one owned path, refusing a concurrent cancellation."""
         if audio_path is None:
             audio_path = AUDIO_PATH
         audio_path = Path(audio_path)
+        source = self.microphone_source
+        inventory = (
+            source.snapshot() if source is not None
+            else _microphone_inventory())
+        if inventory is not None:
+            requested = microphone
+            if isinstance(microphone, MicrophoneDevice):
+                requested = microphone.stable_id
+            elif microphone is None:
+                requested = _microphone_settings().selected_id
+            selection = inventory.resolve(requested)
+            self.microphone_inventory = inventory
+            self.microphone_selection = selection
+            if not selection.can_record:
+                raise MicrophoneUnavailableError(
+                    "No safe microphone input is available")
+        else:
+            selection = None
+            self.microphone_inventory = None
+            self.microphone_selection = None
+        if not self._controls_override:
+            self.controls = _recording_controls()
         with self._lifecycle_lock:
             self.audio_path = audio_path
             self._cancel_requested = False
@@ -3766,15 +3854,39 @@ class Recorder:
             self.stop()
             if cancel_event is not None and cancel_event.is_set():
                 raise RecordingCancelledError("Recording cancelled during startup")
-        if _has_active_microphone() is False:
+            with self._boundary_signal_lock:
+                self.boundary_policy = RecordingBoundaryPolicy(
+                    self.controls, clock=self._boundary_clock)
+                self.boundary_policy.start()
+                self.boundary_event.clear()
+                self.boundary_reason = None
+                self.boundary_warning = False
+                self._boundary_worker_stop.clear()
+        if selection is None and _has_active_microphone() is False:
             raise MicrophoneUnavailableError("No active microphone")
         args = [SOX_EXE]
         if IS_WIN:
-            args += ["-t", "waveaudio", "-d"]
+            args += ["-t", "waveaudio"]
+            if selection is not None and selection.state is MicrophoneSelectionState.SELECTED:
+                args += [self._selected_input_name(selection)]
+            else:
+                args += ["-d"]
         elif IS_MAC:
-            args += ["-t", "coreaudio", "default"]
+            args += ["-t", "coreaudio"]
+            args += [
+                self._selected_input_name(selection)
+                if selection is not None
+                and selection.state is MicrophoneSelectionState.SELECTED
+                else "default"
+            ]
         else:
-            args += ["-t", "pulseaudio", "default"]
+            args += ["-t", "pulseaudio"]
+            args += [
+                self._selected_input_name(selection)
+                if selection is not None
+                and selection.state is MicrophoneSelectionState.SELECTED
+                else "default"
+            ]
         args += ["-r", "16000", "-c", "1", "-b", "16", "-e", "signed-integer", str(audio_path)]
         kwargs = {}
         if IS_WIN:
@@ -3788,6 +3900,82 @@ class Recorder:
             if IS_WIN:
                 self._process_job = self._assign_kill_on_close_job(self.proc)
             self._finish_start_locked(cancel_event)
+            self._start_boundary_worker()
+
+    def _start_boundary_worker(self):
+        """Observe recording boundaries even when the input-level meter is absent."""
+        policy = self.boundary_policy
+        if (policy is None or policy.controls.max_duration_seconds is None
+                or self._cancel_requested or self.proc is None):
+            return
+        self._boundary_worker_stop.clear()
+
+        def observe_boundaries():
+            try:
+                while not self._boundary_worker_stop.wait(
+                        RECORDING_BOUNDARY_POLL_SECONDS):
+                    policy = self.boundary_policy
+                    if policy is None or policy.terminal:
+                        return
+                    try:
+                        decision = policy.observe_duration()
+                    except Exception:
+                        # A clock transition must never tear down capture. The
+                        # production monotonic clock is stable; this fallback
+                        # keeps injected test clocks and shutdown races safe.
+                        continue
+                    self._publish_boundary(decision, policy=policy)
+                    if decision.should_stop:
+                        return
+            finally:
+                if self._boundary_worker is threading.current_thread():
+                    self._boundary_worker = None
+
+        worker = threading.Thread(
+            target=observe_boundaries,
+            name="ClarifyVoiceRecordingBoundaryPolicy",
+            daemon=True,
+        )
+        self._boundary_worker = worker
+        worker.start()
+
+    def _stop_boundary_worker(self):
+        self._boundary_worker_stop.set()
+        worker = self._boundary_worker
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=max(0.5, RECORDING_BOUNDARY_POLL_SECONDS * 4))
+        if self._boundary_worker is worker:
+            self._boundary_worker = None
+
+    def _publish_boundary(self, decision, *, policy=None):
+        with self._boundary_signal_lock:
+            if policy is not None and policy is not self.boundary_policy:
+                return
+            if self._boundary_worker_stop.is_set() or self._cancel_requested:
+                return
+            if decision.warning:
+                self.boundary_warning = True
+            if not decision.should_stop:
+                return
+            if self.boundary_event.is_set():
+                return
+            self.boundary_reason = decision.reason
+            self.boundary_event.set()
+
+    def _selected_input_name(self, selection):
+        """Return a name only when it cannot resolve to another endpoint."""
+        if selection is None or selection.device is None:
+            return "default"
+        name = selection.device.name
+        inventory = self.microphone_inventory
+        if inventory is not None:
+            same_name = tuple(
+                device for device in inventory.available_devices
+                if device.name.casefold() == name.casefold())
+            if len(same_name) != 1:
+                raise MicrophoneUnavailableError(
+                    "Selected microphone has no unambiguous backend name")
+        return name
 
     def _finish_start_locked(self, cancel_event=None):
         """Publish the input stream while cancellation is excluded by the lock."""
@@ -3797,9 +3985,19 @@ class Recorder:
                 self.stop()
                 raise RecordingCancelledError("Recording cancelled during startup")
             try:
+                stream_kwargs = {
+                    "channels": 1, "samplerate": 16000, "blocksize": 256,
+                    "dtype": "int16", "callback": self._audio_cb,
+                }
+                selected = self.microphone_selection
+                if (selected is not None and selected.device is not None
+                        and selected.state is MicrophoneSelectionState.SELECTED):
+                    stream_kwargs["device"] = (
+                        selected.device.backend_index
+                        if selected.device.backend_index is not None
+                        else selected.device.name)
                 self.mic_stream = sd.RawInputStream(
-                    channels=1, samplerate=16000, blocksize=256,
-                    dtype="int16", callback=self._audio_cb)
+                    **stream_kwargs)
                 self.mic_stream.start()
             except Exception:
                 # SoX remains the source of truth when the level meter is
@@ -3836,9 +4034,21 @@ class Recorder:
             mean_square = sum(sample * sample for sample in samples) / len(samples)
             # Preserve the previous normalized-float RMS calibration.
             self.mic_level = min(1.0, math.sqrt(mean_square) / 32768.0 * 16)
+            policy = self.boundary_policy
+            if policy is not None and not policy.terminal:
+                try:
+                    decision = policy.observe(
+                        self._boundary_clock.monotonic(), input_level=self.mic_level)
+                except Exception:
+                    # A malformed callback timestamp/level must never tear
+                    # down the audio callback or publish partial audio.
+                    decision = None
+                if decision is not None:
+                    self._publish_boundary(decision, policy=policy)
 
     def stop(self):
         with self._lifecycle_lock:
+            self._stop_boundary_worker()
             if self.mic_stream:
                 try: self.mic_stream.stop(); self.mic_stream.close()
                 except Exception: pass
@@ -4068,6 +4278,9 @@ class RecordingSession:
         self._shutdown_watcher = None
         self._shutdown_handoff_requested = False
         self._owner_release_callback = None
+        self._boundary_callback = None
+        self._boundary_monitor_stop = threading.Event()
+        self._boundary_monitor = None
 
     @property
     def terminal(self):
@@ -4097,6 +4310,7 @@ class RecordingSession:
                 if "unexpected keyword" not in str(error) and "positional" not in str(error):
                     raise
                 self.recorder.start()
+            self._start_boundary_monitor()
             if self.cancel_event.is_set():
                 self.recorder.cancel()
                 raise RecordingCancelledError("Recording cancelled during startup")
@@ -4110,6 +4324,45 @@ class RecordingSession:
             raise
         finally:
             self.start_finished.set()
+
+    def set_boundary_callback(self, callback):
+        """Register a callback for a policy-triggered automatic stop.
+
+        The callback runs on a small lifecycle worker, never from the audio
+        callback. It must only enqueue a stop/cancel action; all provider and
+        UI work remains behind the existing recording owner.
+        """
+        if callback is not None and not callable(callback):
+            raise TypeError("recording boundary callback must be callable")
+        self._boundary_callback = callback
+
+    def _start_boundary_monitor(self):
+        event = getattr(self.recorder, "boundary_event", None)
+        if event is None or not hasattr(event, "wait"):
+            return
+        self._boundary_monitor_stop.clear()
+
+        def monitor():
+            try:
+                # Poll with a short bounded interval so an explicit stop or
+                # cancellation can release this lifecycle worker even when
+                # the recorder never emits a boundary event.
+                while not self._boundary_monitor_stop.is_set():
+                    if event.wait(0.1):
+                        break
+                if self._boundary_monitor_stop.is_set() or self.cancel_event.is_set():
+                    return
+                callback = self._boundary_callback
+                if callback is not None:
+                    callback(getattr(self.recorder, "boundary_reason", None))
+            finally:
+                self.detach_worker(threading.current_thread())
+
+        worker = threading.Thread(
+            target=monitor, name="ClarifyVoiceRecordingBoundary", daemon=True)
+        self._boundary_monitor = worker
+        self.attach_worker(worker)
+        worker.start()
 
     def wait_until_started(self):
         """Wait for startup's terminal signal and preserve its typed outcome."""
@@ -4130,6 +4383,7 @@ class RecordingSession:
             elif self.state != "processing":
                 raise RecordingError(
                     f"Cannot stop session in state {self.state}")
+        self._boundary_monitor_stop.set()
         self.stop_recorder()
         time.sleep(0.3)
         if not self.audio_path.exists() or self.audio_path.stat().st_size < 1000:
@@ -4366,6 +4620,7 @@ class RecordingSession:
             return True
 
     def cancel(self):
+        self._boundary_monitor_stop.set()
         if not self.request_cancel():
             return False
         recorder_error = None
@@ -4389,6 +4644,7 @@ class RecordingSession:
         """Cleanup once, then publish exactly one terminal state."""
         if outcome not in self.TERMINAL_STATES:
             raise RecordingError(f"Invalid terminal state {outcome}")
+        self._boundary_monitor_stop.set()
         with self._lock:
             already_terminal = self.terminal
             if outcome == "completed" and self.state != "completed":
@@ -6141,7 +6397,11 @@ class App(ctk.CTk):
             self.attributes("-transparentcolor", TRANSPARENT)
             self._clarify_transparent_color = TRANSPARENT
 
-        self.recorder = Recorder()
+        self._microphone_source = (
+            SoundDeviceMicrophoneInventory(sd) if sd is not None else None)
+        self.recorder = Recorder(
+            microphone_source=self._microphone_source,
+        )
         self._audio_file_batch_service = AudioFileBatchService(
             DictionaryAwareAudioTranscriptionGateway(
                 RegistryAudioTranscriptionGateway(PROVIDER_REGISTRY),
@@ -6939,6 +7199,8 @@ class App(ctk.CTk):
 
         if self._recording_overlay is not None:
             if self.app_state == "recording":
+                if getattr(self.recorder, "boundary_warning", False):
+                    self.sub.configure(text="Recording limit soon")
                 elapsed = max(0.001, min(0.1, now - self._last_wave_time))
                 self._last_wave_time = now
                 target = self.recorder.mic_level
@@ -8191,6 +8453,11 @@ class App(ctk.CTk):
         session = (session_factory() if session_factory is not None else
                    RecordingSession(self.recorder, audio_path=AUDIO_PATH))
         self._recording_session = session
+        set_boundary_callback = getattr(session, "set_boundary_callback", None)
+        if callable(set_boundary_callback):
+            set_boundary_callback(
+                lambda _reason=None, session=session: self.after(
+                    0, lambda session=session: self._stop_recording(session)))
         self._recorder_start_finished = session.start_finished
         self._rec_start = session.started_at
         self._recording_usage = _recording_usage_context(self.mode)
@@ -10598,6 +10865,223 @@ class App(ctk.CTk):
             text_color=DIM, font=font_caption, anchor="w", justify="left",
             wraplength=430).pack(fill="x", padx=50, pady=(3, 0))
 
+        # Microphone inventory and recording boundaries are kept as a draft
+        # until Apply, just like the provider/workflow selectors. The only
+        # persisted value identifying an endpoint is its stable ID; transient
+        # PortAudio indices never cross this UI boundary.
+        microphone_state = {
+            "inventory": None,
+            "selection": _microphone_settings().selected_id,
+            "controls": _recording_controls(),
+            "labels": {},
+        }
+        microphone_section = ctk.CTkFrame(
+            preferences_inner, fg_color="#111111", corner_radius=11,
+            border_width=1, border_color="#252525")
+        microphone_section.pack(fill="x", pady=(24, 0))
+        ctk.CTkLabel(
+            microphone_section, text="Microphone and recording",
+            text_color=TEXT, font=font_section, anchor="w").pack(
+                fill="x", padx=14, pady=(12, 2))
+        ctk.CTkLabel(
+            microphone_section,
+            text=("Choose a stable input endpoint. Missing devices fall back "
+                  "to the current default and are reported here."),
+            text_color=DIM, font=font_caption, anchor="w", justify="left",
+            wraplength=430).pack(fill="x", padx=14, pady=(0, 9))
+        microphone_row = ctk.CTkFrame(
+            microphone_section, fg_color="transparent")
+        microphone_row.pack(fill="x", padx=12)
+        microphone_menu = ctk.CTkOptionMenu(
+            microphone_row, values=["System default"], width=330, height=32,
+            corner_radius=10, fg_color="#141414", button_color="#252525",
+            button_hover_color="#303030", text_color=TEXT, font=font_body)
+        microphone_menu.pack(side="left", fill="x", expand=True)
+        microphone_refresh = ctk.CTkButton(
+            microphone_row, text="↻", width=32, height=32, corner_radius=16,
+            fg_color="#242424", hover_color="#303030", text_color=TEXT,
+            font=font_body)
+        microphone_refresh.pack(side="left", padx=(7, 0))
+        microphone_test = ctk.CTkButton(
+            microphone_row, text="Test", width=62, height=32, corner_radius=16,
+            fg_color="#242424", hover_color="#303030", text_color=TEXT,
+            font=font_label)
+        microphone_test.pack(side="left", padx=(7, 0))
+        microphone_status = ctk.CTkLabel(
+            microphone_section, text="", text_color=DIM, font=font_caption,
+            anchor="w", justify="left", wraplength=430)
+        microphone_status.pack(fill="x", padx=14, pady=(6, 7))
+
+        controls_row = ctk.CTkFrame(
+            microphone_section, fg_color="transparent")
+        controls_row.pack(fill="x", padx=12, pady=(0, 2))
+        ctk.CTkLabel(
+            controls_row, text="Maximum seconds (blank = unlimited)",
+            text_color=DIM, font=font_caption, anchor="w").pack(
+                side="left", fill="x", expand=True)
+        max_duration_entry = ctk.CTkEntry(
+            controls_row, width=90, height=28, corner_radius=9,
+            fg_color="#141414", border_color="#292929", text_color=TEXT,
+            font=font_body)
+        max_duration_entry.pack(side="right")
+        warning_row = ctk.CTkFrame(
+            microphone_section, fg_color="transparent")
+        warning_row.pack(fill="x", padx=12, pady=(0, 2))
+        ctk.CTkLabel(
+            warning_row, text="Warning seconds",
+            text_color=DIM, font=font_caption, anchor="w").pack(
+                side="left", fill="x", expand=True)
+        warning_entry = ctk.CTkEntry(
+            warning_row, width=90, height=28, corner_radius=9,
+            fg_color="#141414", border_color="#292929", text_color=TEXT,
+            font=font_body)
+        warning_entry.pack(side="right")
+        vad_switch = ctk.CTkSwitch(
+            microphone_section, text="Stop after speech and silence",
+            height=25, switch_width=38, switch_height=19, corner_radius=10,
+            border_width=1, fg_color="#171717", progress_color="#e7e7e7",
+            button_color="#777777", text_color=DIM, font=font_label)
+        vad_switch.pack(fill="x", padx=12, pady=(4, 2))
+        vad_row = ctk.CTkFrame(
+            microphone_section, fg_color="transparent")
+        vad_row.pack(fill="x", padx=12, pady=(0, 10))
+        vad_fields = []
+        for label in ("Level", "Min speech", "Silence"):
+            field = ctk.CTkFrame(vad_row, fg_color="transparent")
+            field.pack(side="left", fill="x", expand=True, padx=(0, 4))
+            ctk.CTkLabel(field, text=label, text_color=DIM,
+                font=font_caption).pack(anchor="w")
+            entry = ctk.CTkEntry(
+                field, height=27, corner_radius=8, fg_color="#141414",
+                border_color="#292929", text_color=TEXT, font=font_caption)
+            entry.pack(fill="x")
+            vad_fields.append(entry)
+
+        def set_entry(entry, value):
+            entry.delete(0, "end")
+            if value is not None:
+                entry.insert(0, str(value))
+
+        def controls_to_widgets(controls):
+            set_entry(max_duration_entry, controls.max_duration_seconds)
+            set_entry(warning_entry, controls.warning_seconds)
+            set_entry(vad_fields[0], controls.vad.level_threshold)
+            set_entry(vad_fields[1], controls.vad.minimum_speech_seconds)
+            set_entry(vad_fields[2], controls.vad.silence_duration_seconds)
+            if controls.vad.enabled:
+                vad_switch.select()
+            else:
+                vad_switch.deselect()
+
+        controls_to_widgets(microphone_state["controls"])
+
+        def refresh_microphone_inventory():
+            inventory, selection = _resolve_microphone_selection(
+                settings=MicrophoneSettings(microphone_state["selection"]))
+            microphone_state["inventory"] = inventory
+            labels = {"System default": None}
+            if inventory is None:
+                microphone_state["labels"] = labels
+                microphone_menu.configure(values=list(labels))
+                microphone_menu.set("System default")
+                microphone_status.configure(
+                    text="Input inventory unavailable; SoX default remains active.",
+                    text_color=DIM)
+                return
+            for device in inventory.available_devices:
+                label = device.name
+                if device.host_api:
+                    label = f"{label} · {device.host_api}"
+                if label in labels:
+                    label = f"{label} · {device.stable_id[-6:]}"
+                labels[label] = device.stable_id
+            microphone_state["labels"] = labels
+            microphone_menu.configure(values=list(labels))
+            selected_label = next(
+                (label for label, stable_id in labels.items()
+                 if stable_id == microphone_state["selection"]),
+                "System default")
+            microphone_menu.set(selected_label)
+            if selection is None or not selection.can_record:
+                microphone_status.configure(
+                    text=(f"No safe input device ({inventory.error_code or 'unavailable'})."),
+                    text_color="#d17878")
+            elif selection.is_fallback:
+                microphone_status.configure(
+                    text=(f"Saved microphone unavailable; using current default: "
+                          f"{selection.device.name}"),
+                    text_color="#d3a46f")
+            else:
+                microphone_status.configure(
+                    text=(f"{selection.device.name} · {selection.device.host_api or 'default'}"),
+                    text_color="#69c58a")
+
+        def select_microphone(label):
+            microphone_state["selection"] = microphone_state["labels"].get(label)
+            refresh_microphone_inventory()
+            refresh_dirty_state()
+
+        def test_microphone():
+            inventory = microphone_state.get("inventory")
+            if inventory is None:
+                microphone_status.configure(
+                    text="Input test unavailable without PortAudio.", text_color=DIM)
+                return
+            selection = inventory.resolve(microphone_state["selection"])
+            if not selection.can_record:
+                microphone_status.configure(
+                    text="No safe microphone to test.", text_color="#d17878")
+                return
+            microphone_test.configure(state="disabled")
+            microphone_status.configure(text="Listening…", text_color=DIM)
+
+            def run_test():
+                peak = 0.0
+                stream = None
+                try:
+                    kwargs = {"channels": 1, "samplerate": 16000,
+                              "blocksize": 256, "dtype": "int16"}
+                    if selection.device.backend_index is not None:
+                        kwargs["device"] = selection.device.backend_index
+
+                    def callback(indata, _frames, _time_info, _status):
+                        nonlocal peak
+                        samples = memoryview(indata).cast("h")
+                        if samples:
+                            peak = max(peak, min(
+                                1.0, math.sqrt(sum(sample * sample
+                                    for sample in samples) / len(samples))
+                                / 32768.0 * 16))
+
+                    stream = sd.RawInputStream(callback=callback, **kwargs)
+                    stream.start()
+                    _REAL_TIME.sleep(0.25)
+                except Exception as error:
+                    result = (f"Input test failed: {error}", "#d17878")
+                else:
+                    result = (f"Input level peak: {peak:.2f}", "#69c58a")
+                finally:
+                    if stream is not None:
+                        try:
+                            stream.stop()
+                            stream.close()
+                        except Exception:
+                            pass
+                    try:
+                        win.after(0, lambda: (
+                            microphone_test.configure(state="normal"),
+                            microphone_status.configure(
+                                text=result[0], text_color=result[1])))
+                    except tk.TclError:
+                        pass
+
+            threading.Thread(target=run_test, daemon=True).start()
+
+        microphone_menu.configure(command=select_microphone)
+        microphone_refresh.configure(command=refresh_microphone_inventory)
+        microphone_test.configure(command=test_microphone)
+        refresh_microphone_inventory()
+
         update_section = ctk.CTkFrame(
             preferences_inner, fg_color="transparent")
         update_section.pack(fill="x", pady=(28, 0))
@@ -10893,6 +11377,20 @@ class App(ctk.CTk):
         retention_menu.configure(command=history_preferences_changed)
         history_records()
 
+        def controls_from_widgets():
+            max_text = max_duration_entry.get().strip()
+            max_duration = None if not max_text else float(max_text)
+            return RecordingControls.from_mapping({
+                "max_duration_seconds": max_duration,
+                "warning_seconds": float(warning_entry.get().strip() or 10),
+                "vad": {
+                    "enabled": bool(vad_switch.get()),
+                    "level_threshold": float(vad_fields[0].get().strip() or 0.02),
+                    "minimum_speech_seconds": float(vad_fields[1].get().strip() or 0.25),
+                    "silence_duration_seconds": float(vad_fields[2].get().strip() or 0.8),
+                },
+            })
+
         saved_settings = {
             "transcription": (selected["provider"], selected["model"]),
             "refinement": (
@@ -10903,9 +11401,15 @@ class App(ctk.CTk):
             "history_enabled": bool(history_enabled_switch.get()),
             "history_retention_days": _history_retention_days(
                 retention_values.get(retention_menu.get(), DEFAULT_RETENTION_DAYS)),
+            "microphone": MicrophoneSettings(_microphone_settings().selected_id),
+            "recording_controls": _recording_controls(),
         }
 
         def current_settings():
+            try:
+                controls = controls_from_widgets()
+            except (TypeError, ValueError):
+                controls = None
             return {
                 "transcription": (selected["provider"], selected["model"]),
                 "refinement": (
@@ -10916,6 +11420,8 @@ class App(ctk.CTk):
                 "history_enabled": bool(history_enabled_switch.get()),
                 "history_retention_days": _history_retention_days(
                     retention_values.get(retention_menu.get(), DEFAULT_RETENTION_DAYS)),
+                "microphone": MicrophoneSettings(microphone_state["selection"]),
+                "recording_controls": controls,
             }
 
         def refresh_dirty_state():
@@ -10939,6 +11445,10 @@ class App(ctk.CTk):
                 history_enabled_switch.deselect()
             retention_menu.set(retention_label(
                 saved_settings["history_retention_days"]))
+            microphone_state["selection"] = saved_settings["microphone"].selected_id
+            microphone_state["controls"] = saved_settings["recording_controls"]
+            controls_to_widgets(microphone_state["controls"])
+            refresh_microphone_inventory()
             workflow_controller._config = replace(
                 workflow_controller.config,
                 workflows=saved_settings["workflows"],
@@ -12171,6 +12681,8 @@ class App(ctk.CTk):
 
             def apply_general_settings():
                 store_workflow_form()
+                microphone = MicrophoneSettings(microphone_state["selection"])
+                controls = controls_from_widgets()
                 _apply_settings_transaction(
                     selected, selected_refinement, active_options(),
                     active_text_options(), model_keys,
@@ -12179,7 +12691,9 @@ class App(ctk.CTk):
                     history_enabled=bool(history_enabled_switch.get()),
                     history_retention_days=_history_retention_days(
                         retention_values.get(retention_menu.get(),
-                                             DEFAULT_RETENTION_DAYS)))
+                                             DEFAULT_RETENTION_DAYS)),
+                    microphone=microphone,
+                    recording_controls=controls)
                 # Apply privacy-sensitive history changes immediately after
                 # persistence. A subsequent route refresh may fail while
                 # reading an adapter, but that must never leave a disabled
@@ -12188,7 +12702,6 @@ class App(ctk.CTk):
                 workflow_controller.reload()
                 load_workflow_form(workflow_scope_state["scope"])
                 history_records()
-
             def restore_after_failed_apply():
                 # The outer transaction has restored APP_CONFIG and the
                 # repository before this callback runs. Rebuild live runtime
@@ -12224,8 +12737,13 @@ class App(ctk.CTk):
                         error=str(error))
                 hotkey_feedback(message, "#d17878")
                 return
-            except (OSError, ValueError, ProviderError):
+            except (OSError, TypeError, ValueError, ProviderError) as error:
+                if isinstance(error, (TypeError, ValueError)):
+                    microphone_status.configure(
+                        text=f"Invalid recording control: {error}",
+                        text_color="#d17878")
                 return
+            microphone_state["controls"] = controls
             saved_settings.clear()
             saved_settings.update(current_settings())
             hotkey_feedback("")

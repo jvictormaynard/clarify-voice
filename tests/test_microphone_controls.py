@@ -195,6 +195,22 @@ class MicrophoneControlsTests(unittest.TestCase):
         inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
         self.assertEqual(inventory.default_id, inventory.devices[1].stable_id)
 
+    def test_sounddevice_adapter_accepts_single_default_mapping(self):
+        fake = SimpleNamespace(
+            query_devices=lambda: {
+                "name": "Default input",
+                "max_input_channels": 1,
+                "hostapi": "MME",
+            },
+            default=SimpleNamespace(device=(0, -1)),
+        )
+
+        inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
+
+        self.assertEqual(len(inventory.devices), 1)
+        self.assertEqual(inventory.devices[0].name, "Default input")
+        self.assertEqual(inventory.default_id, inventory.devices[0].stable_id)
+
     def test_sounddevice_adapter_resolves_numeric_host_api_name(self):
         fake = SimpleNamespace(
             query_devices=lambda: [

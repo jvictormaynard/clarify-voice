@@ -2,6 +2,7 @@ import tempfile
 import threading
 import time
 import unittest
+from array import array
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -10,6 +11,136 @@ import app
 
 
 class RecordingSessionTests(unittest.TestCase):
+    def test_boundary_monitor_notifies_lifecycle_callback_and_releases_on_cancel(self):
+        class BoundaryRecorder:
+            def __init__(self):
+                self.boundary_event = threading.Event()
+                self.boundary_reason = app.RecordingBoundaryReason.MAX_DURATION
+                self.path = None
+
+            def start(self, audio_path, cancel_event=None):
+                self.path = Path(audio_path)
+                self.path.write_bytes(b"a" * 1200)
+
+            def stop(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = BoundaryRecorder()
+            session = app.RecordingSession(
+                recorder=recorder,
+                audio_path=Path(directory) / "recording.wav",
+            )
+            callback_seen = threading.Event()
+            callback_details = []
+
+            def on_boundary(reason):
+                callback_details.append((reason, threading.current_thread().name))
+                callback_seen.set()
+
+            session.set_boundary_callback(on_boundary)
+            session.start()
+            recorder.boundary_event.set()
+
+            self.assertTrue(callback_seen.wait(1))
+            self.assertEqual(
+                callback_details[0][0], app.RecordingBoundaryReason.MAX_DURATION)
+            self.assertNotEqual(callback_details[0][1], threading.current_thread().name)
+
+            self.assertTrue(session.cancel())
+            self.assertTrue(session.shutdown_complete.wait(1))
+            self.assertFalse(session._active_workers())
+
+    def test_boundary_monitor_can_be_stopped_without_an_event(self):
+        class QuietRecorder:
+            def __init__(self):
+                self.boundary_event = threading.Event()
+
+            def start(self, audio_path, cancel_event=None):
+                Path(audio_path).write_bytes(b"a" * 1200)
+
+            def stop(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app.time, "sleep", return_value=None):
+            session = app.RecordingSession(
+                recorder=QuietRecorder(),
+                audio_path=Path(directory) / "recording.wav",
+            )
+            session.start()
+            session.cancel()
+
+            self.assertTrue(session.shutdown_complete.wait(1))
+            self.assertFalse(session._active_workers())
+
+    def test_recorder_boundary_callback_sets_typed_reason(self):
+        recorder = app.Recorder(
+            controls=app.RecordingControls(
+                max_duration_seconds=1,
+                warning_seconds=0,
+            )
+        )
+        recorder.boundary_policy = app.RecordingBoundaryPolicy(recorder.controls)
+        recorder.boundary_policy.start(0)
+
+        with patch.object(app.time, "monotonic", return_value=1):
+            recorder._audio_cb(array("h", [1200]).tobytes(), 1, None, None)
+
+        self.assertTrue(recorder.boundary_event.is_set())
+        self.assertEqual(
+            recorder.boundary_reason, app.RecordingBoundaryReason.MAX_DURATION)
+
+    def test_recorder_routes_selected_microphone_by_current_backend_handle(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "System default",
+                "host_api": "WASAPI",
+                "index": 1,
+                "max_input_channels": 1,
+                "is_default": True,
+            },
+            {
+                "name": "USB headset",
+                "host_api": "WASAPI",
+                "index": 7,
+                "max_input_channels": 1,
+            },
+        ])
+        selected_id = inventory.devices[1].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+        stream = Mock()
+        fake_sounddevice = SimpleNamespace(RawInputStream=Mock(return_value=stream))
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", fake_sounddevice), patch.object(
+                app, "IS_WIN", True), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            recorder.start(
+                Path(directory) / "recording.wav",
+                microphone=selected_id,
+            )
+
+            args = app.subprocess.Popen.call_args.args[0]
+            self.assertEqual(
+                args[0:4], [app.SOX_EXE, "-t", "waveaudio", "USB headset"])
+            stream.start.assert_called_once_with()
+            recorder.stop()
+
     def test_sessions_reserve_unique_paths_and_cleanup_success(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
                 app, "DATA_DIR", Path(directory)):

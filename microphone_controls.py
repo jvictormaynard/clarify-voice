@@ -481,7 +481,18 @@ class SoundDeviceMicrophoneInventory:
 
     def snapshot(self) -> MicrophoneInventory:
         try:
-            records = tuple(self._sounddevice.query_devices())
+            raw_records = self._sounddevice.query_devices()
+            # A few lightweight wrappers (and test doubles) return the
+            # default input mapping for ``query_devices()`` instead of the
+            # full sequence. Treat it as one endpoint rather than iterating
+            # its dictionary keys into invalid device descriptors.
+            if isinstance(raw_records, Mapping):
+                one = dict(raw_records)
+                one.setdefault("name", "Default input")
+                one.setdefault("is_default", True)
+                records = (one,)
+            else:
+                records = tuple(raw_records)
             query_hostapis = getattr(self._sounddevice, "query_hostapis", None)
             try:
                 hostapis = tuple(query_hostapis()) if callable(query_hostapis) else ()
