@@ -3801,7 +3801,10 @@ class Recorder:
         self.microphone_selection = None
         self._controls_override = controls is not None
         self.controls = controls or _recording_controls()
-        self._boundary_clock = time if boundary_clock is None else boundary_clock
+        # Keep boundary timing independent from tests/integrations that
+        # replace the module-level ``time`` helper to control recorder sleeps.
+        self._boundary_clock = (
+            _REAL_TIME if boundary_clock is None else boundary_clock)
         self.boundary_policy = None
         self.boundary_event = threading.Event()
         self.boundary_reason = None

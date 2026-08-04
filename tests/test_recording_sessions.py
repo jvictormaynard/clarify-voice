@@ -917,6 +917,23 @@ class RecordingSessionTests(unittest.TestCase):
 
         cleanup.assert_not_called()
 
+    def test_default_boundary_clock_ignores_patched_app_time_module(self):
+        process = Mock()
+        process.poll.return_value = None
+        patched_time = SimpleNamespace(sleep=lambda _seconds: None)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "time", patched_time), patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"):
+            recorder = app.Recorder()
+            recorder.start(Path(directory) / "recording.wav")
+
+            self.assertIs(recorder._boundary_clock, app._REAL_TIME)
+            recorder.stop()
+
     def test_exit_waits_for_active_upload_then_retries_cleanup(self):
         release_upload = threading.Event()
         upload_started = threading.Event()
