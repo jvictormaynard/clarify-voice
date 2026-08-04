@@ -195,6 +195,41 @@ class MicrophoneControlsTests(unittest.TestCase):
             saved_default.state, MicrophoneSelectionState.FALLBACK_DEFAULT)
         self.assertEqual(saved_default.device.stable_id, selection.device.stable_id)
 
+    def test_duplicate_fallback_identity_keeps_system_default_route(self):
+        inventory = MicrophoneInventory.from_records(
+            [
+                {
+                    "name": "Same fallback input",
+                    "host_api": "WASAPI",
+                    "index": 3,
+                    "max_input_channels": 1,
+                },
+                {
+                    "name": "Same fallback input",
+                    "host_api": "WASAPI",
+                    "index": 7,
+                    "max_input_channels": 1,
+                },
+            ],
+            default_index=7,
+        )
+
+        self.assertEqual(
+            inventory.devices[0].stable_id,
+            inventory.devices[1].stable_id,
+        )
+        self.assertEqual(inventory.error_code, "ambiguous_identity")
+        self.assertEqual(inventory.available_devices, ())
+
+        selection = inventory.resolve()
+        self.assertEqual(selection.state, MicrophoneSelectionState.DEFAULT)
+        self.assertTrue(selection.can_record)
+        self.assertEqual(selection.device.backend_index, 7)
+
+        explicit = inventory.resolve(inventory.devices[0].stable_id)
+        self.assertEqual(
+            explicit.state, MicrophoneSelectionState.FALLBACK_DEFAULT)
+
     def test_missing_default_is_explicitly_unavailable_not_arbitrary(self):
         inventory = MicrophoneInventory.from_records([
             {"name": "Unmarked input", "max_input_channels": 1},

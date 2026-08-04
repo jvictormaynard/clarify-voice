@@ -22,7 +22,7 @@ backend, Tk, or secret-storage imports.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
 import math
@@ -390,6 +390,7 @@ class MicrophoneInventory:
             for record in records
         )
         resolved_default = str(default_id).strip() if default_id else ""
+        default_device_index = None
         if not resolved_default:
             marked = tuple(device.stable_id for device in devices if device.is_default)
             if len(marked) == 1:
@@ -398,6 +399,7 @@ class MicrophoneInventory:
             indexed = tuple(
                 device for device in devices if device.backend_index == default_index)
             if len(indexed) == 1:
+                default_device_index = devices.index(indexed[0])
                 resolved_default = indexed[0].stable_id
             elif (
                 not indexed
@@ -408,7 +410,14 @@ class MicrophoneInventory:
                 # the query order as their only index. Never use this fallback
                 # when any real backend index is present, because PortAudio
                 # handles may be sparse after filtering.
+                default_device_index = default_index
                 resolved_default = devices[default_index].stable_id
+        if default_device_index is not None:
+            devices = tuple(
+                replace(device, is_default=True)
+                if index == default_device_index else device
+                for index, device in enumerate(devices)
+            )
         return cls(devices, resolved_default or None)
 
     @classmethod
@@ -438,9 +447,18 @@ class MicrophoneInventory:
             return None
         matches = tuple(
             device for device in self.devices if device.stable_id == self.default_id)
-        if len(matches) != 1 or not matches[0].usable:
+        usable = tuple(device for device in matches if device.usable)
+        if not usable:
             return None
-        return matches[0]
+        if len(usable) == 1:
+            return usable[0]
+        marked = tuple(device for device in usable if device.is_default)
+        if len(marked) == 1:
+            return marked[0]
+        # A duplicate fallback ID is unsafe for a stable/name-based request,
+        # but resolve(None) is the system-default route and Recorder passes
+        # that selection to SoX as -d/default without using this name.
+        return usable[0]
 
     def resolve(self, requested_id: str | None = None) -> MicrophoneSelection:
         """Resolve a saved preference without silently choosing an arbitrary device."""

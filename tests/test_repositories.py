@@ -144,6 +144,44 @@ class ConfigurationRepositoryTests(unittest.TestCase):
                     self.assertEqual(
                         saved.microphone.selected_id, "mic-v1-legacy")
 
+    def test_local_repository_defaults_do_not_mask_legacy_recording_controls(self):
+        legacy_recording = {
+            "max_duration_seconds": 45,
+            "warning_seconds": 8,
+            "vad": {
+                "enabled": True,
+                "level_threshold": 0.15,
+                "minimum_speech_seconds": 0.5,
+                "silence_duration_seconds": 1.2,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps({"recording": legacy_recording}),
+                encoding="utf-8",
+            )
+            repository = LocalConfigRepository(
+                path, defaults=repositories.environment_defaults({}))
+
+            loaded = repository.load()
+            self.assertEqual(
+                loaded.recording_controls,
+                RecordingControls.from_mapping(legacy_recording),
+            )
+
+            repository.save({"ui_language": "pt"})
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("recording", persisted)
+            self.assertEqual(
+                persisted["recording_controls"]["max_duration_seconds"], 45.0)
+            self.assertEqual(
+                persisted["recording_controls"]["vad"]["silence_duration_seconds"],
+                1.2,
+            )
+            saved = repository.load()
+            self.assertEqual(saved.recording_controls, loaded.recording_controls)
+
     def test_local_asr_selection_and_cloud_refinement_opt_in_round_trip(self):
         config = AppConfig.from_mapping({
             "transcription_provider": "local_asr",

@@ -351,8 +351,15 @@ class AppConfig:
         except (TypeError, ValueError):
             microphone = MicrophoneSettings.defaults()
 
-        recording_values = source.get(
-            "recording_controls", source.get("recording"))
+        if "recording_controls" in supplied_values:
+            recording_values = supplied_values["recording_controls"]
+        elif "recording" in supplied_values:
+            # The legacy alias must be selected from the supplied payload
+            # before built-in nested defaults are allowed to mask it.
+            recording_values = supplied_values["recording"]
+        else:
+            recording_values = source.get(
+                "recording_controls", source.get("recording"))
         try:
             recording_controls = RecordingControls.from_mapping(recording_values)
         except (TypeError, ValueError):
