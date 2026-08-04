@@ -93,6 +93,15 @@ class WorkflowState:
     target_executable: str | None = None
     result_text: str | None = None
     status_key: str | None = None
+    # Optional source/route metadata lets the desktop runtime persist an
+    # opt-in history entry without coupling the orchestration layer to a
+    # storage implementation.  Existing consumers can ignore these fields.
+    source_text: str | None = None
+    refined_text: str | None = None
+    provider_id: str | None = None
+    model: str | None = None
+    refinement_provider_id: str | None = None
+    refinement_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -434,6 +443,12 @@ class WorkflowService:
         *,
         result_text: str | None = None,
         status_key: str | None = None,
+        source_text: str | None = None,
+        refined_text: str | None = None,
+        provider_id: str | None = None,
+        model: str | None = None,
+        refinement_provider_id: str | None = None,
+        refinement_model: str | None = None,
         after_delivery: Callable[[], None] | None = None,
     ) -> bool:
         with self._lock:
@@ -446,6 +461,12 @@ class WorkflowService:
                 target_executable=session.target_executable,
                 result_text=result_text,
                 status_key=status_key,
+                source_text=source_text,
+                refined_text=refined_text,
+                provider_id=provider_id,
+                model=model,
+                refinement_provider_id=refinement_provider_id,
+                refinement_model=refinement_model,
             )
             self._state = state
         def deliver_then_publish() -> None:
@@ -662,6 +683,18 @@ class WorkflowService:
                 session,
                 WorkflowPhase.COMPLETED,
                 result_text=result,
+                source_text=(
+                    getattr(provider_result, "raw_text", None)
+                    if getattr(provider_result, "raw_text", None) is not None
+                    else result
+                ),
+                refined_text=getattr(provider_result, "refined_text", None),
+                provider_id=provider_result.provider_id,
+                model=provider_result.model,
+                refinement_provider_id=getattr(
+                    provider_result, "refinement_provider_id", None),
+                refinement_model=getattr(
+                    provider_result, "refinement_model", None),
                 after_delivery=lambda: self._scheduler.run_in_background(
                     lambda: self._write_dictation_if_current(
                         session, result, elapsed
@@ -838,6 +871,8 @@ class WorkflowService:
                 capture,
                 rewritten,
                 copied_status="rewrite_copied",
+                provider_id=provider_result.provider_id,
+                model=provider_result.model,
                 statistic=lambda: self._statistics.record_rewrite(
                     provider_result.provider_id,
                     provider_result.model,
@@ -980,6 +1015,8 @@ class WorkflowService:
                 selection,
                 translated,
                 copied_status="translation_copied",
+                provider_id=provider_result.provider_id,
+                model=provider_result.model,
                 statistic=lambda: self._statistics.record_translation(
                     provider_result.provider_id,
                     provider_result.model,
@@ -1023,6 +1060,8 @@ class WorkflowService:
         *,
         copied_status: str,
         statistic: Callable[[], None],
+        provider_id: str | None = None,
+        model: str | None = None,
     ) -> None:
         # First publish a non-cancellable phase to the view.  Only after its
         # delivery may the worker claim publication and enter external
@@ -1032,6 +1071,9 @@ class WorkflowService:
             session,
             WorkflowPhase.PUBLISHING,
             result_text=result,
+            source_text=capture.text,
+            provider_id=provider_id,
+            model=model,
             after_delivery=lambda: self._scheduler.run_in_background(
                 lambda: self._publish_selection_result(
                     session,
@@ -1039,6 +1081,8 @@ class WorkflowService:
                     result,
                     copied_status=copied_status,
                     statistic=statistic,
+                    provider_id=provider_id,
+                    model=model,
                 )
             ),
         )
@@ -1051,6 +1095,8 @@ class WorkflowService:
         *,
         copied_status: str,
         statistic: Callable[[], None],
+        provider_id: str | None = None,
+        model: str | None = None,
     ) -> None:
         with self._lock:
             if (
@@ -1099,6 +1145,9 @@ class WorkflowService:
                 WorkflowPhase.COMPLETED,
                 result_text=result,
                 status_key=status_key,
+                source_text=capture.text,
+                provider_id=provider_id,
+                model=model,
                 after_delivery=lambda: self._release_terminal_if_requested(
                     session
                 ),

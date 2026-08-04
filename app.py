@@ -83,6 +83,11 @@ from update_security import (
     prepare_update,
 )
 from hotkey_config import ActivationMode, HotkeySettings, HotkeyValidationError
+from history_store import (
+    DEFAULT_RETENTION_DAYS,
+    HistoryStore,
+    HistoryStoreError,
+)
 from windows_hotkeys import (
     HotkeyRegistrationError,
     WM_HOTKEY,
@@ -180,7 +185,9 @@ DATA_DIR = (Path(os.environ.get("APPDATA", Path.home())) / "ClarifyVoice") if IS
 AUDIO_PATH = DATA_DIR / "temp_recording.wav"
 CONFIG_PATH = DATA_DIR / "config.json"
 STATS_PATH = DATA_DIR / "usage_stats.json"
+HISTORY_PATH = DATA_DIR / "history.json"
 DICTIONARY_PATH = DATA_DIR / "dictionary.json"
+_UNSET = object()
 HTTP_LOG_DIR = DATA_DIR / "logs"
 _STATS_LOCK = threading.Lock()
 PILL_FADE_IN_SECONDS = 0.12
@@ -211,6 +218,8 @@ DEFAULT_CONFIG = {
     "refinement_model": os.environ.get("REFINEMENT_MODEL", ""),
     "ui_mode": "prompt",
     "ui_language": "en",
+    "history_enabled": False,
+    "history_retention_days": DEFAULT_RETENTION_DAYS,
 }
 
 # Persistence is injected through this small boundary.  The legacy mapping
@@ -350,6 +359,49 @@ def _typed_app_config() -> AppConfig:
     """Read the current compatibility mapping through the typed boundary."""
 
     return AppConfig.from_mapping(APP_CONFIG)
+
+
+def _history_retention_days(value) -> int | None:
+    """Normalize the user-facing retention preference at the runtime edge."""
+
+    if value is None:
+        return None
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or value < 0):
+        return DEFAULT_RETENTION_DAYS
+    return value
+
+
+def _history_path_for_repositories(repositories=None) -> Path:
+    """Keep injected test/profile repositories isolated from the real profile."""
+
+    active = repositories or APP_REPOSITORIES
+    explicit_history_path = getattr(active, "history_path", None)
+    if explicit_history_path is None:
+        config_path_value = getattr(active.config, "path", None)
+        if config_path_value is None:
+            raise ValueError(
+                "Pathless config repositories require an explicit history_path"
+            )
+        config_path = Path(config_path_value)
+    else:
+        config_path = Path(explicit_history_path)
+    if explicit_history_path is not None:
+        return config_path
+    if config_path == Path(CONFIG_PATH):
+        return HISTORY_PATH
+    return config_path.with_name("history.json")
+
+
+def _load_history_records(store):
+    """Return ``(loaded, records, error)`` for a Settings refresh attempt."""
+
+    if not store.enabled:
+        return False, [], None
+    try:
+        return True, list(store.list_records()), None
+    except HistoryStoreError as error:
+        return False, [], error
 
 
 def _workflow_route(scope: WorkflowScope | str) -> WorkflowRoute:
@@ -1131,13 +1183,19 @@ def _sync_saved_settings_after_workflow_reset(
 def _apply_settings_transaction(
         selected, selected_refinement, audio_options, text_options, model_keys,
         autostart_enabled, repositories=None, registry=None,
-        workflow_mapping=None):
+        workflow_mapping=None, history_enabled=None,
+        history_retention_days=_UNSET):
     """Apply model and startup selections as one rollback-capable operation."""
     previous_config = APP_CONFIG.copy()
     previous_registry_state = _autostart_registry_state(registry)
     try:
         if workflow_mapping is not None:
             APP_CONFIG["workflows"] = workflow_mapping
+        if history_enabled is not None:
+            APP_CONFIG["history_enabled"] = bool(history_enabled)
+        if history_retention_days is not _UNSET:
+            APP_CONFIG["history_retention_days"] = _history_retention_days(
+                history_retention_days)
         _apply_selected_models(
             selected, selected_refinement, audio_options, text_options, model_keys)
         _persist_autostart_preference(
@@ -2227,6 +2285,31 @@ STRINGS = {
         "models_section": "Models",
         "providers_section": "Providers", "statistics_section": "Statistics",
         "dictionary_section": "Dictionary",
+        "history_section": "History",
+        "history_title": "Transcription history",
+        "history_subtitle": "Keep selected transcripts locally for review and export.",
+        "history_enabled": "Enable local history",
+        "history_privacy_hint": "Disabled by default. Audio, API keys, provider payloads, and telemetry are never stored.",
+        "history_retention": "Retention",
+        "history_retention_7": "7 days",
+        "history_retention_30": "30 days",
+        "history_retention_90": "90 days",
+        "history_retention_none": "No expiry",
+        "history_disabled_hint": "History is disabled. Apply the toggle above to start retaining new results.",
+        "history_empty": "No retained results yet.",
+        "history_refresh": "Refresh",
+        "history_export": "Export",
+        "history_exported": "History exported.",
+        "history_delete": "Delete all",
+        "history_delete_confirm": "Delete all local transcription history? This cannot be undone.",
+        "history_deleted": "History deleted.",
+        "history_copy_raw": "Copy source",
+        "history_copy_refined": "Copy result",
+        "history_copied": "Copied to clipboard.",
+        "history_no_text": "This record has no text to copy.",
+        "history_retry_unavailable": "Retry unavailable (source not retained)",
+        "history_refreshed": "History refreshed.",
+        "history_error": "History unavailable: {error}",
         "dictionary_title": "Dictionary & snippets",
         "dictionary_subtitle": "Keep vocabulary and text expansions on this device.",
         "dictionary_search": "Search terms, triggers, aliases, or replacements",
@@ -2705,6 +2788,18 @@ _DICTIONARY_TRANSLATIONS = {
 for _locale, _translations in _DICTIONARY_TRANSLATIONS.items():
     STRINGS[_locale].update(_translations)
 del _locale, _translations, _DICTIONARY_TRANSLATIONS
+# The history page is intentionally usable in every supported locale while
+# dedicated translations are reviewed.  English is the established fallback
+# for newly added settings strings, and the catalog must stay structurally
+# complete so a locale switch never produces a missing control label.
+_HISTORY_FALLBACKS = {
+    key: value for key, value in STRINGS["en"].items()
+    if key.startswith("history_")
+}
+for _locale in STRINGS:
+    if _locale != "en":
+        STRINGS[_locale].update(_HISTORY_FALLBACKS)
+del _locale, _HISTORY_FALLBACKS
 
 def _provider_url(base_url: str, version: str, endpoint: str) -> str:
     """Compatibility facade for the centralized adapter URL normalizer."""
@@ -2816,8 +2911,10 @@ def _call_provider_audio(
         provider: str, audio_path: Path, mode: str, lang: str = "en",
         audio_bytes: bytes | None = None,
         cancel_token: CancellationToken | None = None,
-        route: WorkflowRoute | None = None) -> str:
+        route: WorkflowRoute | None = None,
+        details: bool = False) -> str | TranscriptionResult:
     provider = str(provider or "").strip().lower()
+    model = ""
     try:
         metadata = PROVIDER_REGISTRY.describe(provider)
         route = route or _workflow_route(WorkflowScope.TRANSCRIPTION)
@@ -2848,17 +2945,20 @@ def _call_provider_audio(
             audio_bytes=audio_bytes,
         )
         request = DICTIONARY_SERVICE.apply_context(request)
-        transcript = PROVIDER_REGISTRY.transcribe(
+        raw_transcript = PROVIDER_REGISTRY.transcribe(
             provider, request, connection, cancel_token).text
+        transcript = raw_transcript
         refinement_scope = (
             WorkflowScope.LOCAL_ASR_REFINEMENT
             if provider == LOCAL_ASR_PROVIDER_ID else WorkflowScope.REFINEMENT)
         refinement_route = _workflow_route(refinement_scope)
+        refinement_used = False
         if (mode == "prompt" and not metadata.supports(
                 ProviderCapability.MULTIMODAL_AUDIO)
                 and (provider != LOCAL_ASR_PROVIDER_ID
                      or bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))
                 and refinement_route.enabled):
+            refinement_used = True
             transcript = _refine_transcript(
                 transcript, lang, cancel_token,
                 route=refinement_route)
@@ -2867,6 +2967,21 @@ def _call_provider_audio(
         # successful-looking transcript before the workflow publishes it.
         if not (isinstance(transcript, str) and transcript.startswith("[Error")):
             transcript = DICTIONARY_SERVICE.expand(transcript)
+        if details:
+            return TranscriptionResult(
+                transcript,
+                provider,
+                model,
+                # Only a second stage creates a distinct source/result pair.
+                # For every other route, leaving this unset lets the workflow
+                # preserve its existing final-text history behavior.
+                raw_text=(raw_transcript if refinement_used else None),
+                refined_text=(transcript if refinement_used else None),
+                refinement_provider_id=(
+                    refinement_route.provider_id if refinement_used else None),
+                refinement_model=(
+                    refinement_route.model_id if refinement_used else None),
+            )
         return transcript
     except Exception as error:
         try:
@@ -2876,7 +2991,10 @@ def _call_provider_audio(
                 label = f"{label} Whisper"
         except ProviderError:
             label = "Provider"
-        return _http_error(label, error)
+        error_text = _http_error(label, error)
+        if details:
+            return TranscriptionResult(error_text, provider, model)
+        return error_text
 
 
 def _rewrite_openai_compatible(
@@ -3047,7 +3165,8 @@ def call_transcription_provider(
         audio_path: Path, mode: str, lang: str = "en",
         audio_bytes: bytes | None = None,
         cancel_token: CancellationToken | None = None,
-        route: WorkflowRoute | None = None) -> str:
+        route: WorkflowRoute | None = None,
+        details: bool = False) -> str | TranscriptionResult:
     # Recording/CLI callers retain the legacy selector behavior when no
     # route is supplied.  Typed workflow callers pass their resolved route so
     # the effective provider and model cannot be replaced by stale flat keys
@@ -3061,7 +3180,10 @@ def call_transcription_provider(
     }
     if route is not None:
         call_kwargs["route"] = route
+    if details:
+        call_kwargs["details"] = True
     return _call_provider_audio(provider, audio_path, mode, lang, **call_kwargs)
+
 
 # ---------------------------------------------------------------------------
 # Recorder
@@ -4106,18 +4228,23 @@ class AppWorkflowProvider:
         provider = route.provider_id
         if not route.enabled:
             raise RuntimeError("Transcription workflow is disabled")
-        text = call_transcription_provider(
+        result = call_transcription_provider(
             audio_source.audio_path,
             mode,
             language,
             audio_bytes=audio_source.audio_bytes,
             cancel_token=audio_source.cancel_token,
             route=route,
+            details=True,
         )
+        if isinstance(result, TranscriptionResult):
+            typed_result = result
+        else:
+            typed_result = TranscriptionResult(str(result), provider, route.model_id)
+        text = typed_result.text
         if not text or text.startswith("[Error"):
             raise RuntimeError(text or "Transcription returned no text")
-        model = route.model_id
-        return TranscriptionResult(text, provider, model)
+        return typed_result
 
     @staticmethod
     def rewrite(text):
@@ -5350,6 +5477,12 @@ class App(ctk.CTk):
         super().__init__()
         self.repositories = repositories or APP_REPOSITORIES
         _activate_repositories(self.repositories)
+        self.history_store = HistoryStore(
+            _history_path_for_repositories(self.repositories),
+            enabled=bool(APP_CONFIG.get("history_enabled", False)),
+            retention_days=_history_retention_days(
+                APP_CONFIG.get("history_retention_days", DEFAULT_RETENTION_DAYS)),
+        )
         self._clarify_visibility_target = not start_hidden
         if start_hidden:
             self.withdraw()
@@ -6254,6 +6387,21 @@ class App(ctk.CTk):
             self.copy_btn.configure(text=self._t("copied"))
             self.after(1200, lambda: self.copy_btn.configure(text=self._t("copy")))
 
+    def _copy_history_record(self, record, status_label=None, *, field="refined"):
+        """Copy a retained source/result without pasting into the foreground app."""
+
+        text = (record.refined_text if field == "refined" else record.raw_text)
+        if not text:
+            if status_label is not None:
+                status_label.configure(text=self._t("history_no_text"))
+            return
+        threading.Thread(
+            target=lambda: copy_and_paste(text, should_paste=False),
+            daemon=True,
+        ).start()
+        if status_label is not None:
+            status_label.configure(text=self._t("history_copied"))
+
     def _hide_result(self):
         self.result_frame.pack_forget()
         x, y = self.winfo_x(), self.winfo_y()
@@ -6823,6 +6971,71 @@ class App(ctk.CTk):
         self._recording_session = session
         return session
 
+    def _record_history_state(self, state):
+        """Persist one accepted terminal workflow state when history is enabled.
+
+        The workflow service owns source capture and route metadata; the UI
+        only commits the terminal state.  Audio bytes, credentials, and
+        provider payloads never enter the history boundary. Dictation stores
+        the provider transcript as ``raw_text`` and, when Prompt mode runs a
+        second route, keeps its output and route metadata in the refined
+        fields. Rewrite/translation retain the selected source and generated
+        output separately.
+        """
+
+        store = getattr(self, "history_store", None)
+        if store is None or not store.enabled:
+            return
+        kind = state.kind.value if state.kind is not None else "transcription"
+        provider = str(state.provider_id or "unknown")
+        model = str(state.model or "unknown")
+        refinement_provider = getattr(state, "refinement_provider_id", None)
+        refinement_model = getattr(state, "refinement_model", None)
+        try:
+            if state.phase is WorkflowPhase.COMPLETED:
+                if state.kind is WorkflowKind.DICTATION:
+                    raw_text = (
+                        state.source_text
+                        if state.source_text is not None else state.result_text
+                    )
+                    refined_text = getattr(state, "refined_text", None)
+                else:
+                    raw_text, refined_text = state.source_text, state.result_text
+                store.add(
+                    raw_text=raw_text,
+                    refined_text=refined_text,
+                    workflow=kind,
+                    provider=provider,
+                    model=model,
+                    refinement_provider=refinement_provider,
+                    refinement_model=refinement_model,
+                    status="success",
+                )
+            elif state.phase is WorkflowPhase.FAILED:
+                store.add(
+                    workflow=kind,
+                    provider=provider,
+                    model=model,
+                    refinement_provider=refinement_provider,
+                    refinement_model=refinement_model,
+                    status="error",
+                    error=state.status_key or "error",
+                )
+        except (HistoryStoreError, ValueError):
+            # History is a best-effort, explicitly opt-in aid.  A corrupt or
+            # unavailable history file must never change workflow UX.
+            return
+
+    def _configure_history_store(self):
+        """Apply the persisted history preferences to the live runtime."""
+
+        store = getattr(self, "history_store", None)
+        if store is None:
+            return
+        store.enabled = bool(APP_CONFIG.get("history_enabled", False))
+        store.retention_days = _history_retention_days(
+            APP_CONFIG.get("history_retention_days", DEFAULT_RETENTION_DAYS))
+
     def _on_workflow_state(self, state):
         """Render WorkflowService state on Tk and release terminal operations."""
         if state.phase in (
@@ -6895,6 +7108,7 @@ class App(ctk.CTk):
         elif state.phase is WorkflowPhase.MICROPHONE_UNAVAILABLE:
             self._set_state("microphone_unavailable")
         elif state.phase is WorkflowPhase.COMPLETED:
+            self._record_history_state(state)
             self._workflow_pending_result = state.result_text
             self._workflow_pending_status = state.status_key
             self._workflow_pending_operation = state.operation_id
@@ -6903,6 +7117,7 @@ class App(ctk.CTk):
                 self._finish_workflow_operation(operation_id)
             )
         elif state.phase is WorkflowPhase.FAILED:
+            self._record_history_state(state)
             self._workflow_pending_status = state.status_key or "error"
             self._workflow_pending_operation = state.operation_id
             self._set_state(
@@ -8341,6 +8556,7 @@ class App(ctk.CTk):
             "workflows": ctk.CTkFrame(content, fg_color="transparent"),
             "statistics": ctk.CTkFrame(content, fg_color="transparent"),
             "settings": ctk.CTkFrame(content, fg_color="transparent"),
+            "history": ctk.CTkFrame(content, fg_color="transparent"),
             # Dictionary content is intentionally scrollable as a whole.  The
             # rows list has its own bounded viewport below, so preview and
             # import/export/reset controls remain reachable in the fixed
@@ -8812,12 +9028,215 @@ class App(ctk.CTk):
             wraplength=430).pack(fill="x", pady=(5, 0))
         diagnostics_status.pack(fill="x", pady=(5, 0))
 
+        # History is a separate page so the privacy boundary remains visible:
+        # it is disabled by default, never part of anonymous statistics, and
+        # every destructive/export action is explicit.
+        history_inner = ctk.CTkFrame(
+            pages["history"], fg_color="transparent")
+        history_inner.pack(fill="both", expand=True, padx=22, pady=18)
+        ctk.CTkLabel(
+            history_inner, text=self._t("history_title"), text_color=TEXT,
+            font=font_title, anchor="w").pack(fill="x")
+        ctk.CTkLabel(
+            history_inner, text=self._t("history_subtitle"), text_color=DIM,
+            font=font_label, anchor="w", justify="left", wraplength=430).pack(
+                fill="x", pady=(1, 10))
+
+        history_enabled_switch = ctk.CTkSwitch(
+            history_inner, text=self._t("history_enabled"), height=25,
+            switch_width=38, switch_height=19, corner_radius=10,
+            border_width=1, fg_color="#171717", progress_color="#e7e7e7",
+            button_color="#777777", text_color=TEXT, font=font_body)
+        history_enabled_switch.pack(fill="x", anchor="w")
+        if bool(APP_CONFIG.get("history_enabled", False)):
+            history_enabled_switch.select()
+        ctk.CTkLabel(
+            history_inner, text=self._t("history_privacy_hint"), text_color=DIM,
+            font=font_caption, anchor="w", justify="left", wraplength=430).pack(
+                fill="x", padx=50, pady=(2, 9))
+
+        retention_row = ctk.CTkFrame(history_inner, fg_color="transparent")
+        retention_row.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            retention_row, text=self._t("history_retention"), text_color=DIM,
+            font=font_label).pack(side="left", padx=(2, 10))
+        retention_values = {
+            self._t("history_retention_7"): 7,
+            self._t("history_retention_30"): 30,
+            self._t("history_retention_90"): 90,
+            self._t("history_retention_none"): None,
+        }
+        retention_menu = ctk.CTkOptionMenu(
+            retention_row, values=list(retention_values), width=150, height=30,
+            corner_radius=10, fg_color="#141414", button_color="#252525",
+            button_hover_color="#303030", text_color=TEXT, font=font_label)
+        retention_menu.pack(side="left")
+
+        def retention_label(value):
+            for label, days in retention_values.items():
+                if days == value:
+                    return label
+            return self._t("history_retention_30")
+
+        retention_menu.set(retention_label(_history_retention_days(
+            APP_CONFIG.get("history_retention_days", DEFAULT_RETENTION_DAYS))))
+
+        history_status = ctk.CTkLabel(
+            history_inner, text="", text_color=DIM, font=font_caption,
+            anchor="w", justify="left", wraplength=430)
+        history_status.pack(fill="x", pady=(0, 7))
+        history_actions = ctk.CTkFrame(history_inner, fg_color="transparent")
+        history_actions.pack(fill="x", pady=(0, 7))
+        history_rows = ctk.CTkScrollableFrame(
+            history_inner, height=210, fg_color="#0e0e0e", corner_radius=10,
+            scrollbar_button_color="#303030",
+            scrollbar_button_hover_color="#444444")
+        history_rows.pack(fill="both", expand=True, pady=(0, 5))
+
+        def history_records():
+            for child in history_rows.winfo_children():
+                child.destroy()
+            loaded, records, error = _load_history_records(self.history_store)
+            if not loaded and error is None:
+                ctk.CTkLabel(
+                    history_rows, text=self._t("history_disabled_hint"),
+                    text_color=DIM, font=font_caption, anchor="w",
+                    justify="left", wraplength=420).pack(
+                        fill="x", padx=12, pady=14)
+                return False
+            if error is not None:
+                history_status.configure(
+                    text=self._t("history_error").format(error=error),
+                    text_color="#d36f6f")
+                return False
+            records = list(reversed(records))
+            if not records:
+                ctk.CTkLabel(
+                    history_rows, text=self._t("history_empty"),
+                    text_color=DIM, font=font_caption, anchor="w").pack(
+                        fill="x", padx=12, pady=14)
+                return True
+            for record in records:
+                row = ctk.CTkFrame(
+                    history_rows, fg_color="#151515", corner_radius=8)
+                row.pack(fill="x", padx=5, pady=3)
+                stamp = record.timestamp.astimezone().strftime("%Y-%m-%d %H:%M")
+                summary = record.refined_text or record.raw_text or record.error
+                summary = str(summary or "").replace("\n", " ").strip()
+                if len(summary) > 105:
+                    summary = summary[:102] + "..."
+                ctk.CTkLabel(
+                    row, text=f"{stamp} · {record.workflow} · {record.status}",
+                    text_color=DIM, font=font_caption, anchor="w").pack(
+                        fill="x", padx=10, pady=(6, 0))
+                ctk.CTkLabel(
+                    row, text=summary, text_color=TEXT, font=font_label,
+                    anchor="w", justify="left", wraplength=400).pack(
+                        fill="x", padx=10, pady=(2, 4))
+                row_actions = ctk.CTkFrame(row, fg_color="transparent")
+                row_actions.pack(fill="x", padx=8, pady=(0, 6))
+                if record.raw_text:
+                    ctk.CTkButton(
+                        row_actions, text=self._t("history_copy_raw"), width=86,
+                        height=24, corner_radius=12, fg_color="#242424",
+                        hover_color="#303030", text_color=TEXT,
+                        font=font_caption,
+                        command=lambda r=record: self._copy_history_record(
+                            r, history_status, field="raw")).pack(
+                                side="left", padx=(0, 5))
+                if record.refined_text:
+                    ctk.CTkButton(
+                        row_actions, text=self._t("history_copy_refined"), width=92,
+                        height=24, corner_radius=12, fg_color="#242424",
+                        hover_color="#303030", text_color=TEXT,
+                        font=font_caption,
+                        command=lambda r=record: self._copy_history_record(
+                            r, history_status, field="refined")).pack(
+                                side="left", padx=(0, 5))
+                # Retrying would require audio or a focus-safe source capture;
+                # neither is retained by the current workflow contract.
+                ctk.CTkLabel(
+                    row_actions, text=self._t("history_retry_unavailable"),
+                    text_color="#777777", font=font_caption).pack(side="left")
+            return True
+
+        def refresh_history():
+            loaded = history_records()
+            if loaded:
+                history_status.configure(text=self._t("history_refreshed"),
+                                         text_color=DIM)
+
+        def export_history(format_name):
+            if filedialog is None:
+                return
+            suffix = ".json" if format_name == "json" else (
+                ".md" if format_name == "markdown" else ".txt")
+            target = filedialog.asksaveasfilename(
+                parent=win, title=self._t("history_export"),
+                defaultextension=suffix,
+                filetypes=[(format_name.upper(), f"*{suffix}")])
+            if not target:
+                return
+            try:
+                self.history_store.export(target, format=format_name)
+            except (HistoryStoreError, ValueError) as error:
+                history_status.configure(
+                    text=self._t("history_error").format(error=error),
+                    text_color="#d36f6f")
+            else:
+                history_status.configure(text=self._t("history_exported"),
+                                         text_color="#69c58a")
+
+        def delete_history():
+            if messagebox is not None and not messagebox.askyesno(
+                    self._t("history_delete"), self._t("history_delete_confirm"),
+                    parent=win):
+                return
+            try:
+                self.history_store.delete_all()
+            except HistoryStoreError as error:
+                history_status.configure(
+                    text=self._t("history_error").format(error=error),
+                    text_color="#d36f6f")
+                return
+            history_status.configure(text=self._t("history_deleted"),
+                                     text_color="#69c58a")
+            history_records()
+
+        ctk.CTkButton(
+            history_actions, text=self._t("history_refresh"), width=72, height=28,
+            corner_radius=14, fg_color="#242424", hover_color="#303030",
+            text_color=TEXT, font=font_caption,
+            command=refresh_history).pack(side="left", padx=(0, 5))
+        for label, format_name in (("TXT", "txt"), ("MD", "markdown"), ("JSON", "json")):
+            ctk.CTkButton(
+                history_actions, text=f"{self._t('history_export')} {label}",
+                width=78, height=28, corner_radius=14, fg_color="#242424",
+                hover_color="#303030", text_color=TEXT, font=font_caption,
+                command=lambda f=format_name: export_history(f)).pack(
+                    side="left", padx=(0, 5))
+        ctk.CTkButton(
+            history_actions, text=self._t("history_delete"), width=78, height=28,
+            corner_radius=14, fg_color="transparent", hover_color="#242424",
+            border_width=1, border_color="#333333", text_color=DIM,
+            font=font_caption, command=delete_history).pack(side="left")
+
+        def history_preferences_changed(_event=None):
+            refresh_dirty_state()
+
+        history_enabled_switch.configure(command=history_preferences_changed)
+        retention_menu.configure(command=history_preferences_changed)
+        history_records()
+
         saved_settings = {
             "transcription": (selected["provider"], selected["model"]),
             "refinement": (
                 selected_refinement["provider"], selected_refinement["model"]),
             "workflows": workflow_controller.workflows,
             "autostart": bool(autostart_switch.get()),
+            "history_enabled": bool(history_enabled_switch.get()),
+            "history_retention_days": _history_retention_days(
+                retention_values.get(retention_menu.get(), DEFAULT_RETENTION_DAYS)),
         }
 
         def current_settings():
@@ -8827,6 +9246,9 @@ class App(ctk.CTk):
                     selected_refinement["provider"], selected_refinement["model"]),
                 "workflows": workflow_controller.workflows,
                 "autostart": bool(autostart_switch.get()),
+                "history_enabled": bool(history_enabled_switch.get()),
+                "history_retention_days": _history_retention_days(
+                    retention_values.get(retention_menu.get(), DEFAULT_RETENTION_DAYS)),
             }
 
         def refresh_dirty_state():
@@ -8844,6 +9266,12 @@ class App(ctk.CTk):
                 autostart_switch.select()
             else:
                 autostart_switch.deselect()
+            if saved_settings["history_enabled"]:
+                history_enabled_switch.select()
+            else:
+                history_enabled_switch.deselect()
+            retention_menu.set(retention_label(
+                saved_settings["history_retention_days"]))
             workflow_controller._config = replace(
                 workflow_controller.config,
                 workflows=saved_settings["workflows"],
@@ -9966,6 +10394,8 @@ class App(ctk.CTk):
             current_page["name"] = name
             if name == "statistics":
                 refresh_statistics()
+            elif name == "history":
+                history_records()
             page_frame(name).pack(fill="both", expand=True)
             section = "providers" if name.startswith("detail:") else name
             header_title.configure(text=(provider_names[name.split(":", 1)[1]]
@@ -10000,6 +10430,12 @@ class App(ctk.CTk):
             text_color=DIM, font=font_body,
             command=lambda: show_page("statistics"))
         nav_buttons["statistics"].pack(fill="x", padx=9, pady=3)
+        nav_buttons["history"] = ctk.CTkButton(sidebar,
+            text=self._t("history_section"), anchor="w", height=38,
+            corner_radius=9, fg_color="transparent", hover_color="#242424",
+            text_color=DIM, font=font_body,
+            command=lambda: show_page("history"))
+        nav_buttons["history"].pack(fill="x", padx=9, pady=3)
         nav_buttons["settings"] = ctk.CTkButton(sidebar,
             text=self._t("settings_section"), anchor="w", height=38,
             corner_radius=9, fg_color="transparent", hover_color="#242424",
@@ -10069,9 +10505,19 @@ class App(ctk.CTk):
                     selected, selected_refinement, active_options(),
                     active_text_options(), model_keys,
                     bool(autostart_switch.get()), self.repositories,
-                    workflow_mapping=workflow_controller.workflows.to_mapping())
+                    workflow_mapping=workflow_controller.workflows.to_mapping(),
+                    history_enabled=bool(history_enabled_switch.get()),
+                    history_retention_days=_history_retention_days(
+                        retention_values.get(retention_menu.get(),
+                                             DEFAULT_RETENTION_DAYS)))
+                # Apply privacy-sensitive history changes immediately after
+                # persistence. A subsequent route refresh may fail while
+                # reading an adapter, but that must never leave a disabled
+                # live store recording text until the next restart.
+                self._configure_history_store()
                 workflow_controller.reload()
                 load_workflow_form(workflow_scope_state["scope"])
+                history_records()
             except (OSError, ValueError, ProviderError):
                 return
             saved_settings.clear()

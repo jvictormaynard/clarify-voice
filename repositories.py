@@ -94,6 +94,11 @@ def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[s
         "refinement_model": env.get("REFINEMENT_MODEL", ""),
         "ui_mode": "prompt",
         "ui_language": "en",
+        # Transcript history is deliberately opt-in.  Keeping these values in
+        # the typed repository means the UI can apply one atomic preference
+        # change without teaching the history file about configuration.
+        "history_enabled": False,
+        "history_retention_days": 30,
         "autostart": False,
         # The nested value is intentionally present in the defaults mapping so
         # first-run and legacy flat files both receive the same typed bindings.
@@ -151,6 +156,8 @@ class AppConfig:
     ui: UIPreferences = field(default_factory=UIPreferences)
     startup: StartupSettings = field(default_factory=StartupSettings)
     local_asr_cloud_refinement: bool = False
+    history_enabled: bool = False
+    history_retention_days: int | None = 30
     hotkeys: HotkeySettings = field(default_factory=HotkeySettings.defaults)
     workflows: WorkflowConfig = field(default_factory=WorkflowConfig)
 
@@ -249,6 +256,15 @@ class AppConfig:
             "local_asr_cloud_refinement", False)
         if not isinstance(local_asr_cloud_refinement, bool):
             local_asr_cloud_refinement = False
+        history_enabled = source.get("history_enabled", False)
+        if not isinstance(history_enabled, bool):
+            history_enabled = False
+        history_retention_days = source.get("history_retention_days", 30)
+        if history_retention_days is not None:
+            if (isinstance(history_retention_days, bool)
+                    or not isinstance(history_retention_days, int)
+                    or history_retention_days < 0):
+                history_retention_days = 30
 
         supplied_hotkeys = (
             values.get("hotkeys") if isinstance(values, Mapping) else None)
@@ -386,6 +402,8 @@ class AppConfig:
             ui=UIPreferences(mode, language),
             startup=StartupSettings(autostart),
             local_asr_cloud_refinement=local_asr_cloud_refinement,
+            history_enabled=history_enabled,
+            history_retention_days=history_retention_days,
             hotkeys=hotkeys,
             workflows=workflows,
         )
@@ -414,6 +432,8 @@ class AppConfig:
             "ui_mode": self.ui.mode,
             "ui_language": self.ui.language,
             "autostart": self.startup.autostart,
+            "history_enabled": self.history_enabled,
+            "history_retention_days": self.history_retention_days,
             "hotkeys": self.hotkeys.to_mapping(),
             "workflows": self.workflows.to_mapping(),
         }
@@ -1396,3 +1416,8 @@ JsonUsageStatsRepository = LocalUsageStatsRepository
 class ApplicationRepositories:
     config: ConfigRepository
     usage_stats: UsageStatsRepository
+    # Optional per-profile transcript location.  ConfigRepository is an
+    # intentionally small interface and does not require a filesystem path;
+    # callers using a pathless adapter must provide this explicitly before the
+    # desktop can construct its opt-in HistoryStore.
+    history_path: Path | None = None

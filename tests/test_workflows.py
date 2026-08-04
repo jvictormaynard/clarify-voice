@@ -742,7 +742,37 @@ class WorkflowServiceTests(unittest.TestCase):
             self.statistics.dictations,
             [({"mode": "prompt", "provider": "gemini"}, 2.5, "Transcribed")],
         )
+        self.assertEqual(self.service.state.source_text, "Transcribed")
+        self.assertIsNone(self.service.state.refined_text)
+        self.assertIsNone(self.service.state.refinement_provider_id)
+        self.assertIsNone(self.service.state.refinement_model)
         self.assertEqual(self.service.state.phase, WorkflowPhase.COMPLETED)
+
+    def test_prompt_dictation_forwards_raw_and_refinement_route_metadata(self):
+        self.provider.transcribe = lambda _audio, _mode, _language: TranscriptionResult(
+            "refined transcript",
+            "openai",
+            "whisper-1",
+            raw_text="raw transcript",
+            refined_text="refined transcript",
+            refinement_provider_id="groq",
+            refinement_model="llama-refiner",
+        )
+
+        self.service.dispatch(
+            StartDictation(SelectionTarget(77, "editor.exe"), "prompt", "en")
+        )
+        self.service.dispatch(StopDictation())
+
+        state = self.service.state
+        self.assertEqual(state.result_text, "refined transcript")
+        self.assertEqual(state.source_text, "raw transcript")
+        self.assertEqual(state.refined_text, "refined transcript")
+        self.assertEqual(state.provider_id, "openai")
+        self.assertEqual(state.model, "whisper-1")
+        self.assertEqual(state.refinement_provider_id, "groq")
+        self.assertEqual(state.refinement_model, "llama-refiner")
+        self.assertEqual(state.phase, WorkflowPhase.COMPLETED)
 
     def test_dictation_focus_change_during_transcription_uses_copied_fallback(self):
         self.provider.on_transcribe = lambda: setattr(
