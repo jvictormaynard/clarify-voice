@@ -498,6 +498,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_language_display_name_preserves_unknown_valid_bcp47_tag(self):
         self.assertEqual(app._language_display_name("de-DE"), "German")
+        self.assertEqual(app._language_display_name("zh-Hant"), "zh-Hant")
         self.assertEqual(app._language_display_name("fr-FR"), "fr-FR")
 
     @patch("app.PROVIDER_HTTP.session.post")

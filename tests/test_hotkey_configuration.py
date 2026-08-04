@@ -161,6 +161,22 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(len(manager.registered), 5)
         self.assertEqual(len(user32.registered), 5)
 
+    def test_transactional_replace_restores_legacy_set_when_voice_conflicts(self):
+        user32 = _User32()
+        legacy = HotkeySettings.from_mapping({"ui_language": "pt"})
+        manager = WindowsHotkeyRegistration(user32, 1, legacy)
+        manager.register()
+        user32.fail_keys.add(ord("V"))
+
+        with self.assertRaises(HotkeyRegistrationError) as raised:
+            manager.replace(HotkeySettings.defaults())
+
+        self.assertIn("voice_translation_hotkey", raised.exception.failed_actions)
+        self.assertEqual(manager.settings, legacy)
+        self.assertEqual(manager.registered, {0x5101, 0x5102, 0x5103, 0x5104})
+        self.assertEqual(len(user32.registered), 4)
+        self.assertNotIn(0x5106, {hotkey_id for hotkey_id, _ in user32.registered})
+
 
 class ActivationControllerTests(unittest.TestCase):
     def test_toggle_press_during_start_stops_once_after_start(self):
