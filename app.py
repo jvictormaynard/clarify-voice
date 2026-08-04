@@ -3880,7 +3880,12 @@ class Recorder:
             if isinstance(microphone, MicrophoneDevice):
                 requested = microphone.stable_id
             elif microphone is None:
-                requested = _microphone_settings().selected_id
+                # A persisted endpoint is only a preference.  PulseAudio's
+                # SoX driver ignores the input name, so an old Linux setting
+                # must not turn a safe default capture into a startup error.
+                requested = (
+                    _microphone_settings().selected_id
+                    if supports_explicit_microphone else None)
             selection = inventory.resolve(requested)
             self.microphone_inventory = inventory
             self.microphone_selection = selection

@@ -386,7 +386,7 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertIsNone(recorder.microphone_inventory)
             self.assertIsNone(recorder.microphone_selection)
 
-    def test_linux_explicit_microphone_is_rejected_for_pulseaudio(self):
+    def test_linux_saved_microphone_falls_back_to_pulseaudio_default(self):
         inventory = app.MicrophoneInventory.from_records([
             {
                 "name": "System default",
@@ -420,14 +420,16 @@ class RecordingSessionTests(unittest.TestCase):
                 microphone_source=source,
                 controls=app.RecordingControls(),
             )
-            with self.assertRaises(app.MicrophoneUnavailableError):
-                recorder.start(Path(directory) / "recording.wav")
+            recorder.start(Path(directory) / "recording.wav")
 
-            popen.assert_not_called()
+            args = popen.call_args.args[0]
+            self.assertEqual(
+                args[0:4], [app.SOX_EXE, "-t", "pulseaudio", "default"])
             self.assertEqual(
                 recorder.microphone_selection.state,
-                app.MicrophoneSelectionState.SELECTED,
+                app.MicrophoneSelectionState.DEFAULT,
             )
+            recorder.stop()
 
     def test_linux_explicit_microphone_argument_is_rejected(self):
         inventory = app.MicrophoneInventory.from_records([
