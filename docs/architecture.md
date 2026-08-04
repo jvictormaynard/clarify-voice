@@ -171,6 +171,26 @@ drag-and-drop surface should marshal the callback onto the Tk loop and own only
 the presentation/lifecycle controls. Packaged UI and representative Windows
 format acceptance remain follow-up evidence, not a claim of this extraction.
 
+### `microphone_controls.py`
+
+This module is the UI-free foundation for issue #52. It normalizes microphone
+inventories into stable identities that do not persist transient PortAudio
+indexes (while retaining a current-snapshot index for a future stream adapter),
+resolves a saved endpoint to `selected`, `default`, visible
+`fallback_default`, or explicit `unavailable` state, and serializes only the
+selected identity for a future configuration boundary. Ambiguous same-name
+endpoints without a backend-native ID fail closed instead of routing to an
+arbitrary device.
+
+`RecordingControls`, `MaximumDurationPolicy`, `SilenceVADPolicy`, and
+`RecordingBoundaryPolicy` keep duration/VAD decisions deterministic and UI- or
+provider-free. Hard duration limits and silence detection are opt-in; the
+defaults preserve the current no-auto-stop behavior. Policies report terminal
+reasons but do not stop streams, publish transcripts, or own temporary WAV
+cleanup. Settings integration, hot-plug handling, audio cues, and packaged
+Windows acceptance remain follow-up work so the existing `Recorder` and
+`RecordingSession` cleanup/cancellation contract is not duplicated here.
+
 ### `desktop_state.py`
 
 Contains the legacy `WorkflowController` used by the current Tk path to prevent

@@ -202,6 +202,7 @@ local_asr_product.py            Explicit install/progress/removal product bounda
 local_asr_manifest.json         Pinned sidecar/model assets and SHA-256 allowlist
 repositories.py                Versioned configuration and statistics storage
 dictionary_snippets.py         Local dictionary/snippet storage and expansion
+microphone_controls.py         Microphone identity and recording boundary policies
 update_security.py             Authenticated manifest and atomic update checks
 version.py                     Packaged application version
 desktop_state.py               Small workflow state controller

@@ -96,6 +96,7 @@ internacional:
 - [Ambiente de desenvolvimento](development.md)
 - [Arquitetura](architecture.md)
 - [Dicionário local e snippets](dictionary-snippets.md)
+- [Microfones e limites de gravação](microphone-controls.md)
 - [Suporte](../SUPPORT.md)
 - [Política de segurança](../SECURITY.md)
 
