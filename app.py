@@ -6071,6 +6071,28 @@ class App(ctk.CTk):
             return False
         return True
 
+    def _retain_audio_file_import_controller(self, controller):
+        """Keep a closed-window import reachable until its job is terminal."""
+        def release_when_done():
+            try:
+                controller.wait()
+            except Exception:
+                # Leave the controller reachable if completion could not be
+                # observed; App.destroy can still perform its bounded wait.
+                return
+            if (controller.done
+                    and getattr(self, "_audio_file_import_controller", None)
+                    is controller):
+                self._audio_file_import_controller = None
+
+        watcher = threading.Thread(
+            target=release_when_done,
+            name="ClarifyVoiceAudioImportShutdown",
+            daemon=True,
+        )
+        watcher.start()
+        return watcher
+
     def _shutdown_recording(self, timeout=None):
         """Stop the active session and leave a watcher for late upload cleanup."""
         service = getattr(self, "_workflow_service", None)
@@ -7953,7 +7975,7 @@ class App(ctk.CTk):
             connection=connection,
             instruction=TRANSCRIPTION_INSTRUCTION.format(
                 lang=LANG_NAMES.get(language, "English")),
-            prompt="Transcribe this audio.",
+            prompt=current_route.prompt or "Transcribe this audio.",
             temperature=0.0,
         )
 
@@ -7962,6 +7984,10 @@ class App(ctk.CTk):
         if (getattr(self, "_audio_file_import_window", None) is not None
                 and self._audio_file_import_window.winfo_exists()):
             self._audio_file_import_window.focus()
+            return
+        active_controller = getattr(
+            self, "_audio_file_import_controller", None)
+        if active_controller is not None and active_controller.running:
             return
         if filedialog is None or not hasattr(ctk, "CTkToplevel"):
             return
@@ -8390,7 +8416,10 @@ class App(ctk.CTk):
                     pass
             controller.cancel()
             if self._audio_file_import_controller is controller:
-                self._audio_file_import_controller = None
+                if controller.running:
+                    self._retain_audio_file_import_controller(controller)
+                else:
+                    self._audio_file_import_controller = None
             if self._audio_file_import_window is win:
                 self._audio_file_import_window = None
             try:

@@ -778,6 +778,31 @@ class RecordingSessionTests(unittest.TestCase):
             ("wait", app.SESSION_SHUTDOWN_JOIN_SECONDS),
         ])
 
+    def test_closed_audio_import_controller_is_retained_until_job_finishes(self):
+        wait_started = threading.Event()
+        release_wait = threading.Event()
+
+        class AudioImport:
+            done = False
+
+            def wait(self):
+                wait_started.set()
+                release_wait.wait(1)
+                self.done = True
+
+        controller = AudioImport()
+        harness = SimpleNamespace(_audio_file_import_controller=controller)
+        watcher = app.App._retain_audio_file_import_controller(
+            harness, controller)
+
+        self.assertTrue(wait_started.wait(1))
+        self.assertIs(harness._audio_file_import_controller, controller)
+        release_wait.set()
+        watcher.join(1)
+
+        self.assertFalse(watcher.is_alive())
+        self.assertIsNone(harness._audio_file_import_controller)
+
     def test_simultaneous_hotkeys_do_not_start_or_stop_processing_session(self):
         session = Mock()
         harness = SimpleNamespace(
