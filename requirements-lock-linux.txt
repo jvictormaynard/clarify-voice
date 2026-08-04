@@ -8,6 +8,8 @@ altgraph==0.17.5
     # via pyinstaller
 arrow==1.4.0
     # via isoduration
+ast-serialize==0.6.0
+    # via mypy
 attrs==26.1.0
     # via
     #   jsonschema
@@ -74,7 +76,7 @@ mdurl==0.1.2
     # via markdown-it-py
 msgpack==1.2.1
     # via cachecontrol
-mypy==1.20.2
+mypy==2.3.0
     # via -r requirements-dev.txt
 mypy-extensions==1.1.0
     # via mypy
