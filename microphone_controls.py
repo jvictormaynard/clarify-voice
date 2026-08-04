@@ -106,13 +106,19 @@ def _duration(
     return number
 
 
-def _version(value: Any, *, field_name: str, supported: int) -> int:
+def _version(
+    value: Any,
+    *,
+    field_name: str,
+    supported: int,
+    error_type: type[ValueError] = MicrophoneConfigurationError,
+) -> int:
     if value is None:
         return 0
     if isinstance(value, bool) or not isinstance(value, int):
-        raise MicrophoneConfigurationError(f"{field_name} must be an integer")
+        raise error_type(f"{field_name} must be an integer")
     if value < 0 or value > supported:
-        raise MicrophoneConfigurationError(
+        raise error_type(
             f"unsupported {field_name} {value}; newest supported version is {supported}")
     return value
 
@@ -476,6 +482,36 @@ class SoundDeviceMicrophoneInventory:
     def snapshot(self) -> MicrophoneInventory:
         try:
             records = tuple(self._sounddevice.query_devices())
+            query_hostapis = getattr(self._sounddevice, "query_hostapis", None)
+            try:
+                hostapis = tuple(query_hostapis()) if callable(query_hostapis) else ()
+            except Exception:
+                # Device enumeration remains useful when host-API labels are
+                # unavailable; the numeric index is retained as a best-effort
+                # fallback rather than hiding every input endpoint.
+                hostapis = ()
+            if hostapis:
+                normalized_records = []
+                for record in records:
+                    if not isinstance(record, Mapping):
+                        normalized_records.append(record)
+                        continue
+                    raw_host = record.get("host_api", record.get("hostapi", ""))
+                    try:
+                        host_index = int(raw_host)
+                    except (TypeError, ValueError):
+                        host_index = -1
+                    if (
+                        not isinstance(raw_host, bool)
+                        and 0 <= host_index < len(hostapis)
+                        and isinstance(hostapis[host_index], Mapping)
+                    ):
+                        host_name = hostapis[host_index].get("name", "")
+                        if host_name:
+                            record = dict(record)
+                            record["host_api"] = host_name
+                    normalized_records.append(record)
+                records = tuple(normalized_records)
             default = getattr(getattr(self._sounddevice, "default", None), "device", None)
             default_index = None
             if isinstance(default, (tuple, list)):
@@ -655,6 +691,7 @@ class RecordingControls:
             value.get("schema_version"),
             field_name="recording controls schema_version",
             supported=RECORDING_CONTROLS_SCHEMA_VERSION,
+            error_type=RecordingControlsError,
         )
         vad = value.get("vad", value.get("voice_activity_detection"))
         if vad is None:

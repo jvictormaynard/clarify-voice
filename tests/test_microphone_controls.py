@@ -195,6 +195,26 @@ class MicrophoneControlsTests(unittest.TestCase):
         inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
         self.assertEqual(inventory.default_id, inventory.devices[1].stable_id)
 
+    def test_sounddevice_adapter_resolves_numeric_host_api_name(self):
+        fake = SimpleNamespace(
+            query_devices=lambda: [
+                {
+                    "name": "Stable mic",
+                    "hostapi": 0,
+                    "index": 7,
+                    "max_input_channels": 1,
+                },
+            ],
+            query_hostapis=lambda: [{"name": "Windows WASAPI"}],
+            default=SimpleNamespace(device=(7, -1)),
+        )
+        inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
+        self.assertEqual(inventory.devices[0].host_api, "Windows WASAPI")
+        self.assertEqual(
+            inventory.devices[0].stable_id,
+            stable_microphone_id("Stable mic", "Windows WASAPI"),
+        )
+
     def test_sounddevice_enumeration_failure_is_safe_unavailable_state(self):
         class Broken:
             def query_devices(self):
@@ -211,7 +231,7 @@ class MicrophoneControlsTests(unittest.TestCase):
         self.assertEqual(controls, RecordingControls.from_mapping(controls.to_mapping()))
 
     def test_controls_reject_future_schema_and_unsafe_durations(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(RecordingControlsError):
             RecordingControls.from_mapping({"schema_version": 99})
         with self.assertRaises(RecordingControlsError):
             RecordingControls(max_duration_seconds=2, warning_seconds=3)
