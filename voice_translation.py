@@ -1213,6 +1213,11 @@ class VoiceTranslationWorkflow:
         if target_capture_reason and reason == "target_not_current":
             reason = target_capture_reason
             decision = PublicationDecision(decision.disposition, decision.text, reason)
+        # Clipboard/focus inspection can run after the user requests Escape.
+        # Re-check before claiming publication so a cancellation that wins
+        # during that inspection cannot copy or paste a result.
+        if self._cancelled(cancel_event):
+            return self._cancel_operation(operation_id)
         return self._publish(target, decision, operation_id=operation_id)
 
 

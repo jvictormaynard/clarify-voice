@@ -100,6 +100,17 @@ class BlockingClipboard(FakeClipboard):
         super().publish(text, target, disposition)
 
 
+class CancelOnClipboardInspection(FakeClipboard):
+    def __init__(self, cancel_event: threading.Event) -> None:
+        super().__init__()
+        self.cancel_event = cancel_event
+
+    def owns_clipboard(self):
+        owned = super().owns_clipboard()
+        self.cancel_event.set()
+        return owned
+
+
 class LateFirstProvider(FakeProvider):
     """Hold the first worker so a later run can supersede it deterministically."""
 
@@ -448,6 +459,23 @@ class VoiceTranslationConcurrencyTests(unittest.TestCase):
         self.assertEqual(
             outcomes[0].publication, VoiceTranslationPublication.PASTED
         )
+
+    def test_cancel_before_publication_check_does_not_publish(self):
+        cancel_event = threading.Event()
+        clipboard = CancelOnClipboardInspection(cancel_event)
+        workflow = VoiceTranslationWorkflow(
+            FakeProvider(),
+            clipboard,
+            VoiceTranslationConfig(),
+            clock=FakeClock(),
+            coordinator=VoiceTranslationPublicationCoordinator(),
+        )
+
+        state = workflow.run(b"audio", cancel_event=cancel_event)
+
+        self.assertEqual(state.phase, VoiceTranslationPhase.CANCELLED)
+        self.assertEqual(state.failure_code, "cancelled")
+        self.assertEqual(clipboard.published, [])
 
     def test_phase_check_and_transition_are_atomic_against_cancel(self):
         machine = InterleavingStateMachine(

@@ -7226,8 +7226,12 @@ class App(ctk.CTk):
                     finish_success()
                 return
             if phase is VoiceTranslationPhase.FAILED:
-                if getattr(event, "error_code", "") == "MicrophoneUnavailableError":
+                error_code = getattr(event, "error_code", "")
+                if error_code == "MicrophoneUnavailableError":
                     self._set_state("microphone_unavailable")
+                    return
+                if error_code == "RecordingEncodingError":
+                    self._set_state("ready", self._t("no_audio"))
                     return
                 text = result.published_text if result is not None else ""
                 if not text and result is not None:

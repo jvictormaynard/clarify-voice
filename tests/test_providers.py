@@ -1645,6 +1645,27 @@ class WorkflowAppBridgeTests(unittest.TestCase):
 
         set_state.assert_called_once_with("microphone_unavailable")
 
+    def test_voice_translation_maps_silent_recording_to_no_audio(self):
+        set_state = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _set_state=set_state,
+            _t=lambda key: key,
+            after=lambda _delay, callback: callback(),
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.FAILED,
+                2,
+                error_code="RecordingEncodingError",
+            ),
+        )
+
+        set_state.assert_called_once_with("ready", "no_audio")
+
     def test_voice_translation_failure_shows_retained_translation_or_raw_text(self):
         show_result = Mock()
         set_state = Mock()
