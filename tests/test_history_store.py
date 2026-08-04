@@ -251,6 +251,28 @@ class HistoryStoreTests(unittest.TestCase):
             for value in ("abc", "def"):
                 self.assertNotIn(value, persisted)
 
+    def test_escaped_mapping_credentials_ending_in_backslash_are_redacted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            serialized = json.dumps(json.dumps({"password": "abc\\"}))
+            store.add(
+                status="error",
+                error=f"body={serialized}",
+                record_id="escaped-trailing-backslash-credential",
+            )
+
+            self.assertEqual(
+                store.list_records()[0].error,
+                'body="{\\"password\\": \\"<redacted>\\"}"',
+            )
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            self.assertNotIn("abc", persisted)
+
     def test_v0_migration_is_idempotent_and_drops_unsupported_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
