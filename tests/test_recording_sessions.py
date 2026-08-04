@@ -142,6 +142,29 @@ class RecordingSessionTests(unittest.TestCase):
             stream.start.assert_called_once_with()
             recorder.stop()
 
+    def test_production_recorder_reloads_controls_after_settings_apply(self):
+        initial = app.RecordingControls(max_duration_seconds=30)
+        updated = app.RecordingControls(max_duration_seconds=90)
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "_recording_controls",
+                side_effect=[initial, updated]), patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder()
+            self.assertEqual(recorder.controls, initial)
+            self.assertFalse(recorder._controls_override)
+
+            recorder.start(Path(directory) / "recording.wav")
+
+            self.assertEqual(recorder.controls, updated)
+            recorder.stop()
+
     def test_sessions_reserve_unique_paths_and_cleanup_success(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
                 app, "DATA_DIR", Path(directory)):
