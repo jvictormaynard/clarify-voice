@@ -155,6 +155,13 @@ class DictionarySnippetTests(unittest.TestCase):
 
         self.assertEqual(service.expand("ß"), "sharp-s")
 
+    def test_nfc_matching_preserves_hangul_jamo_composition(self):
+        service = DictionarySnippetService(self.repository)
+        service.replace(DictionarySnippets(snippets=(Snippet("가", "ga"),)))
+
+        self.assertEqual(service.expand("가"), "ga")
+        self.assertEqual(service.expand("각"), "각")
+
     def test_case_sensitive_and_disabled_rules_are_explicit(self):
         service = DictionarySnippetService(self.repository)
         service.replace(DictionarySnippets(snippets=(

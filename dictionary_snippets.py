@@ -38,6 +38,15 @@ MAX_REPLACEMENT_LENGTH = 4096
 MAX_CONTEXT_CHARS = 4096
 MAX_EXPANSION_CHARS = 1_000_000
 
+_HANGUL_LBASE = 0x1100
+_HANGUL_LCOUNT = 19
+_HANGUL_VBASE = 0x1161
+_HANGUL_VCOUNT = 21
+_HANGUL_TBASE = 0x11A7
+_HANGUL_TCOUNT = 28
+_HANGUL_SBASE = 0xAC00
+_HANGUL_SCOUNT = 11172
+
 
 class DictionarySnippetsError(ValueError):
     """Raised when a dictionary/snippets document is invalid."""
@@ -396,6 +405,28 @@ class _CanonicalText:
     cluster_boundaries: frozenset[int]
 
 
+def _hangul_cluster_end(text: str, start: int) -> int:
+    """Return the end of a Hangul Jamo composition sequence, if present."""
+    codepoint = ord(text[start])
+    end = start + 1
+    if _HANGUL_LBASE <= codepoint < _HANGUL_LBASE + _HANGUL_LCOUNT:
+        if (end < len(text)
+                and _HANGUL_VBASE <= ord(text[end])
+                < _HANGUL_VBASE + _HANGUL_VCOUNT):
+            end += 1
+            if (end < len(text)
+                    and _HANGUL_TBASE < ord(text[end])
+                    < _HANGUL_TBASE + _HANGUL_TCOUNT):
+                end += 1
+    elif (_HANGUL_SBASE <= codepoint
+          < _HANGUL_SBASE + _HANGUL_SCOUNT
+          and end < len(text)
+          and _HANGUL_TBASE < ord(text[end])
+          < _HANGUL_TBASE + _HANGUL_TCOUNT):
+        end += 1
+    return end
+
+
 def _canonical_text(text: str, *, casefold: bool) -> _CanonicalText:
     """Build NFC text while preserving original cluster consumption.
 
@@ -415,7 +446,7 @@ def _canonical_text(text: str, *, casefold: bool) -> _CanonicalText:
 
     while original_index < len(text):
         cluster_start = original_index
-        original_index += 1
+        original_index = _hangul_cluster_end(text, cluster_start)
         while (original_index < len(text)
                and unicodedata.category(text[original_index]).startswith("M")):
             original_index += 1
