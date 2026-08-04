@@ -93,11 +93,12 @@ def _format_timestamp(value: datetime) -> str:
 
 _SENSITIVE_AUTH_PATTERN = re.compile(
     r"(?is)(['\"]?(?:authorization|bearer)['\"]?\s*[:=]\s*"
-    r"(?:[a-z]+\s+)?)(?:(['\"])(.*?)\2|([^,;&}\n]+))")
+    r"(?:[a-z]+\s+)?)(?:(['\"])((?:\\.|(?!\2).)*?)\2|"
+    r"([^,;&}\n]+))")
 _SENSITIVE_FIELD_PATTERN = re.compile(
     r"(?is)(['\"]?(?:api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|password|secret)['\"]?\s*[:=]\s*)"
-    r"(?:(['\"])(.*?)\2|([^,;&}\n]+))")
+    r"(?:(['\"])((?:\\.|(?!\2).)*?)\2|([^,;&}\n]+))")
 _SENSITIVE_BEARER_PATTERN = re.compile(r"(?i)(bearer)\s+([^\s,;&]+)")
 _SENSITIVE_QUERY_PATTERN = re.compile(
     r"(?i)([?&](?:api[_-]?key|access[_-]?token|token)=)[^&#\s]+")
@@ -243,6 +244,17 @@ class HistoryRecord:
 
 def _version(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
+    """Return whether this executable can safely load a snapshot payload."""
+
+    version = _version(payload.get("schema_version", payload.get("version")))
+    if version > HISTORY_SCHEMA_VERSION:
+        return False
+    # Current-schema records must be a list.  Otherwise recovery could move a
+    # structurally corrupt temp over a valid primary before load rejects it.
+    return version != HISTORY_SCHEMA_VERSION or isinstance(payload.get("records"), list)
 
 
 def _migrate_v0(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -428,15 +440,20 @@ class HistoryStore:
             temporary_payloads.append((ordering, candidate.name, candidate, payload))
 
         if current is not None:
+            current_version = _version(
+                current.get("schema_version", current.get("version")))
+            if current_version > HISTORY_SCHEMA_VERSION:
+                # Never let an older executable replace a future-schema
+                # primary with an older temporary snapshot.  The newer file
+                # remains intact for the executable that understands it.
+                return current
             # A complete temp written after the primary may represent a crash
             # between flushing the new snapshot and ``os.replace``. Recover it
             # when its mtime proves it is newer; an older leftover is from a
             # failed/retried write and the committed primary wins.
             supported_temporary = [
                 item for item in temporary_payloads
-                if _version(item[3].get(
-                    "schema_version", item[3].get("version")))
-                <= HISTORY_SCHEMA_VERSION
+                if _is_recoverable_snapshot(item[3])
             ]
             if not supported_temporary:
                 return current
@@ -476,13 +493,26 @@ class HistoryStore:
             return None
         supported_temporary = [
             item for item in temporary_payloads
-            if _version(item[3].get(
-                "schema_version", item[3].get("version")))
-            <= HISTORY_SCHEMA_VERSION
+            if _is_recoverable_snapshot(item[3])
         ]
         # Prefer a snapshot this executable understands. Unknown/future
         # snapshots remain untouched so a newer executable can recover them.
-        candidates = supported_temporary or temporary_payloads
+        if supported_temporary:
+            candidates = supported_temporary
+        else:
+            future_temporary = [
+                item for item in temporary_payloads
+                if _version(item[3].get(
+                    "schema_version", item[3].get("version")))
+                > HISTORY_SCHEMA_VERSION
+            ]
+            if not future_temporary:
+                # A supported-schema temp exists, but its structure is
+                # damaged. Preserve it and fail closed rather than moving it
+                # over the missing primary and later rewriting it as empty.
+                raise HistoryStoreError(
+                    "The interrupted history snapshot is structurally corrupt")
+            candidates = future_temporary
         _, _, selected, payload = max(candidates)
         try:
             os.replace(selected, self.path)

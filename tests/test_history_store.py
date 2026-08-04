@@ -130,6 +130,25 @@ class HistoryStoreTests(unittest.TestCase):
             for value in ("correct", "horse", "battery", "staple"):
                 self.assertNotIn(value, persisted)
 
+    def test_escaped_quote_in_credential_is_redacted_as_one_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            store.add(
+                status="error",
+                error='{\"password\": \"abc\\\"def\"}',
+            )
+
+            error = store.list_records()[0].error
+            self.assertEqual(error, '{\"password\": \"<redacted>\"}')
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            self.assertNotIn("abc", persisted)
+            self.assertNotIn("def", persisted)
+
     def test_v0_migration_is_idempotent_and_drops_unsupported_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
@@ -317,6 +336,33 @@ class HistoryStoreTests(unittest.TestCase):
                 store.list_records()
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
 
+    def test_future_primary_is_not_replaced_by_supported_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            original = {
+                "schema_version": HISTORY_SCHEMA_VERSION + 1,
+                "records": [{"raw_text": "future-primary"}],
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            candidate = root / ".history.json.supported.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [HistoryRecord(
+                    raw_text="older-snapshot", timestamp=NOW,
+                    provider="openai", model="gpt-test").to_mapping()],
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime + 1, target_mtime + 1))
+            before = path.read_bytes()
+
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            with self.assertRaises(UnsupportedHistorySchemaVersionError):
+                store.list_records()
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(candidate.exists())
+
     def test_corrupt_primary_fails_closed_and_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
@@ -347,6 +393,27 @@ class HistoryStoreTests(unittest.TestCase):
             with self.assertRaises(HistoryStoreError):
                 store.add(raw_text="must not erase the object")
             self.assertEqual(path.read_bytes(), before)
+
+    def test_invalid_current_schema_snapshot_cannot_replace_valid_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="committed")
+            before = path.read_bytes()
+            candidate = root / ".history.json.invalid.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": {"raw_text": "must-not-replace"},
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime + 1, target_mtime + 1))
+
+            records = store.list_records()
+            self.assertEqual([item.raw_text for item in records], ["committed"])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(candidate.exists())
 
     def test_future_interrupted_snapshot_cannot_replace_supported_primary(self):
         with tempfile.TemporaryDirectory() as directory:
