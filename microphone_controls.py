@@ -470,6 +470,14 @@ class SoundDeviceMicrophoneInventory:
                 default_index = default[0] if default else None
             elif isinstance(default, int) and not isinstance(default, bool):
                 default_index = default
+            else:
+                # sounddevice 0.5.x exposes an _InputOutputPair here. It is
+                # pair-like and subscriptable but is not a tuple/list, so do
+                # not mistake its shape for an unavailable default.
+                try:
+                    default_index = default[0]
+                except (IndexError, KeyError, TypeError):
+                    default_index = getattr(default, "input", None)
             return MicrophoneInventory.from_records(
                 records, default_index=default_index)
         except Exception:
@@ -759,6 +767,11 @@ class SilenceVADPolicy:
             raise RecordingControlsError("VAD input level must be non-negative")
         level = min(1.0, level)
         if self._terminal:
+            # Even a terminal policy can receive queued callbacks. Record the
+            # latest accepted timestamp so a later callback cannot move time
+            # backwards relative to an observation that arrived after the
+            # stop decision.
+            self._last_timestamp = timestamp
             return VADDecision(
                 timestamp,
                 level,

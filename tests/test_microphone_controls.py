@@ -127,6 +127,27 @@ class MicrophoneControlsTests(unittest.TestCase):
         self.assertEqual(inventory.default_id, inventory.devices[1].stable_id)
         self.assertNotIn("index", inventory.devices[1].to_mapping())
 
+    def test_sounddevice_adapter_accepts_pair_like_default(self):
+        class InputOutputPair:
+            input = 1
+
+            def __getitem__(self, index):
+                if index == 0:
+                    return self.input
+                if index == 1:
+                    return -1
+                raise IndexError(index)
+
+        fake = SimpleNamespace(
+            query_devices=lambda: [
+                {"name": "Other", "max_input_channels": 1},
+                {"name": "Default", "max_input_channels": 1},
+            ],
+            default=SimpleNamespace(device=InputOutputPair()),
+        )
+        inventory = SoundDeviceMicrophoneInventory(fake).snapshot()
+        self.assertEqual(inventory.default_id, inventory.devices[1].stable_id)
+
     def test_sounddevice_enumeration_failure_is_safe_unavailable_state(self):
         class Broken:
             def query_devices(self):
@@ -196,6 +217,17 @@ class MicrophoneControlsTests(unittest.TestCase):
         enabled.start(0)
         self.assertFalse(enabled.observe(0, 0).should_stop)
         self.assertFalse(enabled.observe(10, 0).should_stop)
+
+    def test_terminal_vad_observations_preserve_monotonic_order(self):
+        policy = SilenceVADPolicy(
+            VADSettings(enabled=True, minimum_speech_seconds=0, silence_duration_seconds=1))
+        policy.start(0)
+        policy.observe(0, 1)
+        self.assertFalse(policy.observe(1, 0).should_stop)
+        self.assertTrue(policy.observe(2, 0).should_stop)
+        policy.observe(10, 0)
+        with self.assertRaises(NonMonotonicTimestampError):
+            policy.observe(5, 0)
 
     def test_policies_reject_clock_regression(self):
         policy = SilenceVADPolicy(VADSettings(enabled=True))
