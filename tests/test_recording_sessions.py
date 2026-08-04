@@ -229,6 +229,41 @@ class RecordingSessionTests(unittest.TestCase):
             app.APP_CONFIG.clear()
             app.APP_CONFIG.update(original_config)
 
+    def test_source_only_capture_enforces_max_duration_without_level_meter(self):
+        class FakeClock:
+            def __init__(self):
+                self.now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+        controls = app.RecordingControls(
+            max_duration_seconds=5,
+            warning_seconds=1,
+        )
+        clock = FakeClock()
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(
+                controls=controls,
+                boundary_clock=clock,
+            )
+            recorder.start(Path(directory) / "recording.wav")
+            self.assertIsNone(recorder.mic_stream)
+
+            clock.now = 5
+            self.assertTrue(recorder.boundary_event.wait(1))
+            self.assertEqual(
+                recorder.boundary_reason, RecordingBoundaryReason.MAX_DURATION)
+            recorder.stop()
+
     def test_sessions_reserve_unique_paths_and_cleanup_success(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
                 app, "DATA_DIR", Path(directory)):

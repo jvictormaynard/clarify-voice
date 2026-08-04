@@ -4,8 +4,10 @@ The application connects the UI-independent microphone policies to the typed
 config repository, the Settings surface, and the existing
 `Recorder`/`RecordingSession` owner. Device selection is resolved from a fresh
 PortAudio inventory before every session; recording boundaries are observed by
-the audio callback and stop the owning workflow through a lifecycle worker.
-Cancellation and temporary-WAV cleanup remain owned by `RecordingSession`.
+the audio callback and by a small policy worker, so hard duration limits also
+work when capture is SoX-only and the optional PortAudio meter is unavailable.
+The owning workflow is stopped through a lifecycle worker. Cancellation and
+temporary-WAV cleanup remain owned by `RecordingSession`.
 
 ## Device identity and inventory
 
@@ -65,9 +67,12 @@ wall-clock adjustment cannot terminate a recording early.
 `RecordingBoundaryPolicy` combines both policies and exposes explicit
 `ACTIVE`, `STOPPED`, `CANCELLED`, and `DEVICE_UNAVAILABLE` states without
 publishing text. The recorder calls the policy from its level callback and
-signals an explicit boundary event. `RecordingSession` invokes the workflow
-stop callback from a separate lifecycle worker, never from the PortAudio
-callback itself. The existing owner/cancellation order remains in force:
+from a short-lived policy worker that runs for opted-in duration/VAD controls;
+both paths signal the same boundary event. The worker is stopped and joined
+with the recorder process during explicit stop/cancel, so it cannot keep a
+session alive after cleanup. `RecordingSession` invokes the workflow stop
+callback from a separate lifecycle worker, never from the PortAudio callback
+itself. The existing owner/cancellation order remains in force:
 cancellation wins over publication, snapshots are taken before provider work,
 and temporary WAV cleanup remains owned by `RecordingSession`. A policy
 decision is not treated as proof that usable audio exists; the normal WAV
