@@ -82,6 +82,11 @@ class FakeClipboard:
         self.published.append((text, target, disposition))
 
 
+class FailingClipboard(FakeClipboard):
+    def publish(self, _text, _target, _disposition):
+        raise RuntimeError("clipboard busy")
+
+
 class BlockingClipboard(FakeClipboard):
     def __init__(self) -> None:
         super().__init__()
@@ -93,6 +98,17 @@ class BlockingClipboard(FakeClipboard):
         if not self.publish_release.wait(timeout=2):
             raise AssertionError("test did not release clipboard publication")
         super().publish(text, target, disposition)
+
+
+class CancelOnClipboardInspection(FakeClipboard):
+    def __init__(self, cancel_event: threading.Event) -> None:
+        super().__init__()
+        self.cancel_event = cancel_event
+
+    def owns_clipboard(self):
+        owned = super().owns_clipboard()
+        self.cancel_event.set()
+        return owned
 
 
 class LateFirstProvider(FakeProvider):
@@ -213,6 +229,21 @@ class VoiceTranslationConfigTests(unittest.TestCase):
             diagnostics["route"]["custom_endpoint"], "https://proxy.example/v1"
         )
 
+    def test_execution_mapping_makes_local_cloud_policy_explicit(self):
+        config = VoiceTranslationConfig(
+            route=VoiceTranslationRoute(provider_id="openai")
+        )
+        self.assertEqual(
+            config.execution_mapping(
+                "local_asr", local_asr_cloud_refinement=True
+            ),
+            {
+                "transcription_execution": "local",
+                "translation_execution": "cloud",
+                "local_asr_cloud_refinement": True,
+            },
+        )
+
     def test_future_schema_is_rejected_before_route_validation(self):
         with self.assertRaises(VoiceTranslationConfigurationError):
             VoiceTranslationConfig.from_mapping({"schema_version": 2})
@@ -294,6 +325,8 @@ class VoiceTranslationWorkflowTests(unittest.TestCase):
         self.assertEqual(state.phase, VoiceTranslationPhase.COMPLETED)
         self.assertEqual(state.raw_transcript, "Olá do microfone")
         self.assertEqual(state.translated_text, "Hello from the microphone")
+        self.assertEqual(state.transcription_provider, "gemini")
+        self.assertEqual(state.transcription_model, "gemini-test")
         self.assertEqual(state.publication, VoiceTranslationPublication.PASTED)
         self.assertEqual(self.provider.transcribe_calls, [(b"audio", "auto")])
         request = self.provider.translation_requests[0]
@@ -339,6 +372,17 @@ class VoiceTranslationWorkflowTests(unittest.TestCase):
         self.assertEqual(state.failure_code, "empty_translation")
         self.assertEqual(state.raw_transcript, "Olá do microfone")
         self.assertEqual(state.publication, VoiceTranslationPublication.COPY_ONLY)
+
+    def test_publication_failure_retains_translated_and_raw_text(self):
+        self.clipboard = FailingClipboard()
+        state = self.workflow().run(b"audio")
+
+        self.assertEqual(state.phase, VoiceTranslationPhase.FAILED)
+        self.assertEqual(state.failure_code, "publication_failed")
+        self.assertEqual(state.raw_transcript, "Olá do microfone")
+        self.assertEqual(state.translated_text, "Hello from the microphone")
+        self.assertEqual(state.published_text, "")
+        self.assertEqual(state.publication, VoiceTranslationPublication.NONE)
 
     def test_focus_loss_downgrades_to_copy_only(self):
         self.clipboard.target_current = False
@@ -417,6 +461,23 @@ class VoiceTranslationConcurrencyTests(unittest.TestCase):
         self.assertEqual(
             outcomes[0].publication, VoiceTranslationPublication.PASTED
         )
+
+    def test_cancel_before_publication_check_does_not_publish(self):
+        cancel_event = threading.Event()
+        clipboard = CancelOnClipboardInspection(cancel_event)
+        workflow = VoiceTranslationWorkflow(
+            FakeProvider(),
+            clipboard,
+            VoiceTranslationConfig(),
+            clock=FakeClock(),
+            coordinator=VoiceTranslationPublicationCoordinator(),
+        )
+
+        state = workflow.run(b"audio", cancel_event=cancel_event)
+
+        self.assertEqual(state.phase, VoiceTranslationPhase.CANCELLED)
+        self.assertEqual(state.failure_code, "cancelled")
+        self.assertEqual(clipboard.published, [])
 
     def test_phase_check_and_transition_are_atomic_against_cancel(self):
         machine = InterleavingStateMachine(

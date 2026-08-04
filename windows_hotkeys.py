@@ -34,6 +34,7 @@ HOTKEY_SPECS = {
     0x5102: ("rewrite_hotkey", ord("K")),
     0x5103: ("translation_hotkey", ord("T")),
     0x5104: ("toggle_visibility", ord("R")),
+    0x5106: ("voice_translation_hotkey", ord("V")),
 }
 HOTKEY_IDS_BY_ACTION = {spec[0]: hotkey_id for hotkey_id, spec in HOTKEY_SPECS.items()}
 
@@ -144,7 +145,13 @@ def register_global_hotkeys(user32, hwnd, settings=None, *, strict=False) -> set
     failed: list[str] = []
     for action in HotkeyAction:
         hotkey_id = HOTKEY_IDS_BY_ACTION[action.value]
-        definition = configured.definition(action)
+        # Legacy configurations predate voice translation and intentionally
+        # omit its binding.  Skipping an omitted action keeps those users'
+        # existing shortcuts registered even if Alt+V belongs to another app.
+        try:
+            definition = configured.definition(action)
+        except KeyError:
+            continue
         if user32.RegisterHotKey(
                 hwnd, hotkey_id, _hotkey_modifier_mask(definition),
                 _hotkey_virtual_key(definition.key)):

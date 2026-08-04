@@ -139,10 +139,11 @@ class ProviderRegistryContractTests(unittest.TestCase):
                         "local transcript", "local_asr", "ggml-small")) as transcribe, \
                     patch.object(app, "_refine_transcript") as refine:
                 result = app._call_provider_audio(
-                    "local_asr", self.audio_path, "prompt", "en",
+                    "local_asr", self.audio_path, "prompt", "pt-BR",
                     audio_bytes=b"RIFF")
             self.assertEqual(result, "local transcript")
             transcribe.assert_called_once()
+            self.assertEqual(transcribe.call_args.args[1].language, "pt-BR")
             refine.assert_not_called()
         finally:
             app.APP_CONFIG.clear()

@@ -84,6 +84,16 @@ from repositories import (
     validate_workflow_route,
 )
 from workflow_settings import WorkflowSettingsController
+from voice_translation import (
+    VoiceTranslationConfig,
+    VoiceTranslationPhase,
+    VoiceTranslationPublication,
+    VoiceTranslationRequest,
+)
+from voice_translation_runtime import (
+    VoiceTranslationRuntime,
+    VoiceTranslationRuntimeState,
+)
 from secret_store import (
     SUPPORTED_SECRET_PROVIDERS,
     SecretStoreCorruptedError,
@@ -242,6 +252,8 @@ DEFAULT_CONFIG = {
     "ui_language": "en",
     "history_enabled": False,
     "history_retention_days": DEFAULT_RETENTION_DAYS,
+    "hotkeys": HotkeySettings.defaults().to_mapping(),
+    "voice_translation": VoiceTranslationConfig().to_mapping(),
 }
 
 # Persistence is injected through this small boundary.  The legacy mapping
@@ -426,6 +438,16 @@ def _load_history_records(store):
         return False, [], error
 
 
+def _voice_translation_config() -> VoiceTranslationConfig:
+    """Load and validate the dedicated voice route at operation start."""
+
+    values = APP_CONFIG.get("voice_translation")
+    config = VoiceTranslationConfig.from_mapping(
+        values if isinstance(values, Mapping) else None
+    )
+    return config.validate()
+
+
 def _workflow_route(scope: WorkflowScope | str) -> WorkflowRoute:
     """Return one effective route while honoring legacy flat UI edits.
 
@@ -505,6 +527,31 @@ def _effective_workflow_routes() -> dict[str, dict[str, object]]:
                 "local" if provider_id == LOCAL_ASR_PROVIDER_ID else "cloud"
             ),
         }
+    try:
+        voice_config = VoiceTranslationConfig.from_mapping(
+            APP_CONFIG.get("voice_translation")
+            if isinstance(APP_CONFIG.get("voice_translation"), Mapping)
+            else None
+        )
+        summaries["voice_translation"] = {
+            "scope": "voice_translation",
+            "provider_id": voice_config.route.provider_id,
+            "model_id": voice_config.route.model_id,
+            "custom_endpoint": voice_config.route.diagnostic_mapping().get(
+                "custom_endpoint", ""
+            ),
+            "enabled": voice_config.route.enabled,
+            **voice_config.execution_mapping(
+                _workflow_route(WorkflowScope.TRANSCRIPTION).provider_id,
+                local_asr_cloud_refinement=bool(
+                    APP_CONFIG.get("local_asr_cloud_refinement", False)
+                ),
+            ),
+        }
+    except (TypeError, ValueError, ProviderError):
+        # Diagnostics must never prevent the normal workflow settings surface
+        # from opening because a future voice section was hand-edited.
+        pass
     return summaries
 
 
@@ -552,6 +599,18 @@ def _recording_usage_context(mode: str | None = None) -> dict:
             "local" if refinement_route.provider_id == LOCAL_ASR_PROVIDER_ID
             else "cloud")
     return context
+
+
+def _hotkey_definition_for_settings(
+        settings: HotkeySettings, action: HotkeyAction):
+    """Return a displayable binding, including an opt-in legacy default."""
+    try:
+        return settings.definition(action)
+    except KeyError:
+        # Legacy profiles intentionally omit Alt+V at startup. Settings still
+        # exposes that action so users can opt in and change a conflicting key
+        # before applying the complete native registration set.
+        return HotkeySettings.defaults().definition(action)
 
 
 def _build_recording_usage_event(context: dict, duration_seconds: float,
@@ -627,6 +686,56 @@ def _build_translation_usage_event(provider: str, model: str, source: str,
     return event
 
 
+def _build_voice_translation_usage_event(
+        transcription_context: dict,
+        transcription_provider: str,
+        transcription_model: str,
+        translation_provider: str,
+        translation_model: str,
+        duration_seconds: float,
+        source: str,
+        result: str,
+        target_language: str) -> dict:
+    """Combine the audio and text legs into one anonymous usage event."""
+
+    context = dict(transcription_context or {})
+    if transcription_provider:
+        context["provider"] = transcription_provider
+    if transcription_model:
+        context["model"] = transcription_model
+    recording = _build_recording_usage_event(context, duration_seconds, source)
+    translation = _build_translation_usage_event(
+        translation_provider, translation_model, source, result, target_language)
+    translation_models = [
+        {**entry, "purpose": "translation"}
+        for entry in translation.get("models", [])
+        if isinstance(entry, dict)
+    ]
+    return {
+        "timestamp": time.time(),
+        "type": "voice_translation",
+        "mode": "voice_translation",
+        "workflow": "voice_translation",
+        "duration_seconds": recording["duration_seconds"],
+        "transcription_provider": str(context.get("provider", "")),
+        "transcription_model": str(context.get("model", "")),
+        "translation_provider": str(translation_provider or ""),
+        "translation_model": str(translation_model or ""),
+        "target_language": target_language,
+        "models": recording.get("models", []) + translation_models,
+        "word_count": recording.get("word_count", 0),
+        "character_count": recording.get("character_count", 0),
+        "translation_character_count": len(str(result or "")),
+        "estimated_cost_usd": round(
+            recording.get("estimated_cost_usd", 0.0)
+            + translation.get("estimated_cost_usd", 0.0),
+            8,
+        ),
+        "cost_complete": bool(recording.get("cost_complete", False))
+        and bool(translation.get("cost_complete", False)),
+    }
+
+
 def _storage_repositories(repositories=None):
     """Use injected repositories, retaining path patchability for old callers."""
     if repositories is not None:
@@ -691,7 +800,8 @@ def _record_pending_recording_usage(session, repositories=None) -> None:
 def _usage_summary(events=None, now=None, repositories=None) -> dict:
     events = (_load_usage_events(repositories) if events is None else list(events))
     now = time.time() if now is None else float(now)
-    recordings = [event for event in events if event.get("type") == "recording"]
+    recordings = [event for event in events if event.get("type") in (
+        "recording", "voice_translation")]
     model_counts = {}
     for event in events:
         for entry in event.get("models", []):
@@ -710,7 +820,8 @@ def _usage_summary(events=None, now=None, repositories=None) -> dict:
     return {
         "recordings": len(recordings),
         "rewrites": sum(event.get("type") == "rewrite" for event in events),
-        "translations": sum(event.get("type") == "translation" for event in events),
+        "translations": sum(event.get("type") in (
+            "translation", "voice_translation") for event in events),
         "total_seconds": total_seconds,
         "average_seconds": total_seconds / len(recordings) if recordings else 0.0,
         "total_words": sum(max(0, int(event.get("word_count", 0) or 0))
@@ -783,6 +894,24 @@ def _save_app_config(repositories=None):
     refreshed = config_repository.load().to_legacy_mapping()
     APP_CONFIG.clear()
     APP_CONFIG.update(refreshed)
+
+
+def _persist_voice_translation_config(
+        config: VoiceTranslationConfig, repositories=None) -> VoiceTranslationConfig:
+    """Validate and atomically persist the dedicated voice preferences."""
+
+    validated = config.validate()
+    previous = APP_CONFIG.get("voice_translation")
+    APP_CONFIG["voice_translation"] = validated.to_mapping()
+    try:
+        _save_app_config(repositories)
+    except Exception:
+        if previous is None:
+            APP_CONFIG.pop("voice_translation", None)
+        else:
+            APP_CONFIG["voice_translation"] = previous
+        raise
+    return validated
 
 
 def _provider_key_candidate(provider, entered=""):
@@ -2375,6 +2504,37 @@ LANG_NAMES = {
     "ru": "Russian",
 }
 
+
+def _language_display_name(value: str) -> str:
+    """Return a safe prompt label for a BCP-47 language selection.
+
+    The provider route accepts regional/script tags (for example ``pt-BR``),
+    while the prompt catalogue intentionally keeps only a small set of base
+    names.  Resolve known tags through their base subtag and preserve an
+    unknown-but-valid tag instead of silently instructing the provider to use
+    English.
+    """
+    text = str(value or "").strip().replace("_", "-")
+    if not text:
+        return "English"
+    key = text.casefold()
+    if key == "auto":
+        return "the detected source language"
+    direct = LANG_NAMES.get(key)
+    if direct:
+        return direct
+    base = key.split("-", 1)[0]
+    return LANG_NAMES.get(base, text)
+
+
+def _provider_language_hint(value: str) -> str:
+    """Return the base ISO hint accepted by Whisper-compatible endpoints."""
+    text = str(value or "").strip().replace("_", "-")
+    if not text or text.casefold() == "auto":
+        return ""
+    return text.split("-", 1)[0].lower()
+
+
 STRINGS = {
     "en": {
         "ready": "Ready", "processing": "Processing\u2026", "too_short": "Too short",
@@ -2875,10 +3035,11 @@ STRINGS = {
 _HOTKEY_TRANSLATIONS = {
     "en": {
         "hotkeys_section": "Keyboard shortcuts",
-        "hotkeys_subtitle": "Configure the four ClarifyVoice global actions.",
+        "hotkeys_subtitle": "Configure the five ClarifyVoice global actions.",
         "hotkey_recording": "Record / stop",
         "hotkey_rewrite": "Rewrite selected text",
         "hotkey_translation": "Translate selected text",
+        "hotkey_voice_translation": "Translate voice",
         "hotkey_visibility": "Show / hide window",
         "hotkey_capture": "Capture",
         "hotkey_capture_prompt": "Press a shortcut…",
@@ -2897,10 +3058,11 @@ _HOTKEY_TRANSLATIONS = {
     },
     "pt": {
         "hotkeys_section": "Atalhos de teclado",
-        "hotkeys_subtitle": "Configure as quatro ações globais do ClarifyVoice.",
+        "hotkeys_subtitle": "Configure as cinco ações globais do ClarifyVoice.",
         "hotkey_recording": "Gravar / parar",
         "hotkey_rewrite": "Reescrever texto selecionado",
         "hotkey_translation": "Traduzir texto selecionado",
+        "hotkey_voice_translation": "Traduzir voz",
         "hotkey_visibility": "Mostrar / ocultar janela",
         "hotkey_capture": "Capturar",
         "hotkey_capture_prompt": "Pressione um atalho…",
@@ -2919,10 +3081,11 @@ _HOTKEY_TRANSLATIONS = {
     },
     "es": {
         "hotkeys_section": "Atajos de teclado",
-        "hotkeys_subtitle": "Configura las cuatro acciones globales de ClarifyVoice.",
+        "hotkeys_subtitle": "Configura las cinco acciones globales de ClarifyVoice.",
         "hotkey_recording": "Grabar / detener",
         "hotkey_rewrite": "Reescribir texto seleccionado",
         "hotkey_translation": "Traducir texto seleccionado",
+        "hotkey_voice_translation": "Traducir voz",
         "hotkey_visibility": "Mostrar / ocultar ventana",
         "hotkey_capture": "Capturar",
         "hotkey_capture_prompt": "Pulsa un atajo…",
@@ -2941,10 +3104,11 @@ _HOTKEY_TRANSLATIONS = {
     },
     "de": {
         "hotkeys_section": "Tastenkürzel",
-        "hotkeys_subtitle": "Die vier globalen ClarifyVoice-Aktionen konfigurieren.",
+        "hotkeys_subtitle": "Die fünf globalen ClarifyVoice-Aktionen konfigurieren.",
         "hotkey_recording": "Aufnehmen / stoppen",
         "hotkey_rewrite": "Ausgewählten Text umschreiben",
         "hotkey_translation": "Ausgewählten Text übersetzen",
+        "hotkey_voice_translation": "Sprache übersetzen",
         "hotkey_visibility": "Fenster anzeigen / ausblenden",
         "hotkey_capture": "Aufnehmen",
         "hotkey_capture_prompt": "Tastenkürzel drücken…",
@@ -2963,10 +3127,11 @@ _HOTKEY_TRANSLATIONS = {
     },
     "ru": {
         "hotkeys_section": "Сочетания клавиш",
-        "hotkeys_subtitle": "Настройте четыре глобальных действия ClarifyVoice.",
+        "hotkeys_subtitle": "Настройте пять глобальных действий ClarifyVoice.",
         "hotkey_recording": "Запись / остановка",
         "hotkey_rewrite": "Переписать выделенный текст",
         "hotkey_translation": "Перевести выделенный текст",
+        "hotkey_voice_translation": "Перевести голос",
         "hotkey_visibility": "Показать / скрыть окно",
         "hotkey_capture": "Задать",
         "hotkey_capture_prompt": "Нажмите сочетание…",
@@ -3243,13 +3408,22 @@ def _call_provider_audio(
             )
         connection = _provider_connection(provider, route)
         model = route.model_id
+        language_label = (
+            "the detected source language"
+            if str(lang).strip().casefold() in ("", "auto")
+            else _language_display_name(lang)
+        )
         instruction = (
             TRANSCRIPTION_INSTRUCTION if mode == "transcription" else PROMPT_INSTRUCTION
-        ).format(lang=LANG_NAMES.get(lang, "English"))
+        ).format(lang=language_label)
         request = TranscriptionRequest(
             audio_path=audio_path,
             model=model,
-            language=lang,
+            language=(
+                str(lang).strip()
+                if provider == LOCAL_ASR_PROVIDER_ID
+                else _provider_language_hint(lang)
+            ),
             instruction=instruction,
             prompt=(route.prompt or ("Transcribe this audio."
                 if mode == "transcription"
@@ -3364,7 +3538,7 @@ def _rewrite_with_provider(
             language=lang,
             instruction=(instruction or _workflow_instruction(
                 TRANSCRIPT_REWRITE_INSTRUCTION.format(
-                    lang=LANG_NAMES.get(lang, "English")), route.prompt)),
+                    lang=_language_display_name(lang)), route.prompt)),
             source_message=(source_message or _source_text_message(transcript)),
             temperature=temperature,
         )
@@ -3964,6 +4138,7 @@ class RecordingSession:
             audio_path=self.audio_path,
             audio_bytes=self.audio_path.read_bytes(),
             cancel_token=self.provider_cancel_token,
+            duration_seconds=max(0.0, time.time() - self.started_at),
         )
         self.mark_audio_snapshot_complete()
         if self.cancel_event.is_set():
@@ -4618,6 +4793,89 @@ class AppWorkflowProvider:
         )
 
 
+class AppVoiceTranslationProvider:
+    """Provider-registry adapter for the dedicated voice route.
+
+    The transcription route remains the normal audio route (including the
+    local-ASR opt-in/refinement policy), while translation always resolves the
+    independent route persisted under ``voice_translation``.  Capability
+    validation happens before either registry call.
+    """
+
+    @staticmethod
+    def transcribe(audio_source, source_language):
+        route = _workflow_route(WorkflowScope.TRANSCRIPTION)
+        if not route.enabled:
+            raise RuntimeError("Transcription workflow is disabled")
+        language = str(source_language or "").strip()
+        # A local sidecar remains raw by default.  Only the explicit
+        # local-ASR cloud-refinement opt-in may add a cloud refinement pass;
+        # cloud transcription routes keep the dedicated workflow's direct
+        # transcript semantics.
+        mode = (
+            "prompt"
+            if route.provider_id == LOCAL_ASR_PROVIDER_ID
+            and bool(APP_CONFIG.get("local_asr_cloud_refinement", False))
+            else "transcription"
+        )
+        result = call_transcription_provider(
+            audio_source.audio_path,
+            mode,
+            language,
+            audio_bytes=audio_source.audio_bytes,
+            cancel_token=audio_source.cancel_token,
+            route=route,
+            details=True,
+        )
+        if isinstance(result, TranscriptionResult):
+            typed_result = result
+        else:
+            typed_result = TranscriptionResult(
+                str(result), route.provider_id, route.model_id)
+        text = typed_result.text
+        if not text or text.startswith("[Error"):
+            raise RuntimeError(text or "Transcription returned no text")
+        return typed_result
+
+    @staticmethod
+    def translate(request: VoiceTranslationRequest):
+        route = request.route
+        provider = route.provider_id
+        model = route.model_id
+        if not route.enabled:
+            raise RuntimeError("Voice translation workflow is disabled")
+        if not model or not PROVIDER_REGISTRY.supports(
+                provider, ProviderCapability.TEXT_GENERATION):
+            raise RuntimeError("Voice translation requires a text-generation model")
+        target = str(request.target_language or "").strip()
+        if not target:
+            raise RuntimeError("Voice translation target language is required")
+        instruction = _workflow_instruction(
+            TRANSLATION_INSTRUCTION.format(
+                target_language=LANG_NAMES.get(target, target)),
+            route.prompt,
+        )
+        provider_request = TranslationRequest(
+            text=request.text,
+            model=model,
+            target_language=target,
+            instruction=instruction,
+            source_message=_translation_source_message(request.text),
+            temperature=0.0,
+        )
+        result = PROVIDER_REGISTRY.translate(
+            provider,
+            provider_request,
+            _provider_connection(provider, route),
+            request.cancel_event,
+        )
+        if not result.text or not result.text.strip():
+            raise RuntimeError("Provider returned an empty translation")
+        return TranslationResult(
+            result.text.strip(), result.provider_id, result.model, target
+        )
+
+
 class AppWorkflowClipboard:
     """Focus-safe clipboard transactions for the real Tk runtime."""
 
@@ -4631,6 +4889,51 @@ class AppWorkflowClipboard:
     @staticmethod
     def is_target_current(target):
         return bool(target.window) and _foreground_window_handle() == target.window
+
+    @staticmethod
+    def owns_clipboard():
+        """Return whether a bounded clipboard snapshot is currently possible.
+
+        Voice translation has no selection-copy transaction to own.  The
+        adapter still requires a readable snapshot before allowing a paste so
+        contention fails closed into the copy-only path.
+        """
+        try:
+            snapshot = _snapshot_windows_clipboard()
+        except Exception:
+            return False
+        return isinstance(snapshot, ClipboardSnapshot) and snapshot.restorable
+
+    @staticmethod
+    def publish(text, target, disposition):
+        """Publish a voice result, downgrading failed paste to copy-only."""
+        value = str(text or "").strip()
+        if not value:
+            return VoiceTranslationPublication.NONE
+        if disposition is VoiceTranslationPublication.PASTED:
+            safe = target is not None and AppWorkflowClipboard.is_target_current(target)
+            try:
+                pasted = _paste_generated_text(
+                    value,
+                    should_paste=safe,
+                    paste_predicate=(
+                        None
+                        if target is None
+                        else lambda: AppWorkflowClipboard.is_target_current(target)
+                    ),
+                )
+            except Exception:
+                # A transient paste failure must not discard the translated
+                # text; leave it copied and report the downgraded disposition.
+                _paste_generated_text(value, should_paste=False)
+                return VoiceTranslationPublication.COPY_ONLY
+            return (
+                VoiceTranslationPublication.PASTED
+                if pasted
+                else VoiceTranslationPublication.COPY_ONLY
+            )
+        _paste_generated_text(value, should_paste=False)
+        return VoiceTranslationPublication.COPY_ONLY
 
     @staticmethod
     def capture_selection(target):
@@ -4812,6 +5115,32 @@ class AppWorkflowStatistics:
                 provider, model, source, result, target_language),
             self.repositories,
         )
+
+    def record_voice_translation(
+            self, config: VoiceTranslationConfig, state, duration_seconds):
+        """Record both provider calls made by the voice workflow."""
+
+        transcription_route = _workflow_route(WorkflowScope.TRANSCRIPTION)
+        transcription_mode = (
+            "prompt"
+            if (transcription_route.provider_id == LOCAL_ASR_PROVIDER_ID
+                and bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))
+            else "transcription"
+        )
+        transcription_context = _recording_usage_context(transcription_mode)
+        transcription_context["mode"] = "voice_translation"
+        event = _build_voice_translation_usage_event(
+            transcription_context,
+            getattr(state, "transcription_provider", ""),
+            getattr(state, "transcription_model", ""),
+            config.route.provider_id,
+            config.route.model_id,
+            duration_seconds,
+            state.raw_transcript,
+            state.translated_text,
+            config.target_language,
+        )
+        _record_usage_event(event, self.repositories)
 
 
 # ---------------------------------------------------------------------------
@@ -5786,6 +6115,11 @@ class App(ctk.CTk):
         else:
             self._workflow.finish("translation")
 
+    @property
+    def _voice_translation_active(self):
+        runtime = getattr(self, "_voice_translation_runtime", None)
+        return bool(runtime is not None and runtime.active)
+
     def __init__(self, start_hidden=False, repositories=None):
         super().__init__()
         self.repositories = repositories or APP_REPOSITORIES
@@ -5857,6 +6191,8 @@ class App(ctk.CTk):
         self._workflow_pending_status = None
         self._workflow_pending_operation = None
         self._workflow_release_requested = False
+        self._voice_translation_runtime = None
+        self._voice_translation_target_executable = None
 
         sw = self.winfo_screenwidth()
         self.geometry(f"380x48+{sw - 400}+16")
@@ -5877,6 +6213,15 @@ class App(ctk.CTk):
             AppWorkflowScheduler(self),
         )
         self._workflow_service.subscribe(self._on_workflow_state)
+        self._voice_translation_runtime = VoiceTranslationRuntime(
+            AppVoiceTranslationProvider(),
+            self._workflow_clipboard,
+            self._new_workflow_recording_session,
+            AppWorkflowScheduler(self),
+            _voice_translation_config,
+            on_state=self._on_voice_translation_state,
+            on_usage=self._record_voice_translation_usage,
+        )
         # Installed local-ASR verification hashes the published model and
         # runtime. Keep that disk work off the Tk/startup thread; settings
         # receives a checking state and then the verified result.
@@ -6008,6 +6353,8 @@ class App(ctk.CTk):
                     self._rewrite_hotkey()
                 elif action == "translation_hotkey":
                     self._translation_hotkey()
+                elif action == "voice_translation_hotkey":
+                    self._voice_translation_hotkey()
                 elif action == "escape":
                     self._on_escape()
                 elif action == "quit":
@@ -6099,6 +6446,9 @@ class App(ctk.CTk):
 
     def _shutdown_recording(self, timeout=None):
         """Stop the active session and leave a watcher for late upload cleanup."""
+        runtime = getattr(self, "_voice_translation_runtime", None)
+        if runtime is not None and runtime.active:
+            runtime.cancel()
         service = getattr(self, "_workflow_service", None)
         if service is not None and service.state.phase is not WorkflowPhase.READY:
             service.cancel_active()
@@ -6337,6 +6687,20 @@ class App(ctk.CTk):
             tray = self
         return _apply_hotkey_settings_transaction(
             settings, self.repositories, tray)
+
+    @property
+    def voice_translation_config(self) -> VoiceTranslationConfig:
+        """Return the persisted dedicated source/target and route settings."""
+        return _voice_translation_config()
+
+    def apply_voice_translation_config(self, config) -> VoiceTranslationConfig:
+        """Validate and persist voice settings through the repository boundary."""
+        candidate = (
+            config
+            if isinstance(config, VoiceTranslationConfig)
+            else VoiceTranslationConfig.from_mapping(config)
+        )
+        return _persist_voice_translation_config(candidate, self.repositories)
 
     def _sync_escape_hotkey(self, enabled):
         tray_icon = getattr(self, "_tray_icon", None)
@@ -6798,6 +7162,10 @@ class App(ctk.CTk):
     def _on_escape(self, e=None):
         if self._translation_picker is not None:
             self._cancel_translation_picker()
+        elif getattr(self, "_voice_translation_active", False):
+            runtime = getattr(self, "_voice_translation_runtime", None)
+            if runtime is not None:
+                runtime.cancel()
         elif getattr(self, "_workflow_service", None) is not None:
             phase = self._workflow_service.state.phase
             if phase is WorkflowPhase.RECORDING:
@@ -6873,11 +7241,156 @@ class App(ctk.CTk):
             self._idle_bar.winfo_reqheight(), result_content_height)
         self.geometry(f"400x{h}+{x}+{y}")
 
+    # -- Dedicated voice translation --
+    def _voice_translation_hotkey(self):
+        runtime = getattr(self, "_voice_translation_runtime", None)
+        service = getattr(self, "_workflow_service", None)
+        if runtime is None or not IS_WIN or getattr(self, "_closing", False):
+            return
+        if runtime.active:
+            if runtime.phase is VoiceTranslationPhase.RECORDING:
+                runtime.stop()
+            else:
+                runtime.cancel()
+            return
+        if service is not None and service.state.phase is not WorkflowPhase.READY:
+            return
+        if self._translation_active or self._rewrite_active:
+            return
+        target = self._workflow_target()
+        if target is None:
+            return
+        self._voice_translation_target_executable = target.executable
+        self._was_hidden_before_recording = not self.winfo_viewable()
+        if self.result_frame.winfo_manager():
+            self._hide_result()
+        if not runtime.start(target):
+            # Do not let an overlap/factory failure leave a stale hidden-origin
+            # flag that could withdraw the window after a later operation.
+            self._was_hidden_before_recording = False
+
+    def _on_voice_translation_state(self, event: VoiceTranslationRuntimeState):
+        """Marshal runtime snapshots onto Tk and keep raw fallback visible."""
+
+        def apply():
+            if self._closing:
+                return
+            runtime = getattr(self, "_voice_translation_runtime", None)
+            if runtime is not None and event.operation_id != runtime.operation_id:
+                return
+            phase = event.phase
+            if phase is VoiceTranslationPhase.RECORDING:
+                self._update_focused_icon(self._voice_translation_target_executable)
+                self._set_state("recording")
+                return
+            if phase is VoiceTranslationPhase.TRANSCRIBING:
+                self._set_state("processing")
+                return
+            if phase is VoiceTranslationPhase.TRANSLATING:
+                self._update_focused_icon(self._voice_translation_target_executable)
+                self._set_state("translating")
+                return
+
+            def voice_terminal_is_current(
+                    operation_id, *, require_success_ui=False):
+                current_runtime = getattr(
+                    self, "_voice_translation_runtime", None)
+                if (current_runtime is not None
+                        and current_runtime.operation_id != operation_id):
+                    return False
+                service = getattr(self, "_workflow_service", None)
+                service_state = getattr(service, "state", None)
+                if (service_state is not None
+                        and service_state.phase is not WorkflowPhase.READY):
+                    return False
+                if (require_success_ui and hasattr(self, "app_state")
+                        and self.app_state != "success"):
+                    return False
+                return True
+
+            result = event.workflow_state
+            if phase is VoiceTranslationPhase.COMPLETED:
+                text = result.published_text if result is not None else ""
+                status = (
+                    "translation_copied"
+                    if result is not None
+                    and result.publication is VoiceTranslationPublication.COPY_ONLY
+                    else None
+                )
+                completed_operation_id = event.operation_id
+
+                def success_is_current(*, delayed=False):
+                    return voice_terminal_is_current(
+                        completed_operation_id,
+                        require_success_ui=delayed,
+                    )
+
+                def finish_success(*, delayed=False):
+                    if not success_is_current(delayed=delayed):
+                        return
+                    self._set_state(
+                        "ready",
+                        self._t(status) if status else "",
+                        after_ready=(lambda: self._show_result(text))
+                        if text
+                        else None,
+                    )
+
+                if text:
+                    if not success_is_current():
+                        return
+                    self._show_success_then(
+                        lambda: finish_success(delayed=True))
+                else:
+                    finish_success()
+                return
+            if phase is VoiceTranslationPhase.FAILED:
+                if not voice_terminal_is_current(event.operation_id):
+                    return
+                error_code = getattr(event, "error_code", "")
+                if error_code == "MicrophoneUnavailableError":
+                    self._set_state("microphone_unavailable")
+                    return
+                if error_code == "RecordingEncodingError":
+                    self._set_state("ready", self._t("no_audio"))
+                    return
+                text = result.published_text if result is not None else ""
+                if not text and result is not None:
+                    text = result.translated_text or result.raw_transcript
+                self._set_state(
+                    "ready",
+                    self._t("translation_failed"),
+                    after_ready=(lambda: self._show_result(text))
+                    if text
+                    else None,
+                )
+                return
+            if phase is VoiceTranslationPhase.CANCELLED:
+                if not voice_terminal_is_current(event.operation_id):
+                    return
+                self._set_state("ready")
+
+        try:
+            self.after(0, apply)
+        except tk.TclError:
+            if not self._closing:
+                raise
+
+    def _record_voice_translation_usage(
+            self, config: VoiceTranslationConfig, state, duration_seconds):
+        """Record anonymous metadata without persisting transcript contents."""
+        AppWorkflowStatistics(self.repositories).record_voice_translation(
+            config,
+            state,
+            duration_seconds,
+        )
+
     # -- Selected-text translation --
     def _translation_hotkey(self):
         service = getattr(self, "_workflow_service", None)
         if service is not None:
-            if not IS_WIN or service.state.phase is not WorkflowPhase.READY:
+            if (not IS_WIN or service.state.phase is not WorkflowPhase.READY
+                    or getattr(self, "_voice_translation_active", False)):
                 return
             target = self._workflow_target()
             if target is None:
@@ -7253,6 +7766,8 @@ class App(ctk.CTk):
 
     # -- Selected-text rewrite --
     def _rewrite_hotkey(self):
+        if getattr(self, "_voice_translation_active", False):
+            return
         service = getattr(self, "_workflow_service", None)
         if service is not None:
             if not IS_WIN or service.state.phase is not WorkflowPhase.READY:
@@ -7587,6 +8102,8 @@ class App(ctk.CTk):
 
     # -- Recording --
     def _recording_hotkey(self):
+        if getattr(self, "_voice_translation_active", False):
+            return
         service = getattr(self, "_workflow_service", None)
         if service is not None:
             phase = service.state.phase
@@ -9886,6 +10403,7 @@ class App(ctk.CTk):
             HotkeyAction.RECORDING: "hotkey_recording",
             HotkeyAction.REWRITE: "hotkey_rewrite",
             HotkeyAction.TRANSLATION: "hotkey_translation",
+            HotkeyAction.VOICE_TRANSLATION: "hotkey_voice_translation",
             HotkeyAction.VISIBILITY: "hotkey_visibility",
         }
         hotkey_mode_labels = {
@@ -9956,7 +10474,8 @@ class App(ctk.CTk):
                         fg_color="#303030")
                 else:
                     button.configure(
-                        text=selected.definition(action).display,
+                        text=_hotkey_definition_for_settings(
+                            selected, action).display,
                         fg_color="#242424")
             hotkey_mode_menu.set(hotkey_mode_labels[selected.activation_mode])
             if hotkey_settings_controller.push_to_talk_supported:

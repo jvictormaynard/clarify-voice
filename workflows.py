@@ -66,6 +66,10 @@ class RecordingSnapshot:
     audio_path: Path
     audio_bytes: bytes
     cancel_token: Any = None
+    # Capture duration is measured at snapshot time, before the temporary WAV
+    # is handed to a provider.  Consumers that do not own a recorder can leave
+    # it unset and use their own bounded fallback.
+    duration_seconds: float | None = None
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,7 @@ for _provider_variable in (
 import app
 from desktop_state import WorkflowController
 from provider_http import AuthenticationError
+from repositories import LocalConfigRepository
 from version import __version__
 from update_security import UpdateTransportError
 import windows_hotkeys
@@ -82,6 +83,17 @@ class ProviderTests(unittest.TestCase):
             payload = json.loads(destination.read_text(encoding="utf-8"))
 
         self.assertEqual(payload["application"]["version"], __version__)
+
+    def test_app_first_run_defaults_include_voice_translation_hotkey(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = LocalConfigRepository(
+                Path(directory) / "config.json", defaults=app.DEFAULT_CONFIG)
+            settings = repository.load().hotkeys
+
+        self.assertEqual(
+            settings.definition("voice_translation_hotkey").display,
+            "Alt+V",
+        )
 
     def test_typed_http_errors_are_localized_without_response_content(self):
         app.APP_CONFIG["ui_language"] = "pt"
@@ -233,7 +245,8 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual(actions, {
             "recording_hotkey", "rewrite_hotkey",
-            "translation_hotkey", "toggle_visibility",
+            "translation_hotkey", "voice_translation_hotkey",
+            "toggle_visibility",
         })
         self.assertEqual(app.WindowsTrayIcon.WM_HOTKEY, 0x0312)
 
@@ -477,6 +490,108 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(kwargs["headers"], {"x-goog-api-key": "gemini-key"})
 
     @patch("app.PROVIDER_HTTP.session.post")
+    def test_cloud_transcription_prompt_resolves_regional_source_language(self, post):
+        app.APP_CONFIG.update({
+            "gemini_api_key": "gemini-key",
+            "gemini_base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "gemini_model": "gemini-2.5-flash",
+        })
+        post.return_value = FakeResponse({
+            "candidates": [{"content": {"parts": [{"text": "texto"}]}}]
+        })
+
+        self.assertEqual(
+            app.call_gemini(self.audio_path, "transcription", "pt-BR"),
+            "texto",
+        )
+        instruction = post.call_args.kwargs["json"]["systemInstruction"]["parts"][0]["text"]
+        self.assertIn("Brazilian Portuguese", instruction)
+        self.assertNotIn("English", instruction)
+
+    def test_language_display_name_preserves_unknown_valid_bcp47_tag(self):
+        self.assertEqual(app._language_display_name("de-DE"), "German")
+        self.assertEqual(app._language_display_name("zh-Hant"), "zh-Hant")
+        self.assertEqual(app._language_display_name("fr-FR"), "fr-FR")
+
+    def test_language_display_name_maps_auto_to_detected_source_language(self):
+        self.assertEqual(
+            app._language_display_name("auto"),
+            "the detected source language",
+        )
+
+    def test_local_prompt_refinement_maps_auto_language_before_cloud_call(self):
+        original = app.APP_CONFIG.copy()
+        try:
+            app.APP_CONFIG.update({
+                "transcription_provider": "local_asr",
+                "local_asr_model": "ggml-small",
+                "local_asr_cloud_refinement": True,
+                "workflows": {
+                    **app.APP_CONFIG.get("workflows", {}),
+                    "local_asr_refinement": {
+                        "provider_id": "openai",
+                        "model_id": "gpt-4o-mini",
+                        "enabled": True,
+                        "independent": True,
+                    },
+                },
+            })
+            with patch.object(
+                    app.PROVIDER_REGISTRY, "transcribe",
+                    return_value=app.TranscriptionResult(
+                        "local transcript", "local_asr", "ggml-small")), \
+                    patch.object(
+                        app.PROVIDER_REGISTRY, "rewrite",
+                        return_value=app.TranscriptionResult(
+                            "refined transcript", "openai", "gpt-4o-mini")) as rewrite:
+                result = app._call_provider_audio(
+                    "local_asr", self.audio_path, "prompt", "auto",
+                    audio_bytes=b"RIFF")
+
+            self.assertEqual(result, "refined transcript")
+            instruction = rewrite.call_args.args[1].instruction
+            self.assertIn(
+                "Output MUST be in the detected source language.",
+                instruction,
+            )
+            self.assertNotIn("Output MUST be in auto.", instruction)
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original)
+
+    @patch("app.PROVIDER_HTTP.session.post")
+    def test_openai_whisper_normalizes_regional_language_hint(self, post):
+        app.APP_CONFIG.update({
+            "openai_api_key": "openai-key",
+            "openai_base_url": "https://api.openai.com/v1",
+            "openai_audio_model": "whisper-1",
+        })
+        post.return_value = FakeResponse({"text": "transcript"})
+
+        self.assertEqual(
+            app.call_openai(self.audio_path, "transcription", "pt-BR"),
+            "transcript",
+        )
+
+        self.assertEqual(post.call_args.kwargs["data"]["language"], "pt")
+
+    @patch("app.PROVIDER_HTTP.session.post")
+    def test_groq_whisper_normalizes_regional_language_hint(self, post):
+        app.APP_CONFIG.update({
+            "groq_api_key": "groq-key",
+            "groq_base_url": "https://api.groq.com/openai/v1",
+            "groq_audio_model": "whisper-large-v3-turbo",
+        })
+        post.return_value = FakeResponse({"text": "transcript"})
+
+        self.assertEqual(
+            app.call_groq(self.audio_path, "transcription", "de-DE"),
+            "transcript",
+        )
+
+        self.assertEqual(post.call_args.kwargs["data"]["language"], "de")
+
+    @patch("app.PROVIDER_HTTP.session.post")
     def test_gemini_custom_proxy_uses_bearer_and_v1beta(self, post):
         app.APP_CONFIG.update({
             "gemini_api_key": "proxy-key",
@@ -510,6 +625,21 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(kwargs["headers"], {"Authorization": "Bearer openai-key"})
         self.assertEqual(kwargs["data"]["model"], "gpt-4o-transcribe")
         self.assertIn("file", kwargs["files"])
+
+    @patch("app.PROVIDER_HTTP.session.post")
+    def test_openai_whisper_omits_language_for_automatic_detection(self, post):
+        app.APP_CONFIG.update({
+            "openai_api_key": "openai-key",
+            "openai_base_url": "https://api.openai.com/v1",
+            "openai_audio_model": "whisper-1",
+        })
+        post.return_value = FakeResponse({"text": "detected transcript"})
+
+        self.assertEqual(
+            app.call_openai(self.audio_path, "transcription", "auto"),
+            "detected transcript",
+        )
+        self.assertNotIn("language", post.call_args.kwargs["data"])
 
     @patch("app.PROVIDER_HTTP.session.post")
     def test_openai_prompt_mode_rewrites_the_whisper_transcript(self, post):
@@ -612,6 +742,37 @@ class ProviderTests(unittest.TestCase):
         route.assert_called_once_with(
             "groq", self.audio_path, "transcription", "en",
             audio_bytes=None, cancel_token=None)
+
+    def test_voice_provider_preserves_typed_transcription_details(self):
+        route = SimpleNamespace(
+            provider_id="gemini",
+            model_id="gemini-audio",
+            enabled=True,
+        )
+        detailed = app.TranscriptionResult(
+            "refined transcript",
+            "gemini",
+            "gemini-audio",
+            raw_text="rough transcript",
+            refined_text="refined transcript",
+            refinement_provider_id="openai",
+            refinement_model="gpt-4o-mini",
+        )
+        audio_source = SimpleNamespace(
+            audio_path=self.audio_path,
+            audio_bytes=b"audio",
+            cancel_token=None,
+        )
+        with patch.object(app, "_workflow_route", return_value=route), \
+                patch.object(
+                    app, "call_transcription_provider",
+                    return_value=detailed) as transcribe:
+            result = app.AppVoiceTranslationProvider.transcribe(
+                audio_source, "auto")
+
+        self.assertIs(result, detailed)
+        transcribe.assert_called_once()
+        self.assertTrue(transcribe.call_args.kwargs["details"])
 
     @patch("app.PROVIDER_HTTP.session.post")
     def test_selected_text_rewrite_preserves_language_with_openai(self, post):
@@ -1483,6 +1644,305 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
 
 
 class WorkflowAppBridgeTests(unittest.TestCase):
+    def test_voice_translation_hotkey_preserves_hidden_origin(self):
+        target = app.SelectionTarget(77, "editor.exe")
+        observed_hidden_state = []
+        runtime = SimpleNamespace(
+            active=False,
+        )
+        harness = SimpleNamespace(
+            _voice_translation_runtime=runtime,
+            _workflow_service=SimpleNamespace(
+                state=SimpleNamespace(phase=app.WorkflowPhase.READY)),
+            _translation_active=False,
+            _rewrite_active=False,
+            _workflow_target=Mock(return_value=target),
+            _voice_translation_target_executable=None,
+            _was_hidden_before_recording=False,
+            winfo_viewable=Mock(return_value=False),
+            result_frame=SimpleNamespace(winfo_manager=Mock(return_value=False)),
+            _closing=False,
+        )
+
+        def start(_target):
+            observed_hidden_state.append(harness._was_hidden_before_recording)
+            return True
+
+        runtime.start = Mock(side_effect=start)
+
+        with patch.object(app, "IS_WIN", True):
+            app.App._voice_translation_hotkey(harness)
+
+        self.assertTrue(harness._was_hidden_before_recording)
+        self.assertEqual(observed_hidden_state, [True])
+        runtime.start.assert_called_once_with(target)
+
+    def test_voice_translation_ignores_stale_intermediate_events(self):
+        set_state = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _set_state=set_state,
+            after=lambda _delay, callback: callback(),
+        )
+
+        for phase in (
+            app.VoiceTranslationPhase.RECORDING,
+            app.VoiceTranslationPhase.TRANSCRIBING,
+            app.VoiceTranslationPhase.TRANSLATING,
+            app.VoiceTranslationPhase.COMPLETED,
+            app.VoiceTranslationPhase.FAILED,
+            app.VoiceTranslationPhase.CANCELLED,
+        ):
+            with self.subTest(phase=phase):
+                app.App._on_voice_translation_state(
+                    harness,
+                    app.VoiceTranslationRuntimeState(phase, 1),
+                )
+
+        set_state.assert_not_called()
+
+    def test_voice_translation_maps_microphone_failure_to_existing_state(self):
+        set_state = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _set_state=set_state,
+            after=lambda _delay, callback: callback(),
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.FAILED,
+                2,
+                error_code="MicrophoneUnavailableError",
+            ),
+        )
+
+        set_state.assert_called_once_with("microphone_unavailable")
+
+    def test_voice_translation_maps_silent_recording_to_no_audio(self):
+        set_state = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _set_state=set_state,
+            _t=lambda key: key,
+            after=lambda _delay, callback: callback(),
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.FAILED,
+                2,
+                error_code="RecordingEncodingError",
+            ),
+        )
+
+        set_state.assert_called_once_with("ready", "no_audio")
+
+    def test_voice_translation_failure_ignores_new_workflow(self):
+        set_state = Mock()
+        show_result = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _workflow_service=SimpleNamespace(
+                state=SimpleNamespace(phase=app.WorkflowPhase.RECORDING)),
+            _set_state=set_state,
+            _show_result=show_result,
+            _t=lambda key: key,
+            after=lambda _delay, callback: callback(),
+            app_state="recording",
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.FAILED,
+                2,
+                workflow_state=SimpleNamespace(
+                    published_text="stale translation",
+                    translated_text="stale translation",
+                    raw_transcript="stale transcript",
+                ),
+            ),
+        )
+
+        set_state.assert_not_called()
+        show_result.assert_not_called()
+
+    def test_voice_translation_cancellation_ignores_new_workflow(self):
+        set_state = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _workflow_service=SimpleNamespace(
+                state=SimpleNamespace(phase=app.WorkflowPhase.RECORDING)),
+            _set_state=set_state,
+            after=lambda _delay, callback: callback(),
+            app_state="recording",
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.CANCELLED,
+                2,
+            ),
+        )
+
+        set_state.assert_not_called()
+
+        harness._workflow_service.state.phase = app.WorkflowPhase.READY
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.CANCELLED,
+                2,
+            ),
+        )
+        set_state.assert_called_once_with("ready")
+
+    def test_voice_translation_failure_shows_retained_translation_or_raw_text(self):
+        show_result = Mock()
+        set_state = Mock()
+
+        def set_state_and_finish(*args, **kwargs):
+            set_state(*args, **kwargs)
+            callback = kwargs.get("after_ready")
+            if callback is not None:
+                callback()
+
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _set_state=set_state_and_finish,
+            _show_result=show_result,
+            _t=lambda key: key,
+            after=lambda _delay, callback: callback(),
+        )
+        for translated, expected in (
+                ("translated text", "translated text"),
+                ("", "raw transcript")):
+            with self.subTest(expected=expected):
+                state = SimpleNamespace(
+                    published_text="",
+                    translated_text=translated,
+                    raw_transcript="raw transcript",
+                )
+                app.App._on_voice_translation_state(
+                    harness,
+                    app.VoiceTranslationRuntimeState(
+                        app.VoiceTranslationPhase.FAILED,
+                        2,
+                        workflow_state=state,
+                    ),
+                )
+
+        self.assertEqual(set_state.call_count, 2)
+        self.assertEqual(
+            show_result.call_args_list,
+            [call("translated text"), call("raw transcript")],
+        )
+
+    def test_voice_translation_success_callback_ignores_superseded_operation(self):
+        deferred = []
+        states = []
+        results = []
+        runtime = SimpleNamespace(operation_id=2)
+        service = SimpleNamespace(
+            state=SimpleNamespace(phase=app.WorkflowPhase.READY))
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=runtime,
+            _workflow_service=service,
+            _show_success_then=lambda callback: deferred.append(callback),
+            _set_state=lambda *args, **kwargs: states.append((args, kwargs)),
+            _show_result=results.append,
+            _t=lambda key: key,
+            after=lambda _delay, callback: callback(),
+            app_state="success",
+        )
+        result = SimpleNamespace(
+            published_text="old translation",
+            publication=app.VoiceTranslationPublication.PASTED,
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.COMPLETED,
+                2,
+                workflow_state=result,
+            ),
+        )
+        self.assertEqual(len(deferred), 1)
+
+        runtime.operation_id = 3
+        service.state.phase = app.WorkflowPhase.RECORDING
+        harness.app_state = "recording"
+        deferred[0]()
+
+        self.assertEqual(states, [])
+        self.assertEqual(results, [])
+
+        service.state.phase = app.WorkflowPhase.READY
+        harness.app_state = "success"
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.COMPLETED,
+                3,
+                workflow_state=SimpleNamespace(
+                    published_text="current translation",
+                    publication=app.VoiceTranslationPublication.PASTED,
+                ),
+            ),
+        )
+        self.assertEqual(len(deferred), 2)
+        deferred[1]()
+
+        self.assertEqual(len(states), 1)
+        self.assertEqual(states[0][0], ("ready", ""))
+        states[0][1]["after_ready"]()
+        self.assertEqual(results, ["current translation"])
+
+    def test_voice_translation_skips_stale_success_before_animation(self):
+        show_success_then = Mock()
+        set_state = Mock()
+        show_result = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _workflow_service=SimpleNamespace(
+                state=SimpleNamespace(phase=app.WorkflowPhase.RECORDING)),
+            _show_success_then=show_success_then,
+            _set_state=set_state,
+            _show_result=show_result,
+            _t=lambda key: key,
+            after=lambda _delay, callback: callback(),
+            app_state="recording",
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.COMPLETED,
+                2,
+                workflow_state=SimpleNamespace(
+                    published_text="stale translation",
+                    publication=app.VoiceTranslationPublication.PASTED,
+                ),
+            ),
+        )
+
+        show_success_then.assert_not_called()
+        set_state.assert_not_called()
+        show_result.assert_not_called()
+
     def test_dictation_uses_platform_copy_and_paste_on_non_windows(self):
         target = app.SelectionTarget(77, "editor.exe")
         with patch.object(app, "IS_WIN", False), \
@@ -3028,6 +3488,116 @@ class UsageStatisticsTests(unittest.TestCase):
         self.assertGreaterEqual(event["estimated_cost_usd"], 0.006)
         self.assertNotIn("text", event)
         self.assertNotIn("transcript", event)
+
+    def test_voice_translation_statistics_include_transcription_and_translation(self):
+        context = {
+            "provider": "groq",
+            "model": "whisper-large-v3-turbo",
+            "mode": "voice_translation",
+            "execution": "cloud",
+            "refinement_provider": "",
+            "refinement_model": "",
+        }
+        config = SimpleNamespace(
+            route=SimpleNamespace(
+                provider_id="openai", model_id="gpt-4o-mini"),
+            target_language="en",
+        )
+        state = SimpleNamespace(
+            raw_transcript="Olá do microfone",
+            translated_text="Hello from the microphone",
+        )
+
+        with patch.object(app, "_workflow_route",
+                          return_value=SimpleNamespace(provider_id="groq")), \
+                patch.object(app, "_recording_usage_context",
+                             return_value=context), \
+                patch.object(app, "_record_usage_event") as record_usage:
+            app.AppWorkflowStatistics(object()).record_voice_translation(
+                config, state, 45.0)
+
+        record_usage.assert_called_once()
+        event = record_usage.call_args.args[0]
+        self.assertEqual(event["type"], "voice_translation")
+        self.assertEqual(event["duration_seconds"], 45.0)
+        self.assertEqual(
+            [(entry["provider"], entry["model"], entry["purpose"])
+             for entry in event["models"]],
+            [
+                ("groq", "whisper-large-v3-turbo", "transcription"),
+                ("openai", "gpt-4o-mini", "translation"),
+            ],
+        )
+        self.assertGreater(event["estimated_cost_usd"], 0.0)
+
+        summary = app._usage_summary([event], now=event["timestamp"])
+        self.assertEqual(summary["recordings"], 1)
+        self.assertEqual(summary["translations"], 1)
+        self.assertEqual(summary["total_seconds"], 45.0)
+        self.assertEqual(summary["model_calls"], 2)
+
+    def test_voice_translation_usage_tracks_audio_and_text_legs(self):
+        config = app.VoiceTranslationConfig()
+        state = SimpleNamespace(
+            transcription_provider="openai",
+            transcription_model="whisper-1",
+            raw_transcript="A short source transcript",
+            translated_text="Um texto curto traduzido",
+        )
+        with patch.object(
+                app, "_recording_usage_context", return_value={
+                    "provider": "groq",
+                    "model": "whisper-large-v3",
+                    "mode": "voice_translation",
+                    "refinement_provider": "",
+                    "refinement_model": "",
+                }), patch.object(app, "_record_usage_event") as record_usage:
+            app.AppWorkflowStatistics(None).record_voice_translation(
+                config, state, 45.5)
+
+        record_usage.assert_called_once()
+        event = record_usage.call_args.args[0]
+        self.assertEqual(event["type"], "voice_translation")
+        self.assertEqual(event["duration_seconds"], 45.5)
+        self.assertEqual(event["transcription_provider"], "openai")
+        self.assertEqual(event["transcription_model"], "whisper-1")
+        self.assertEqual(event["translation_provider"], "openai")
+        self.assertEqual(event["translation_model"], "gpt-4o-mini")
+        self.assertEqual(
+            [(entry["provider"], entry["model"], entry["purpose"])
+             for entry in event["models"]],
+            [
+                ("openai", "whisper-1", "transcription"),
+                ("openai", "gpt-4o-mini", "translation"),
+            ],
+        )
+        self.assertGreater(event["estimated_cost_usd"], 0.0045)
+        self.assertNotIn("text", event)
+        self.assertNotIn("transcript", event)
+
+    def test_summary_counts_voice_translation_as_recording_and_translation(self):
+        now = 2_000_000.0
+        summary = app._usage_summary([
+            {
+                "timestamp": now,
+                "type": "voice_translation",
+                "duration_seconds": 45.5,
+                "word_count": 5,
+                "estimated_cost_usd": 0.02,
+                "cost_complete": True,
+                "models": [
+                    {"provider": "openai", "model": "whisper-1"},
+                    {"provider": "openai", "model": "gpt-4o-mini"},
+                ],
+            },
+        ], now=now)
+
+        self.assertEqual(summary["recordings"], 1)
+        self.assertEqual(summary["translations"], 1)
+        self.assertEqual(summary["total_seconds"], 45.5)
+        self.assertEqual(summary["total_words"], 5)
+        self.assertEqual(summary["model_calls"], 2)
+        self.assertEqual(summary["total_cost_usd"], 0.02)
 
     def test_summary_ranks_models_and_aggregates_recording_metrics(self):
         now = 2_000_000.0

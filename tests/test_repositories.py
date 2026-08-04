@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import repositories
+from hotkey_config import HotkeyAction
 from provider_adapters import OpenAICompatibleAdapter
 from provider_registry import build_provider_registry
 from provider_types import ProviderCapability, ProviderMetadata
@@ -23,6 +24,7 @@ from secret_store import (
     SecretStoreCorruptedError,
     SecretStoreUnavailableError,
 )
+from voice_translation import VoiceTranslationConfig, VoiceTranslationLanguages, VoiceTranslationRoute
 
 
 _TEST_HOME = tempfile.TemporaryDirectory(prefix="clarifyvoice-repository-tests-")
@@ -43,6 +45,27 @@ class DeleteReadbackStore(MemorySecretStore):
 
 
 class ConfigurationRepositoryTests(unittest.TestCase):
+    def test_voice_translation_preferences_survive_repository_round_trip(self):
+        config = AppConfig.from_mapping({
+            "voice_translation": VoiceTranslationConfig(
+                languages=VoiceTranslationLanguages("pt-BR", "de-DE"),
+                route=VoiceTranslationRoute(
+                    provider_id="groq",
+                    model_id="llama-3.3-70b-versatile",
+                    prompt="Translate literally.",
+                ),
+            ).to_mapping(),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            repository = LocalConfigRepository(Path(directory) / "config.json")
+            repository.save(config)
+            loaded = repository.load()
+
+        self.assertEqual(loaded.voice_translation, config.voice_translation)
+        self.assertEqual(
+            loaded.to_mapping()["voice_translation"]["target_language"], "de-DE"
+        )
+
     def test_local_asr_selection_and_cloud_refinement_opt_in_round_trip(self):
         config = AppConfig.from_mapping({
             "transcription_provider": "local_asr",
@@ -402,6 +425,28 @@ class ConfigurationRepositoryTests(unittest.TestCase):
         self.assertEqual(config.openai.audio_model, "whisper-1")
         self.assertEqual(config.gemini.text_model, "")
         self.assertFalse(hasattr(config, "unknown_future_setting"))
+
+    def test_legacy_config_does_not_gain_voice_hotkey_on_upgrade(self):
+        import app
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "transcription_provider": "openai",
+                "ui_language": "en",
+            }), encoding="utf-8")
+
+            config = LocalConfigRepository(
+                path, defaults=app.DEFAULT_CONFIG).load()
+
+        self.assertNotIn(HotkeyAction.VOICE_TRANSLATION, config.hotkeys.hotkeys)
+
+    def test_first_run_defaults_include_voice_hotkey(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = LocalConfigRepository(
+                Path(directory) / "config.json").load()
+
+        self.assertIn(HotkeyAction.VOICE_TRANSLATION, config.hotkeys.hotkeys)
 
     def test_invalid_values_fall_back_without_crashing(self):
         with tempfile.TemporaryDirectory() as directory:

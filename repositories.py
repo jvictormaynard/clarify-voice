@@ -39,6 +39,7 @@ from workflow_config import (
     validate_workflow_config,
     validate_workflow_route,
 )
+from voice_translation import VoiceTranslationConfig
 
 __all__ = [
     "AppConfig", "ApplicationRepositories", "ConfigRepository",
@@ -100,6 +101,7 @@ def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[s
         "history_enabled": False,
         "history_retention_days": 30,
         "autostart": False,
+        "voice_translation": VoiceTranslationConfig().to_mapping(),
         # The nested value is intentionally present in the defaults mapping so
         # first-run and legacy flat files both receive the same typed bindings.
         # HotkeySettings.from_mapping() repairs malformed entries one by one.
@@ -160,6 +162,8 @@ class AppConfig:
     history_retention_days: int | None = 30
     hotkeys: HotkeySettings = field(default_factory=HotkeySettings.defaults)
     workflows: WorkflowConfig = field(default_factory=WorkflowConfig)
+    voice_translation: VoiceTranslationConfig = field(
+        default_factory=VoiceTranslationConfig)
 
     @classmethod
     def from_mapping(
@@ -266,9 +270,28 @@ class AppConfig:
                     or history_retention_days < 0):
                 history_retention_days = 30
 
-        supplied_hotkeys = (
-            values.get("hotkeys") if isinstance(values, Mapping) else None)
-        hotkey_payload = supplied_hotkeys if supplied_hotkeys is not None else source
+        if isinstance(values, Mapping) and values:
+            if "hotkeys" in values and values.get("hotkeys") is not None:
+                hotkey_payload = values.get("hotkeys")
+            else:
+                # A persisted pre-voice config has no nested binding object.
+                # Read only its legacy flat fields so environment defaults do
+                # not silently introduce Alt+V during an upgrade.
+                hotkey_payload = {
+                    key: values[key]
+                    for key in (
+                        "recording_hotkey",
+                        "rewrite_hotkey",
+                        "translation_hotkey",
+                        "toggle_visibility",
+                        "recording_activation_mode",
+                    )
+                    if key in values
+                }
+        else:
+            # No payload means a first run: the defaults intentionally include
+            # the new voice-translation binding.
+            hotkey_payload = source
         hotkeys = HotkeySettings.from_mapping(hotkey_payload)
         # A short-lived pre-release spelling used the activation mode at the
         # top level. Keep accepting it while writing the versioned nested
@@ -279,6 +302,15 @@ class AppConfig:
                     hotkeys.hotkeys, source["recording_activation_mode"])
             except ValueError:
                 pass
+        voice_values = source.get("voice_translation")
+        try:
+            voice_translation = VoiceTranslationConfig.from_mapping(
+                voice_values if isinstance(voice_values, Mapping) else None)
+        except ValueError:
+            # Keep startup resilient to a hand-edited future/invalid section;
+            # the dedicated settings/apply boundary reports invalid routes
+            # before a provider request is attempted.
+            voice_translation = VoiceTranslationConfig()
         route_defaults = WorkflowConfig(
             transcription=WorkflowRoute(
                 provider_id=provider,
@@ -406,6 +438,7 @@ class AppConfig:
             history_retention_days=history_retention_days,
             hotkeys=hotkeys,
             workflows=workflows,
+            voice_translation=voice_translation,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -436,6 +469,7 @@ class AppConfig:
             "history_retention_days": self.history_retention_days,
             "hotkeys": self.hotkeys.to_mapping(),
             "workflows": self.workflows.to_mapping(),
+            "voice_translation": self.voice_translation.to_mapping(),
         }
 
     def to_legacy_mapping(self) -> dict[str, Any]:
@@ -1057,6 +1091,12 @@ class LocalConfigRepository(ConfigRepository):
             migrated = migrate_config_payload(raw)
             raw_mapping = raw if isinstance(raw, Mapping) else {}
             runtime = self._load_runtime_mapping(raw_mapping, migrated)
+            if not raw_mapping:
+                # ``_load_runtime_mapping`` adds environment/secret fields to
+                # a first-run payload, which would otherwise look like an old
+                # config to the migration boundary above.  Keep the explicit
+                # fresh-install defaults marker in that case.
+                runtime["hotkeys"] = self.defaults.get("hotkeys")
             return AppConfig.from_mapping(runtime, self.defaults)
 
     def _model_from_mapping(
