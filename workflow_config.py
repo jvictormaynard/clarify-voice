@@ -197,8 +197,11 @@ class WorkflowRoute:
             provider_id=(text(
                 "provider_id", "provider", fallback_value=fallback.provider_id
             ).lower() or fallback.provider_id),
-            model_id=text("model_id", "model", fallback_value=fallback.model_id)
-            or fallback.model_id,
+            # Preserve an explicitly blank model so validation can select the
+            # new provider's default instead of inheriting the old route's
+            # model after a provider switch.  An omitted field still uses the
+            # fallback route for partial nested saves.
+            model_id=text("model_id", "model", fallback_value=fallback.model_id),
             prompt=text("prompt", fallback_value=fallback.prompt),
             custom_endpoint=text(
                 "custom_endpoint", "endpoint", "base_url",

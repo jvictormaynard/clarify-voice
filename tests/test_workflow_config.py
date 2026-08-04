@@ -169,6 +169,42 @@ class WorkflowConfigurationTests(unittest.TestCase):
             self.assertTrue(loaded.workflow(
                 WorkflowScope.LOCAL_ASR_REFINEMENT).enabled)
 
+    def test_transcription_provider_change_clears_endpoint_but_model_change_keeps_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            repository.save({
+                "transcription_provider": "openai",
+                "openai_audio_model": "whisper-1",
+                "workflows": {
+                    "transcription": {
+                        "provider_id": "openai",
+                        "model_id": "whisper-1",
+                        "custom_endpoint": "https://openai-proxy.example/v1",
+                    },
+                },
+            })
+
+            model_change = repository.load().to_legacy_mapping()
+            model_change["openai_audio_model"] = "gpt-4o-transcribe"
+            repository.save(model_change)
+            self.assertEqual(
+                repository.load().workflow(WorkflowScope.TRANSCRIPTION).custom_endpoint,
+                "https://openai-proxy.example/v1",
+            )
+
+            provider_change = repository.load().to_legacy_mapping()
+            provider_change.update({
+                "transcription_provider": "groq",
+                "groq_audio_model": "whisper-large-v3",
+            })
+            repository.save(provider_change)
+            self.assertEqual(
+                repository.load().workflow(WorkflowScope.TRANSCRIPTION).custom_endpoint,
+                "",
+            )
+
     def test_registry_applies_endpoint_override_before_adapter_work(self):
         connection = ProviderConnection("test-key", "https://api.example/v1")
         routed = PROVIDER_REGISTRY.connection_for_route(
@@ -275,6 +311,26 @@ class WorkflowConfigurationTests(unittest.TestCase):
             self.assertEqual(
                 repository.load().workflow(WorkflowScope.REFINEMENT).custom_endpoint,
                 "https://refinement-proxy.example/v1",
+            )
+
+    def test_mapping_apply_blank_model_uses_new_provider_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            candidate = repository.load().to_mapping()
+            candidate["refinement_provider"] = "groq"
+            candidate["refinement_model"] = ""
+            candidate["workflows"]["refinement"] = {
+                "provider_id": "groq",
+                "model_id": "",
+            }
+
+            applied = repository.apply(candidate)
+
+            self.assertEqual(
+                applied.workflow(WorkflowScope.REFINEMENT).model_id,
+                "llama-3.3-70b-versatile",
             )
 
     def test_scoped_configuration_test_ignores_unrelated_invalid_routes(self):

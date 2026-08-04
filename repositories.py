@@ -412,14 +412,20 @@ class AppConfig:
             legacy_config.selection.transcription_provider).audio_model_key
         if {"transcription_provider", selected_audio_key} & changed_keys:
             current = workflows.transcription
+            transcription_route = legacy_config.workflow(
+                WorkflowScope.TRANSCRIPTION)
+            endpoint = current.custom_endpoint
+            if (current.provider_id != transcription_route.provider_id
+                    and WorkflowScope.TRANSCRIPTION.value
+                    not in preserve_endpoint_scopes):
+                endpoint = ""
             workflows = workflows.with_route(
                 WorkflowScope.TRANSCRIPTION,
                 replace(
                     current,
-                    provider_id=legacy_config.workflow(
-                        WorkflowScope.TRANSCRIPTION).provider_id,
-                    model_id=legacy_config.workflow(
-                        WorkflowScope.TRANSCRIPTION).model_id,
+                    provider_id=transcription_route.provider_id,
+                    model_id=transcription_route.model_id,
+                    custom_endpoint=endpoint,
                 ),
             )
             selection = replace(
@@ -644,6 +650,16 @@ def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
         },
     }
     for scope, default in defaults_for_scope.items():
+        if not str(default.get("model_id", "")).strip():
+            try:
+                metadata = PROVIDER_REGISTRY.describe(default["provider_id"])
+                default["model_id"] = (
+                    metadata.default_audio_model
+                    if scope == WorkflowScope.TRANSCRIPTION.value
+                    else metadata.default_text_model
+                )
+            except (ProviderError, KeyError, ValueError):
+                pass
         if not isinstance(workflows.get(scope), Mapping):
             workflows[scope] = default
         else:
