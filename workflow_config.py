@@ -463,7 +463,8 @@ def validate_workflow_route(
             # that path inside the query (``...?region=eu/v1``) or discard it
             # at the HTTP layer.  Reject both until a URL composer can carry
             # parsed components through every adapter safely.
-            if endpoint_parts.query or endpoint_parts.fragment:
+            if (endpoint_parts.query or endpoint_parts.fragment
+                    or endpoint.endswith(("?", "#"))):
                 raise WorkflowConfigurationError(
                     normalized_scope,
                     "Custom endpoint must not contain a query or fragment.",

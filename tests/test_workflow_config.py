@@ -573,7 +573,7 @@ class WorkflowConfigurationTests(unittest.TestCase):
                         },
                     },
                 }).workflows)
-        for suffix in ("?region=eu", "#fragment"):
+        for suffix in ("?region=eu", "#fragment", "?", "#"):
             with self.assertRaises(WorkflowConfigurationError):
                 validate_workflow_config(AppConfig.from_mapping({
                     "workflows": {
