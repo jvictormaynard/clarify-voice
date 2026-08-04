@@ -665,9 +665,25 @@ class HistoryStore:
     def _now(self) -> datetime:
         return _coerce_timestamp(self._clock())
 
+    def _primary_exists_for_recovery(self) -> bool:
+        try:
+            self.path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise HistoryStoreError(
+                "The history file could not be inspected") from error
+        return True
+
     def _temporary_paths(self) -> list[Path]:
-        if not self.path.parent.exists():
+        try:
+            self.path.parent.stat()
+        except FileNotFoundError:
             return []
+        except OSError as error:
+            raise HistoryStoreError(
+                "The history snapshot directory could not be inspected"
+            ) from error
         pattern = f".{self.path.name}.*.tmp"
         try:
             return list(self.path.parent.glob(pattern))
@@ -683,7 +699,14 @@ class HistoryStore:
             pass
 
     def _recover_interrupted_write_locked(self) -> dict[str, Any] | None:
+        primary_exists = self._primary_exists_for_recovery()
         current = _read_json_mapping(self.path)
+        if current is None and primary_exists:
+            # A readable primary must never be replaced merely because a
+            # transient read failed; strict mode keeps this invocation closed.
+            _read_json_mapping(self.path, strict=True)
+            raise HistoryStoreError(
+                "The history file could not be read consistently")
         temporary_payloads: list[
             tuple[float | None, str, Path, dict[str, Any]]
         ] = []
@@ -761,7 +784,18 @@ class HistoryStore:
                 raise HistoryStoreError(
                     "The primary history mtime could not be read"
                 )
-            newest = max(supported_temporary)
+            newest_ordering = max(item[0] for item in supported_temporary)
+            newest_candidates = [
+                item for item in supported_temporary
+                if item[0] == newest_ordering
+            ]
+            if newest_ordering > current_mtime and len(newest_candidates) > 1:
+                # A filename tie-break would make recovery nondeterministic
+                # and could discard one of two equally fresh snapshots.
+                raise HistoryStoreError(
+                    "The interrupted history snapshots have tied mtimes"
+                )
+            newest = newest_candidates[0]
             selected: Path | None = None
             if newest[0] > current_mtime:
                 _, _, selected, payload = newest
@@ -783,11 +817,6 @@ class HistoryStore:
             return current
 
         if not temporary_payloads:
-            try:
-                primary_exists = self.path.exists()
-            except OSError as error:
-                raise HistoryStoreError(
-                    "The history file could not be inspected") from error
             if primary_exists:
                 # Re-read in strict mode to preserve a typed cause for both
                 # malformed JSON and an unreadable file.
@@ -801,11 +830,6 @@ class HistoryStore:
             candidates = supported_temporary
             selected_supported = True
         else:
-            try:
-                primary_exists = self.path.exists()
-            except OSError as error:
-                raise HistoryStoreError(
-                    "The history file could not be inspected") from error
             if primary_exists:
                 # A corrupt primary is recoverable only from a snapshot this
                 # executable understands. Preserve its original bytes when
@@ -825,7 +849,17 @@ class HistoryStore:
                     "The interrupted history snapshot is structurally corrupt")
             candidates = future_temporary
             selected_supported = False
-        _, _, selected, payload = max(candidates)
+        newest_ordering = max(item[0] for item in candidates)
+        newest_candidates = [
+            item for item in candidates if item[0] == newest_ordering
+        ]
+        if len(newest_candidates) > 1:
+            # With no committed primary, equal mtimes provide no safe way to
+            # choose one snapshot over another. Preserve all candidates.
+            raise HistoryStoreError(
+                "The interrupted history snapshots have tied mtimes"
+            )
+        _, _, selected, payload = newest_candidates[0]
         try:
             os.replace(selected, self.path)
         except OSError as error:

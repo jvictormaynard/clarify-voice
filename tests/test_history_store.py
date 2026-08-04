@@ -439,6 +439,35 @@ class HistoryStoreTests(unittest.TestCase):
             store.delete_all()
             self.assertFalse(path.exists())
 
+    def test_delete_all_keeps_files_when_snapshot_directory_metadata_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="keep when directory metadata cannot be read")
+            temporary = root / ".history.json.unseen.tmp"
+            temporary.write_text("{}", encoding="utf-8")
+            before = path.read_bytes()
+            original_stat = Path.stat
+
+            def unreadable_directory_metadata(path_value, *args, **kwargs):
+                if path_value == root:
+                    raise OSError("simulated directory metadata failure")
+                return original_stat(path_value, *args, **kwargs)
+
+            with patch.object(
+                history_store.Path,
+                "stat",
+                autospec=True,
+                side_effect=unreadable_directory_metadata,
+            ):
+                with self.assertRaises(HistoryStoreError):
+                    store.delete_all()
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(temporary.exists())
+
     def test_exports_preserve_unicode_multiline_partial_and_error_records(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -540,6 +569,37 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertTrue(first.exists())
             self.assertTrue(second.exists())
 
+    def test_tied_snapshot_mtimes_are_preserved_when_primary_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            first = root / ".history.json.first.tmp"
+            second = root / ".history.json.second.tmp"
+            for candidate, text in ((first, "first"), (second, "second")):
+                record = HistoryRecord(
+                    raw_text=text, timestamp=NOW, provider="openai",
+                    model="gpt-test",
+                )
+                candidate.write_text(json.dumps({
+                    "schema_version": HISTORY_SCHEMA_VERSION,
+                    "records": [record.to_mapping()],
+                }), encoding="utf-8")
+            tied_mtime = time.time()
+            os.utime(first, (tied_mtime, tied_mtime))
+            os.utime(second, (tied_mtime, tied_mtime))
+
+            with self.assertRaises(HistoryStoreError):
+                HistoryStore(
+                    path,
+                    enabled=True,
+                    retention_days=None,
+                    clock=fixed_clock,
+                ).list_records()
+
+            self.assertFalse(path.exists())
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
     def test_snapshot_is_preserved_when_primary_mtime_is_unreadable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -567,6 +627,40 @@ class HistoryStoreTests(unittest.TestCase):
                 "stat",
                 autospec=True,
                 side_effect=unreadable_primary_mtime,
+            ):
+                with self.assertRaises(HistoryStoreError):
+                    store.list_records()
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(candidate.exists())
+
+    def test_primary_is_not_replaced_when_read_is_transiently_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="committed")
+            candidate = root / ".history.json.newer.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [HistoryRecord(
+                    raw_text="newer", timestamp=NOW,
+                    provider="openai", model="gpt-test").to_mapping()],
+            }), encoding="utf-8")
+            before = path.read_bytes()
+            original_read_text = Path.read_text
+
+            def unreadable_primary(path_value, *args, **kwargs):
+                if path_value == path:
+                    raise OSError("simulated transient read failure")
+                return original_read_text(path_value, *args, **kwargs)
+
+            with patch.object(
+                history_store.Path,
+                "read_text",
+                autospec=True,
+                side_effect=unreadable_primary,
             ):
                 with self.assertRaises(HistoryStoreError):
                     store.list_records()
