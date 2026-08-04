@@ -295,6 +295,29 @@ class HistoryStoreTests(unittest.TestCase):
             persisted = Path(store.path).read_text(encoding="utf-8")
             self.assertNotIn("<redacted>" * 2, persisted)
 
+    def test_three_layer_serialized_mapping_redacts_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            serialized = {"password": "nested-secret"}
+            for _ in range(3):
+                serialized = json.dumps(serialized)
+            store.add(
+                status="error",
+                error=f"body={serialized}",
+                record_id="three-layer-serialized-credential",
+            )
+
+            error = store.list_records()[0].error
+            self.assertIn("<redacted>", error)
+            self.assertNotIn("nested-secret", error)
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            self.assertNotIn("nested-secret", persisted)
+
     def test_v0_migration_is_idempotent_and_drops_unsupported_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"

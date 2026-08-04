@@ -103,12 +103,13 @@ _SENSITIVE_FIELD_PATTERN = re.compile(
 # mapping's quotes (for example, ``body="{\"password\":\"secret\"}"``).
 # The ordinary field matcher cannot see the key/value delimiters in that form.
 # Keep the escapes intact while replacing the value so the resulting error
-# remains readable and, more importantly, never persists the credential.
+# remains readable and, more importantly, never persists the credential. The
+# backslash runs are intentionally unbounded for nested JSON serialization.
 _SENSITIVE_ESCAPED_FIELD_PREFIX_PATTERN = re.compile(
-    r"(?is)(\\?['\"]?(?:authorization|bearer|api[_ -]?key|access[_ -]?token|"
+    r"(?is)(\\*['\"]?(?:authorization|bearer|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|credential|password|secret|token)"
-    r"\\?['\"]?\s*[:=]\s*(?:[a-z]+\s+)?)"
-    r"((?:\\)?['\"])")
+    r"\\*['\"]?\s*[:=]\s*(?:[a-z]+\s+)?)"
+    r"(\\*['\"])")
 _SENSITIVE_BEARER_PATTERN = re.compile(r"(?i)(bearer)\s+([^\s,;&]+)")
 _SENSITIVE_QUERY_PATTERN = re.compile(
     r"(?i)([?&](?:api[_-]?key|access[_-]?token|token)=)[^&#\s]+")
@@ -129,17 +130,20 @@ def _escaped_field_value_end(
 ) -> int | None:
     """Return the end of a quoted value using a linear escape scanner.
 
-    A doubly serialized quote delimiter is represented by ``\\"``.  A quote
-    escaped inside the nested value has three (or more) preceding backslashes,
-    while a literal trailing backslash adds four escapes per nesting level.
-    Consequently, the delimiter is the quote preceded by a backslash run
-    congruent to 1 modulo 4.  Plain quoted values use the usual even/odd
-    backslash rule.  The scanner deliberately returns ``None`` for truncated
+    A serialized quote delimiter is represented by a run of ``D`` backslashes
+    followed by a quote. Each additional JSON serialization layer doubles the
+    run and adds one, so a nested escaped quote has ``2 * (D + 1) - 1``
+    backslashes. A literal trailing backslash adds another ``2 * (D + 1)``
+    per character. Therefore, a delimiter closes when the run is congruent to
+    ``D`` modulo ``2 * (D + 1)``. Plain quoted values use the usual even/odd
+    backslash rule. The scanner deliberately returns ``None`` for truncated
     values rather than retrying an overlapping regular expression.
     """
 
     quote_character = quote[-1]
-    serialized_delimiter = quote.startswith("\\")
+    delimiter_run = len(quote) - 1
+    serialized_delimiter = delimiter_run > 0
+    delimiter_modulus = 2 * (delimiter_run + 1)
     backslash_run = 0
     for index in range(start, len(value)):
         character = value[index]
@@ -148,7 +152,7 @@ def _escaped_field_value_end(
             continue
         if character == quote_character:
             if serialized_delimiter:
-                if backslash_run % 4 == 1:
+                if (backslash_run - delimiter_run) % delimiter_modulus == 0:
                     return index + 1
             elif backslash_run % 2 == 0:
                 return index + 1
