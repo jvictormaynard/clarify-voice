@@ -2,6 +2,7 @@
 
 import argparse
 from collections.abc import Mapping
+from dataclasses import replace
 import json
 import math
 import ntpath
@@ -55,11 +56,18 @@ from local_asr_product import (
     format_requirements,
 )
 from repositories import (
+    AppConfig,
     ApplicationRepositories,
     LocalConfigRepository,
     LocalUsageStatsRepository,
     PROVIDER_SECRET_KEYS,
+    WorkflowConfig,
+    WorkflowRoute,
+    WorkflowScope,
+    normalize_workflow_scope,
+    validate_workflow_route,
 )
+from workflow_settings import WorkflowSettingsController
 from secret_store import (
     SUPPORTED_SECRET_PROVIDERS,
     SecretStoreCorruptedError,
@@ -338,10 +346,108 @@ def _estimated_text_cost(provider: str, model: str, input_chars: int,
     return ((input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000, True)
 
 
+def _typed_app_config() -> AppConfig:
+    """Read the current compatibility mapping through the typed boundary."""
+
+    return AppConfig.from_mapping(APP_CONFIG)
+
+
+def _workflow_route(scope: WorkflowScope | str) -> WorkflowRoute:
+    """Return one effective route while honoring legacy flat UI edits.
+
+    The existing settings surface still exposes flat transcription/refinement
+    selectors.  Those fields remain authoritative for routes that still carry
+    legacy provenance; an explicitly authored scoped route is authoritative
+    for every workflow, including the two primary scopes.
+    """
+
+    normalized = scope.value if isinstance(scope, WorkflowScope) else str(scope)
+    config = _typed_app_config()
+    route = config.workflow(normalized)
+    if normalized == WorkflowScope.TRANSCRIPTION.value:
+        if not route.independent:
+            provider = str(APP_CONFIG.get(
+                "transcription_provider", route.provider_id)).strip().lower()
+            try:
+                model = PROVIDER_REGISTRY.audio_model_from_legacy(
+                    provider, APP_CONFIG)
+            except ProviderError:
+                model = route.model_id
+            route = replace(route, provider_id=provider, model_id=model)
+    elif normalized == WorkflowScope.REFINEMENT.value:
+        if not route.independent:
+            provider = str(APP_CONFIG.get(
+                "refinement_provider", route.provider_id)).strip().lower()
+            model = str(APP_CONFIG.get("refinement_model", route.model_id)).strip()
+            route = replace(
+                route,
+                provider_id=provider or route.provider_id,
+                model_id=model or route.model_id,
+            )
+    elif normalized in (
+            WorkflowScope.REWRITE.value, WorkflowScope.TRANSLATION.value):
+        # A pre-#51 config contains cloned rewrite/translation routes.  Their
+        # explicit migration marker keeps legacy flat edits working; scoped
+        # settings routes remain authoritative even when their values happen
+        # to equal refinement.
+        if not route.independent:
+            legacy = _workflow_route(WorkflowScope.REFINEMENT)
+            route = replace(
+                route,
+                provider_id=legacy.provider_id,
+                model_id=legacy.model_id,
+            )
+    return route
+
+
+def _effective_workflow_routes() -> dict[str, dict[str, object]]:
+    """Expose safe provider/model/local-cloud summaries for operation UI."""
+
+    config = _typed_app_config()
+    summaries: dict[str, dict[str, object]] = {}
+    for scope in WorkflowScope:
+        # Diagnostics describe the typed persisted route, not the legacy flat
+        # compatibility selectors that the old model picker may still edit.
+        route = config.workflow(scope)
+        try:
+            route = validate_workflow_route(route, scope)
+            provider_id = route.provider_id
+            model_id = route.model_id
+            endpoint = route.without_prompt()["custom_endpoint"]
+            enabled = route.enabled
+        except (ValueError, ProviderError):
+            provider_id = str(route.provider_id or "").strip().lower()
+            model_id = str(route.model_id or "").strip()
+            endpoint = ""
+            enabled = bool(route.enabled)
+        summaries[scope.value] = {
+            "scope": scope.value,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "custom_endpoint": endpoint,
+            "enabled": enabled,
+            "execution": (
+                "disabled" if not enabled else
+                "local" if provider_id == LOCAL_ASR_PROVIDER_ID else "cloud"
+            ),
+        }
+    return summaries
+
+
+def _workflow_instruction(base: str, route_prompt: str = "") -> str:
+    """Keep safety delimiters while adding the user-selected route policy."""
+
+    policy = str(route_prompt or "").strip()
+    if not policy:
+        return base
+    return f"{base}\n\nWorkflow-specific instruction:\n{policy}"
+
+
 def _recording_usage_context(mode: str | None = None) -> dict:
-    provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
+    transcription_route = _workflow_route(WorkflowScope.TRANSCRIPTION)
+    provider = transcription_route.provider_id
     try:
-        model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
+        model = transcription_route.model_id
     except ProviderError:
         provider = "gemini"
         model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
@@ -353,15 +459,24 @@ def _recording_usage_context(mode: str | None = None) -> dict:
         "mode": effective_mode,
         "refinement_provider": "",
         "refinement_model": "",
+        "route": WorkflowScope.TRANSCRIPTION.value,
+        "execution": "local" if provider == LOCAL_ASR_PROVIDER_ID else "cloud",
     }
+    refinement_scope = (
+        WorkflowScope.LOCAL_ASR_REFINEMENT
+        if provider == LOCAL_ASR_PROVIDER_ID else WorkflowScope.REFINEMENT)
+    refinement_route = _workflow_route(refinement_scope)
+    local_opt_in = bool(APP_CONFIG.get("local_asr_cloud_refinement", False))
     if (context["mode"] == "prompt" and not PROVIDER_REGISTRY.supports(
             provider, ProviderCapability.MULTIMODAL_AUDIO)
-            and (provider != LOCAL_ASR_PROVIDER_ID
-                 or bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))):
-        context["refinement_provider"] = str(APP_CONFIG.get(
-            "refinement_provider", ""))
-        context["refinement_model"] = str(APP_CONFIG.get(
-            "refinement_model", ""))
+            and (provider != LOCAL_ASR_PROVIDER_ID or local_opt_in)
+            and refinement_route.enabled):
+        context["refinement_provider"] = refinement_route.provider_id
+        context["refinement_model"] = refinement_route.model_id
+        context["refinement_route"] = refinement_scope.value
+        context["refinement_execution"] = (
+            "local" if refinement_route.provider_id == LOCAL_ASR_PROVIDER_ID
+            else "cloud")
     return context
 
 
@@ -398,6 +513,10 @@ def _build_recording_usage_event(context: dict, duration_seconds: float,
         "type": "recording",
         "duration_seconds": round(duration, 3),
         "mode": str(context.get("mode", "transcription")),
+        "execution": str(context.get("execution", "cloud")),
+        "refinement_execution": str(
+            context.get("refinement_execution", "")
+        ),
         "models": models,
         "word_count": _word_count(result_text),
         "character_count": output_chars,
@@ -826,18 +945,213 @@ def _persist_local_asr_cloud_refinement(
     return True
 
 
+def _local_asr_removal_has_transcription_draft_conflict(
+        workflow_controller: WorkflowSettingsController,
+        persisted_provider: str) -> bool:
+    """Reject removal while an unapplied transcription draft still uses local ASR.
+
+    The persisted flat selection can already be cloud-based while the open
+    Workflows page still holds a local route.  Deleting the local assets in
+    that state would leave a later Apply able to restore the unusable route.
+    When the persisted route is local, the removal flow may replace that
+    unchanged draft with the cloud selection immediately before deletion.
+    """
+    if str(persisted_provider or "").strip().lower() == LOCAL_ASR_PROVIDER_ID:
+        return False
+    draft_provider = workflow_controller.route(
+        WorkflowScope.TRANSCRIPTION).provider_id
+    return str(draft_provider or "").strip().lower() == LOCAL_ASR_PROVIDER_ID
+
+
+def _sync_local_asr_refinement_draft(
+        workflow_controller: WorkflowSettingsController,
+        saved_settings: dict[str, object], enabled: bool) -> None:
+    """Keep the typed settings draft aligned with an immediate toggle save.
+
+    The local provider page saves this safety-sensitive preference before the
+    settings window's global Apply action.  Update only the local route in the
+    controller and in the saved baseline; other workflow edits remain drafts.
+    """
+    requested = bool(enabled)
+    route = replace(
+        workflow_controller.route(WorkflowScope.LOCAL_ASR_REFINEMENT),
+        enabled=requested,
+    )
+    _sync_persisted_workflow_route_draft(
+        workflow_controller,
+        saved_settings,
+        WorkflowScope.LOCAL_ASR_REFINEMENT,
+        route,
+        baseline_fields=("enabled",),
+    )
+
+
+def _sync_persisted_workflow_route_draft(
+        workflow_controller: WorkflowSettingsController,
+        saved_settings: dict[str, object],
+        scope: WorkflowScope | str,
+        route: WorkflowRoute,
+        *,
+        baseline_fields: tuple[str, ...] | None = None) -> None:
+    """Merge one persisted route into the draft and selected baseline fields."""
+    workflow_controller.sync_persisted_route(scope, route)
+    saved_workflows = saved_settings.get("workflows")
+    if not isinstance(saved_workflows, WorkflowConfig):
+        return
+    baseline_route = route
+    if baseline_fields is not None:
+        previous_baseline = saved_workflows.route(scope)
+        baseline_route = replace(
+            previous_baseline,
+            **{
+                field_name: getattr(route, field_name)
+                for field_name in baseline_fields
+            },
+        )
+    saved_settings["workflows"] = saved_workflows.with_route(
+        normalize_workflow_scope(scope), baseline_route,
+    )
+
+
+def _sync_selected_workflow_enabled_widget(
+        scope: WorkflowScope | str, widget, enabled: bool) -> None:
+    """Reflect a typed route's enabled state in the selected form widget."""
+    if normalize_workflow_scope(scope) != WorkflowScope.LOCAL_ASR_REFINEMENT.value:
+        return
+    if widget is None:
+        return
+    if bool(enabled):
+        widget.select()
+    else:
+        widget.deselect()
+
+
+def _sync_selected_workflow_form_widgets(
+        selected_scope: WorkflowScope | str,
+        route_scope: WorkflowScope | str,
+        widgets: Mapping[str, object],
+        route: WorkflowRoute,
+        *,
+        fields: tuple[str, ...]) -> None:
+    """Update only externally changed fields in the visible workflow form."""
+    if normalize_workflow_scope(selected_scope) != normalize_workflow_scope(
+            route_scope):
+        return
+    requested = set(fields)
+    if "provider_id" in requested:
+        provider_widget = widgets.get("provider_menu")
+        if provider_widget is not None:
+            provider_widget.set(route.provider_id)
+    if "model_id" in requested:
+        model_widget = widgets.get("model")
+        if model_widget is not None:
+            model_widget.delete(0, "end")
+            model_widget.insert(0, route.model_id)
+    if "custom_endpoint" in requested:
+        endpoint_widget = widgets.get("endpoint")
+        if endpoint_widget is not None:
+            endpoint_widget.delete(0, "end")
+            endpoint_widget.insert(0, route.custom_endpoint)
+    if "prompt" in requested:
+        prompt_widget = widgets.get("prompt")
+        if prompt_widget is not None:
+            prompt_widget.delete("1.0", "end")
+            prompt_widget.insert("1.0", route.prompt)
+    if "enabled" in requested:
+        _sync_selected_workflow_enabled_widget(
+            route_scope, widgets.get("enabled"), route.enabled)
+
+
+def _sync_forced_cloud_transcription_draft(
+        workflow_controller: WorkflowSettingsController,
+        saved_settings: dict[str, object],
+        selected: Mapping[str, object]) -> None:
+    """Reflect the cloud route forced before local-ASR asset removal."""
+    persisted_route = _typed_app_config().workflow(WorkflowScope.TRANSCRIPTION)
+    # Keep unsaved transcription prompt/endpoint/enabled edits in the open
+    # draft.  Only the provider/model pair was forced by local-ASR removal.
+    route = replace(
+        workflow_controller.route(WorkflowScope.TRANSCRIPTION),
+        provider_id=persisted_route.provider_id,
+        model_id=persisted_route.model_id,
+    )
+    _sync_persisted_workflow_route_draft(
+        workflow_controller,
+        saved_settings,
+        WorkflowScope.TRANSCRIPTION,
+        route,
+        baseline_fields=("provider_id", "model_id"),
+    )
+    saved_settings["transcription"] = (
+        persisted_route.provider_id, persisted_route.model_id)
+
+
+def _store_workflow_form_draft(
+        workflow_controller: WorkflowSettingsController,
+        scope: WorkflowScope | str,
+        *,
+        provider_id: str,
+        model_id: str,
+        prompt: str,
+        custom_endpoint: str,
+        enabled: bool) -> WorkflowRoute:
+    """Copy the visible form values into the typed draft without persisting."""
+    return workflow_controller.set_route(
+        scope,
+        provider_id=provider_id,
+        model_id=model_id,
+        prompt=prompt,
+        custom_endpoint=custom_endpoint,
+        enabled=enabled,
+    )
+
+
+def _sync_saved_settings_after_workflow_reset(
+        saved_settings: dict[str, object],
+        scope: WorkflowScope | str,
+        route: WorkflowRoute,
+        selected: Mapping[str, object],
+        selected_refinement: Mapping[str, object]) -> None:
+    """Update only the persisted baseline route reset by the user."""
+    normalized = normalize_workflow_scope(scope)
+    saved_workflows = saved_settings.get("workflows")
+    if isinstance(saved_workflows, WorkflowConfig):
+        saved_settings["workflows"] = saved_workflows.with_route(
+            normalized, route)
+    if normalized == WorkflowScope.TRANSCRIPTION.value:
+        saved_settings["transcription"] = (
+            selected.get("provider"), selected.get("model"))
+    elif normalized == WorkflowScope.REFINEMENT.value:
+        saved_settings["refinement"] = (
+            selected_refinement.get("provider"),
+            selected_refinement.get("model"),
+        )
+
+
 def _apply_settings_transaction(
         selected, selected_refinement, audio_options, text_options, model_keys,
-        autostart_enabled, repositories=None, registry=None):
+        autostart_enabled, repositories=None, registry=None,
+        workflow_mapping=None):
     """Apply model and startup selections as one rollback-capable operation."""
     previous_config = APP_CONFIG.copy()
     previous_registry_state = _autostart_registry_state(registry)
-    _apply_selected_models(
-        selected, selected_refinement, audio_options, text_options, model_keys)
-    _persist_autostart_preference(
-        autostart_enabled, repositories, registry,
-        previous_config=previous_config,
-        previous_registry_state=previous_registry_state)
+    try:
+        if workflow_mapping is not None:
+            APP_CONFIG["workflows"] = workflow_mapping
+        _apply_selected_models(
+            selected, selected_refinement, audio_options, text_options, model_keys)
+        _persist_autostart_preference(
+            autostart_enabled, repositories, registry,
+            previous_config=previous_config,
+            previous_registry_state=previous_registry_state)
+    except Exception:
+        APP_CONFIG.clear()
+        APP_CONFIG.update(previous_config)
+        try:
+            _restore_autostart_registry_state(previous_registry_state, registry)
+        except OSError:
+            pass
+        raise
 
 
 def _apply_hotkey_settings_transaction(
@@ -1909,7 +2223,8 @@ STRINGS = {
         "translate_to": "Translate to", "translation_failed": "Translation failed",
         "translation_copied": "Translation copied",
         "settings": "Settings", "provider": "Provider:",
-        "settings_section": "Settings", "models_section": "Models",
+        "settings_section": "Settings", "workflows_section": "Workflows",
+        "models_section": "Models",
         "providers_section": "Providers", "statistics_section": "Statistics",
         "dictionary_section": "Dictionary",
         "dictionary_title": "Dictionary & snippets",
@@ -1990,6 +2305,17 @@ STRINGS = {
         "diagnostic_export_hint": "Save safe version, environment, and recent error metadata. No audio or text is included.",
         "diagnostic_exported": "Diagnostic file saved in the ClarifyVoice data folder.",
         "diagnostic_export_failed": "Could not export diagnostics.",
+        "workflows_title": "Workflow routes",
+        "workflows_subtitle": "Choose an independent provider, model, prompt, and endpoint for each operation.",
+        "workflow_scope": "Operation", "workflow_provider": "Provider",
+        "workflow_model": "Model", "workflow_endpoint": "Custom endpoint (optional)",
+        "workflow_prompt": "Workflow instruction", "workflow_enabled": "Route enabled",
+        "workflow_effective": "Effective: {provider} / {model} · {execution} · {endpoint}",
+        "workflow_invalid": "Invalid route: {error}", "workflow_test": "Test",
+        "workflow_reset": "Reset", "workflow_test_ok": "Route is valid: {provider} / {model}",
+        "workflow_test_failed": "Test failed: {error}",
+        "workflow_reset_done": "Route reset to defaults.",
+        "workflow_reset_failed": "Reset failed: {error}",
         "apply": "Apply", "save": "Save", "cancel": "Cancel",
     },
     "pt": {
@@ -2003,7 +2329,8 @@ STRINGS = {
         "translate_to": "Traduzir para", "translation_failed": "Falha na tradução",
         "translation_copied": "Tradução copiada",
         "settings": "Configura\u00e7\u00f5es", "provider": "Provedor:",
-        "settings_section": "Configura\u00e7\u00f5es", "models_section": "Modelos",
+        "settings_section": "Configura\u00e7\u00f5es", "workflows_section": "Fluxos",
+        "models_section": "Modelos",
         "providers_section": "Provedores", "statistics_section": "Estatísticas",
         "statistics_title": "Visão geral de uso",
         "statistics_subtitle": "Totais locais de ações concluídas no ClarifyVoice",
@@ -2050,6 +2377,17 @@ STRINGS = {
         "diagnostic_export_hint": "Salva versão, ambiente e erros recentes seguros. Nenhum áudio ou texto é incluído.",
         "diagnostic_exported": "Arquivo de diagnóstico salvo na pasta de dados do ClarifyVoice.",
         "diagnostic_export_failed": "Não foi possível exportar o diagnóstico.",
+        "workflows_title": "Rotas dos fluxos",
+        "workflows_subtitle": "Escolha provedor, modelo, prompt e endpoint independentes para cada operação.",
+        "workflow_scope": "Operação", "workflow_provider": "Provedor",
+        "workflow_model": "Modelo", "workflow_endpoint": "Endpoint personalizado (opcional)",
+        "workflow_prompt": "Instrução do fluxo", "workflow_enabled": "Rota ativada",
+        "workflow_effective": "Efetivo: {provider} / {model} · {execution} · {endpoint}",
+        "workflow_invalid": "Rota inválida: {error}", "workflow_test": "Testar",
+        "workflow_reset": "Redefinir", "workflow_test_ok": "Rota válida: {provider} / {model}",
+        "workflow_test_failed": "Falha no teste: {error}",
+        "workflow_reset_done": "Rota redefinida para os padrões.",
+        "workflow_reset_failed": "Falha ao redefinir: {error}",
         "apply": "Aplicar", "save": "Salvar", "cancel": "Cancelar",
     },
     "es": {
@@ -2063,7 +2401,8 @@ STRINGS = {
         "translate_to": "Traducir a", "translation_failed": "Error de traducción",
         "translation_copied": "Traducción copiada",
         "settings": "Configuración", "provider": "Proveedor:",
-        "settings_section": "Configuración", "models_section": "Modelos",
+        "settings_section": "Configuración", "workflows_section": "Flujos",
+        "models_section": "Modelos",
         "providers_section": "Proveedores", "statistics_section": "Estadísticas",
         "statistics_title": "Resumen de uso",
         "statistics_subtitle": "Totales locales de las acciones completadas en ClarifyVoice",
@@ -2110,6 +2449,16 @@ STRINGS = {
         "diagnostic_export_hint": "Guarda versión, entorno y errores recientes seguros. No incluye audio ni texto.",
         "diagnostic_exported": "Archivo de diagnóstico guardado en la carpeta de datos de ClarifyVoice.",
         "diagnostic_export_failed": "No se pudo exportar el diagnóstico.",
+        "workflows_title": "Rutas de flujo", "workflows_subtitle": "Elige un proveedor, modelo, prompt y endpoint independientes para cada operación.",
+        "workflow_scope": "Operación", "workflow_provider": "Proveedor",
+        "workflow_model": "Modelo", "workflow_endpoint": "Endpoint personalizado (opcional)",
+        "workflow_prompt": "Instrucción del flujo", "workflow_enabled": "Ruta activada",
+        "workflow_effective": "Efectivo: {provider} / {model} · {execution} · {endpoint}",
+        "workflow_invalid": "Ruta no válida: {error}", "workflow_test": "Probar",
+        "workflow_reset": "Restablecer", "workflow_test_ok": "Ruta válida: {provider} / {model}",
+        "workflow_test_failed": "Error en la prueba: {error}",
+        "workflow_reset_done": "Ruta restablecida a los valores predeterminados.",
+        "workflow_reset_failed": "Error al restablecer: {error}",
         "apply": "Aplicar", "save": "Guardar", "cancel": "Cancelar",
     },
     "de": {
@@ -2123,7 +2472,8 @@ STRINGS = {
         "translate_to": "Übersetzen in", "translation_failed": "Übersetzung fehlgeschlagen",
         "translation_copied": "Übersetzung kopiert",
         "settings": "Einstellungen", "provider": "Anbieter:",
-        "settings_section": "Einstellungen", "models_section": "Modelle",
+        "settings_section": "Einstellungen", "workflows_section": "Workflows",
+        "models_section": "Modelle",
         "providers_section": "Anbieter", "statistics_section": "Statistik",
         "statistics_title": "Nutzungsübersicht",
         "statistics_subtitle": "Lokale Summen erfolgreicher ClarifyVoice-Aktionen",
@@ -2170,6 +2520,16 @@ STRINGS = {
         "diagnostic_export_hint": "Speichert sichere Versions-, Umgebungs- und Fehlermetadaten. Audio und Text sind nicht enthalten.",
         "diagnostic_exported": "Diagnosedatei im ClarifyVoice-Datenordner gespeichert.",
         "diagnostic_export_failed": "Diagnosedaten konnten nicht exportiert werden.",
+        "workflows_title": "Workflow-Routen", "workflows_subtitle": "Unabhängigen Anbieter, Modell, Prompt und Endpunkt für jede Operation wählen.",
+        "workflow_scope": "Operation", "workflow_provider": "Anbieter",
+        "workflow_model": "Modell", "workflow_endpoint": "Benutzerdefinierter Endpunkt (optional)",
+        "workflow_prompt": "Workflow-Anweisung", "workflow_enabled": "Route aktiviert",
+        "workflow_effective": "Effektiv: {provider} / {model} · {execution} · {endpoint}",
+        "workflow_invalid": "Ungültige Route: {error}", "workflow_test": "Testen",
+        "workflow_reset": "Zurücksetzen", "workflow_test_ok": "Route gültig: {provider} / {model}",
+        "workflow_test_failed": "Test fehlgeschlagen: {error}",
+        "workflow_reset_done": "Route auf Standardwerte zurückgesetzt.",
+        "workflow_reset_failed": "Zurücksetzen fehlgeschlagen: {error}",
         "apply": "Anwenden", "save": "Speichern", "cancel": "Abbrechen",
     },
     "ru": {
@@ -2183,7 +2543,8 @@ STRINGS = {
         "translate_to": "Перевести на", "translation_failed": "Не удалось перевести",
         "translation_copied": "Перевод скопирован",
         "settings": "Настройки", "provider": "Провайдер:",
-        "settings_section": "Настройки", "models_section": "Модели",
+        "settings_section": "Настройки", "workflows_section": "Сценарии",
+        "models_section": "Модели",
         "providers_section": "Провайдеры", "statistics_section": "Статистика",
         "statistics_title": "Обзор использования",
         "statistics_subtitle": "Локальные итоги успешных действий ClarifyVoice",
@@ -2230,6 +2591,16 @@ STRINGS = {
         "diagnostic_export_hint": "Сохраняет безопасные сведения о версии, среде и ошибках. Аудио и текст не включаются.",
         "diagnostic_exported": "Файл диагностики сохранён в папке данных ClarifyVoice.",
         "diagnostic_export_failed": "Не удалось экспортировать диагностику.",
+        "workflows_title": "Маршруты сценариев", "workflows_subtitle": "Выберите независимые провайдер, модель, промпт и endpoint для каждой операции.",
+        "workflow_scope": "Операция", "workflow_provider": "Провайдер",
+        "workflow_model": "Модель", "workflow_endpoint": "Пользовательский endpoint (необязательно)",
+        "workflow_prompt": "Инструкция сценария", "workflow_enabled": "Маршрут включен",
+        "workflow_effective": "Итог: {provider} / {model} · {execution} · {endpoint}",
+        "workflow_invalid": "Неверный маршрут: {error}", "workflow_test": "Проверить",
+        "workflow_reset": "Сбросить", "workflow_test_ok": "Маршрут корректен: {provider} / {model}",
+        "workflow_test_failed": "Проверка не удалась: {error}",
+        "workflow_reset_done": "Маршрут сброшен к значениям по умолчанию.",
+        "workflow_reset_failed": "Сброс не удался: {error}",
         "apply": "Применить", "save": "Сохранить", "cancel": "Отмена",
     },
 }
@@ -2432,19 +2803,36 @@ def call_gemini(
         "gemini", audio_path, mode, lang, cancel_token=cancel_token)
 
 
-def _provider_connection(provider: str) -> ProviderConnection:
-    return PROVIDER_REGISTRY.connection_from_legacy(provider, APP_CONFIG)
+def _provider_connection(
+        provider: str, route: WorkflowRoute | None = None) -> ProviderConnection:
+    connection = PROVIDER_REGISTRY.connection_from_legacy(provider, APP_CONFIG)
+    if route is not None:
+        return PROVIDER_REGISTRY.connection_for_route(
+            provider, connection, route.custom_endpoint)
+    return connection
 
 
 def _call_provider_audio(
         provider: str, audio_path: Path, mode: str, lang: str = "en",
         audio_bytes: bytes | None = None,
-        cancel_token: CancellationToken | None = None) -> str:
+        cancel_token: CancellationToken | None = None,
+        route: WorkflowRoute | None = None) -> str:
     provider = str(provider or "").strip().lower()
     try:
         metadata = PROVIDER_REGISTRY.describe(provider)
-        connection = _provider_connection(provider)
-        model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
+        route = route or _workflow_route(WorkflowScope.TRANSCRIPTION)
+        if not route.enabled:
+            return "[Error: Transcription workflow is disabled]"
+        if route.provider_id != provider:
+            route = replace(
+                route,
+                provider_id=provider,
+                model_id=PROVIDER_REGISTRY.audio_model_from_legacy(
+                    provider, APP_CONFIG),
+                custom_endpoint="",
+            )
+        connection = _provider_connection(provider, route)
+        model = route.model_id
         instruction = (
             TRANSCRIPTION_INSTRUCTION if mode == "transcription" else PROMPT_INSTRUCTION
         ).format(lang=LANG_NAMES.get(lang, "English"))
@@ -2453,19 +2841,27 @@ def _call_provider_audio(
             model=model,
             language=lang,
             instruction=instruction,
-            prompt=("Transcribe this audio." if mode == "transcription"
-                else "Transcribe and rewrite this audio for clarity."),
+            prompt=(route.prompt or ("Transcribe this audio."
+                if mode == "transcription"
+                else "Transcribe and rewrite this audio for clarity.")),
             temperature=0.0 if mode == "transcription" else 0.1,
             audio_bytes=audio_bytes,
         )
         request = DICTIONARY_SERVICE.apply_context(request)
         transcript = PROVIDER_REGISTRY.transcribe(
             provider, request, connection, cancel_token).text
+        refinement_scope = (
+            WorkflowScope.LOCAL_ASR_REFINEMENT
+            if provider == LOCAL_ASR_PROVIDER_ID else WorkflowScope.REFINEMENT)
+        refinement_route = _workflow_route(refinement_scope)
         if (mode == "prompt" and not metadata.supports(
                 ProviderCapability.MULTIMODAL_AUDIO)
                 and (provider != LOCAL_ASR_PROVIDER_ID
-                     or bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))):
-            transcript = _refine_transcript(transcript, lang, cancel_token)
+                     or bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))
+                and refinement_route.enabled):
+            transcript = _refine_transcript(
+                transcript, lang, cancel_token,
+                route=refinement_route)
         # Refinement uses a localized ``[Error: ...]`` sentinel for failures.
         # The explicit guard keeps snippets from turning that failure into a
         # successful-looking transcript before the workflow publishes it.
@@ -2510,21 +2906,40 @@ def _rewrite_with_provider(
         provider: str, transcript: str, lang: str, model_override: str = "",
         instruction: str = "", temperature: float = 0.1,
         source_message: str = "",
-        cancel_token: CancellationToken | None = None) -> str:
+        cancel_token: CancellationToken | None = None,
+        route: WorkflowRoute | None = None) -> str:
     try:
-        model = PROVIDER_REGISTRY.text_model_from_legacy(
-            provider, APP_CONFIG, model_override)
+        if route is None:
+            route = _workflow_route(WorkflowScope.REFINEMENT)
+            requested_provider = str(provider or "").strip().lower()
+            if requested_provider and requested_provider != route.provider_id:
+                route = replace(
+                    route,
+                    provider_id=requested_provider,
+                    model_id=(model_override.strip()
+                              if model_override else
+                              PROVIDER_REGISTRY.text_model_from_legacy(
+                                  requested_provider, APP_CONFIG)),
+                    custom_endpoint="",
+                )
+        provider = route.provider_id or str(provider or "").strip().lower()
+        model = (model_override.strip() if model_override else route.model_id)
+        if not model:
+            model = PROVIDER_REGISTRY.text_model_from_legacy(
+                provider, APP_CONFIG)
         request = RewriteRequest(
             text=transcript,
             model=model,
             language=lang,
-            instruction=(instruction or TRANSCRIPT_REWRITE_INSTRUCTION.format(
-                lang=LANG_NAMES.get(lang, "English"))),
+            instruction=(instruction or _workflow_instruction(
+                TRANSCRIPT_REWRITE_INSTRUCTION.format(
+                    lang=LANG_NAMES.get(lang, "English")), route.prompt)),
             source_message=(source_message or _source_text_message(transcript)),
             temperature=temperature,
         )
         return PROVIDER_REGISTRY.rewrite(
-            provider, request, _provider_connection(provider), cancel_token).text
+            provider, request, _provider_connection(provider, route),
+            cancel_token).text
     except Exception as error:
         try:
             label = f"{PROVIDER_REGISTRY.describe(provider).display_name} refinement"
@@ -2535,13 +2950,17 @@ def _rewrite_with_provider(
 
 def _refine_transcript(
         transcript: str, lang: str,
-        cancel_token: CancellationToken | None = None) -> str:
-    provider = str(APP_CONFIG.get("refinement_provider", "openai"))
-    model = str(APP_CONFIG.get("refinement_model", "")).strip()
+        cancel_token: CancellationToken | None = None,
+        route: WorkflowRoute | None = None) -> str:
+    route = route or _workflow_route(WorkflowScope.REFINEMENT)
+    if not route.enabled:
+        return "[Error: Text refinement workflow is disabled]"
+    provider = route.provider_id
+    model = route.model_id
     if not model:
         return "[Error: No text refinement model configured]"
     return _rewrite_with_provider(
-        provider, transcript, lang, model, cancel_token=cancel_token)
+        provider, transcript, lang, cancel_token=cancel_token, route=route)
 
 
 def rewrite_selected_text(text: str) -> str:
@@ -2549,13 +2968,16 @@ def rewrite_selected_text(text: str) -> str:
     source = str(text).strip()
     if not source:
         return "[Error: No text selected]"
-    provider = str(APP_CONFIG.get("refinement_provider", "")).strip().lower()
-    model = str(APP_CONFIG.get("refinement_model", "")).strip()
+    route = _workflow_route(WorkflowScope.REWRITE)
+    provider = route.provider_id
+    model = route.model_id
     if not PROVIDER_REGISTRY.supports(
-            provider, ProviderCapability.TEXT_GENERATION) or not model:
+            provider, ProviderCapability.TEXT_GENERATION) or not model or not route.enabled:
         return "[Error: No text refinement model configured]"
     result = _rewrite_with_provider(
-        provider, source, "en", model, SELECTION_REWRITE_INSTRUCTION)
+        provider, source, "en", model,
+        _workflow_instruction(SELECTION_REWRITE_INSTRUCTION, route.prompt),
+        route=route)
     if not result or not result.strip():
         return "[Error: Provider returned an empty rewrite]"
     return result.strip()
@@ -2568,13 +2990,15 @@ def translate_selected_text(text: str, target_language: str) -> str:
         return "[Error: No text selected]"
     if target_language not in SUPPORTED_LANGUAGES:
         return "[Error: Unsupported target language]"
-    provider = str(APP_CONFIG.get("refinement_provider", "")).strip().lower()
-    model = str(APP_CONFIG.get("refinement_model", "")).strip()
+    route = _workflow_route(WorkflowScope.TRANSLATION)
+    provider = route.provider_id
+    model = route.model_id
     if not PROVIDER_REGISTRY.supports(
-            provider, ProviderCapability.TEXT_GENERATION) or not model:
+            provider, ProviderCapability.TEXT_GENERATION) or not model or not route.enabled:
         return "[Error: No text refinement model configured]"
     instruction = TRANSLATION_INSTRUCTION.format(
         target_language=LANG_NAMES[target_language])
+    instruction = _workflow_instruction(instruction, route.prompt)
     source_message = _translation_source_message(source)
     try:
         request = TranslationRequest(
@@ -2586,7 +3010,7 @@ def translate_selected_text(text: str, target_language: str) -> str:
             temperature=0.0,
         )
         result = PROVIDER_REGISTRY.translate(
-            provider, request, _provider_connection(provider)).text
+            provider, request, _provider_connection(provider, route)).text
     except Exception as error:
         try:
             label = f"{PROVIDER_REGISTRY.describe(provider).display_name} translation"
@@ -2622,11 +3046,22 @@ def call_groq(
 def call_transcription_provider(
         audio_path: Path, mode: str, lang: str = "en",
         audio_bytes: bytes | None = None,
-        cancel_token: CancellationToken | None = None) -> str:
-    provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
-    return _call_provider_audio(
-        provider, audio_path, mode, lang, audio_bytes=audio_bytes,
-        cancel_token=cancel_token)
+        cancel_token: CancellationToken | None = None,
+        route: WorkflowRoute | None = None) -> str:
+    # Recording/CLI callers retain the legacy selector behavior when no
+    # route is supplied.  Typed workflow callers pass their resolved route so
+    # the effective provider and model cannot be replaced by stale flat keys
+    # inside the lower-level adapter helper.
+    provider = (
+        route.provider_id if route is not None
+        else str(APP_CONFIG.get("transcription_provider", "gemini")))
+    call_kwargs = {
+        "audio_bytes": audio_bytes,
+        "cancel_token": cancel_token,
+    }
+    if route is not None:
+        call_kwargs["route"] = route
+    return _call_provider_audio(provider, audio_path, mode, lang, **call_kwargs)
 
 # ---------------------------------------------------------------------------
 # Recorder
@@ -3667,39 +4102,45 @@ class AppWorkflowProvider:
 
     @staticmethod
     def transcribe(audio_source, mode, language):
-        provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
+        route = _workflow_route(WorkflowScope.TRANSCRIPTION)
+        provider = route.provider_id
+        if not route.enabled:
+            raise RuntimeError("Transcription workflow is disabled")
         text = call_transcription_provider(
             audio_source.audio_path,
             mode,
             language,
             audio_bytes=audio_source.audio_bytes,
             cancel_token=audio_source.cancel_token,
+            route=route,
         )
         if not text or text.startswith("[Error"):
             raise RuntimeError(text or "Transcription returned no text")
-        model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
+        model = route.model_id
         return TranscriptionResult(text, provider, model)
 
     @staticmethod
     def rewrite(text):
         source = str(text).strip()
-        provider = str(APP_CONFIG.get("refinement_provider", "")).strip().lower()
-        model = str(APP_CONFIG.get("refinement_model", "")).strip()
+        route = _workflow_route(WorkflowScope.REWRITE)
+        provider = route.provider_id
+        model = route.model_id
         if not source:
             raise RuntimeError("No text selected")
         if not model or not PROVIDER_REGISTRY.supports(
-                provider, ProviderCapability.TEXT_GENERATION):
+                provider, ProviderCapability.TEXT_GENERATION) or not route.enabled:
             raise RuntimeError("No text refinement model configured")
         request = RewriteRequest(
             text=source,
             model=model,
             language="en",
-            instruction=SELECTION_REWRITE_INSTRUCTION,
+            instruction=_workflow_instruction(
+                SELECTION_REWRITE_INSTRUCTION, route.prompt),
             source_message=_source_text_message(source),
             temperature=0.1,
         )
         result = PROVIDER_REGISTRY.rewrite(
-            provider, request, _provider_connection(provider))
+            provider, request, _provider_connection(provider, route))
         if not result.text or not result.text.strip():
             raise RuntimeError("Provider returned an empty rewrite")
         return RewriteResult(result.text.strip(), result.provider_id, result.model)
@@ -3707,26 +4148,28 @@ class AppWorkflowProvider:
     @staticmethod
     def translate(text, target_language):
         source = str(text)
-        provider = str(APP_CONFIG.get("refinement_provider", "")).strip().lower()
-        model = str(APP_CONFIG.get("refinement_model", "")).strip()
+        route = _workflow_route(WorkflowScope.TRANSLATION)
+        provider = route.provider_id
+        model = route.model_id
         if not source.strip():
             raise RuntimeError("No text selected")
         if target_language not in SUPPORTED_LANGUAGES:
             raise RuntimeError("Unsupported target language")
         if not model or not PROVIDER_REGISTRY.supports(
-                provider, ProviderCapability.TEXT_GENERATION):
+                provider, ProviderCapability.TEXT_GENERATION) or not route.enabled:
             raise RuntimeError("No text refinement model configured")
         request = TranslationRequest(
             text=source,
             model=model,
             target_language=target_language,
-            instruction=TRANSLATION_INSTRUCTION.format(
-                target_language=LANG_NAMES[target_language]),
+            instruction=_workflow_instruction(
+                TRANSLATION_INSTRUCTION.format(
+                    target_language=LANG_NAMES[target_language]), route.prompt),
             source_message=_translation_source_message(source),
             temperature=0.0,
         )
         result = PROVIDER_REGISTRY.translate(
-            provider, request, _provider_connection(provider))
+            provider, request, _provider_connection(provider, route))
         if not result.text or not result.text.strip():
             raise RuntimeError("Provider returned an empty translation")
         return TranslationResult(
@@ -3896,6 +4339,14 @@ class AppWorkflowConfig:
     @staticmethod
     def recording_usage_context(mode):
         return _recording_usage_context(mode)
+
+    @staticmethod
+    def route(scope):
+        return _workflow_route(scope)
+
+    @staticmethod
+    def effective_routes():
+        return _effective_workflow_routes()
 
 
 class AppWorkflowStatistics:
@@ -7754,6 +8205,10 @@ class App(ctk.CTk):
             "provider": str(APP_CONFIG.get("refinement_provider", "openai")),
             "model": str(APP_CONFIG.get("refinement_model", "gpt-4o-mini")),
         }
+        workflow_controller = WorkflowSettingsController(
+            self.repositories.config)
+        workflow_scope_state = {"scope": WorkflowScope.TRANSCRIPTION.value}
+        workflow_widgets = {}
 
         images = {}
         picker_images = {}
@@ -7883,6 +8338,7 @@ class App(ctk.CTk):
 
         pages = {
             "models": ctk.CTkFrame(content, fg_color="transparent"),
+            "workflows": ctk.CTkFrame(content, fg_color="transparent"),
             "statistics": ctk.CTkFrame(content, fg_color="transparent"),
             "settings": ctk.CTkFrame(content, fg_color="transparent"),
             # Dictionary content is intentionally scrollable as a whole.  The
@@ -8011,6 +8467,238 @@ class App(ctk.CTk):
         refinement_menu_visible = {"value": False}
         refinement_signature = {"value": None}
 
+        # Workflow routes have their own small, typed settings surface.  The
+        # page edits a repository-backed draft; Apply persists all scopes in a
+        # single transaction while Reset/Test act on the selected scope.
+        workflows_inner = ctk.CTkScrollableFrame(
+            pages["workflows"], fg_color="transparent")
+        workflows_inner.pack(fill="both", expand=True, padx=24, pady=22)
+        ctk.CTkLabel(
+            workflows_inner, text=self._t("workflows_title"), text_color=TEXT,
+            font=font_title, anchor="w").pack(fill="x")
+        ctk.CTkLabel(
+            workflows_inner, text=self._t("workflows_subtitle"), text_color=DIM,
+            font=font_label, anchor="w", justify="left", wraplength=430).pack(
+                fill="x", pady=(2, 14))
+
+        ctk.CTkLabel(
+            workflows_inner, text=self._t("workflow_scope"), text_color=DIM,
+            font=font_label, anchor="w").pack(fill="x", padx=2, pady=(0, 4))
+        workflow_scope_labels = {
+            scope.value: scope.value.replace("_", " ").title()
+            for scope in WorkflowScope
+        }
+        workflow_scope_menu = ctk.CTkOptionMenu(
+            workflows_inner, values=list(workflow_scope_labels.values()),
+            width=360, height=34, corner_radius=10,
+            fg_color="#141414", button_color="#252525",
+            button_hover_color="#303030", text_color=TEXT,
+            font=font_body)
+        workflow_scope_menu.pack(anchor="w", pady=(0, 12))
+
+        ctk.CTkLabel(
+            workflows_inner, text=self._t("workflow_provider"), text_color=DIM,
+            font=font_label, anchor="w").pack(fill="x", padx=2, pady=(0, 4))
+        workflow_provider_menu = ctk.CTkOptionMenu(
+            workflows_inner, values=list(provider_ids), width=360, height=34,
+            corner_radius=10, fg_color="#141414", button_color="#252525",
+            button_hover_color="#303030", text_color=TEXT, font=font_body)
+        workflow_provider_menu.pack(anchor="w", pady=(0, 10))
+
+        def workflow_field(label, *, height=34):
+            ctk.CTkLabel(
+                workflows_inner, text=label, text_color=DIM,
+                font=font_label, anchor="w").pack(
+                    fill="x", padx=2, pady=(0, 4))
+            entry = ctk.CTkEntry(
+                workflows_inner, width=360, height=height, corner_radius=10,
+                fg_color="#141414", border_color="#292929",
+                text_color=TEXT, font=font_body)
+            entry.pack(anchor="w", pady=(0, 10))
+            return entry
+
+        workflow_model_entry = workflow_field(self._t("workflow_model"))
+        workflow_endpoint_entry = workflow_field(
+            self._t("workflow_endpoint"))
+        ctk.CTkLabel(
+            workflows_inner, text=self._t("workflow_prompt"), text_color=DIM,
+            font=font_label, anchor="w").pack(fill="x", padx=2, pady=(0, 4))
+        workflow_prompt_box = ctk.CTkTextbox(
+            workflows_inner, width=360, height=78, corner_radius=10,
+            fg_color="#141414", border_width=1, border_color="#292929",
+            text_color=TEXT, font=font_body)
+        workflow_prompt_box.pack(anchor="w", pady=(0, 10))
+        workflow_enabled_switch = ctk.CTkSwitch(
+            workflows_inner, text=self._t("workflow_enabled"), height=24,
+            switch_width=38, switch_height=19, corner_radius=10,
+            border_width=1, fg_color="#171717", progress_color="#e7e7e7",
+            button_color="#777777", text_color=TEXT, font=font_body)
+        workflow_enabled_switch.pack(fill="x", anchor="w", pady=(0, 8))
+        workflow_effective_label = ctk.CTkLabel(
+            workflows_inner, text="", text_color=DIM, font=font_caption,
+            anchor="w", justify="left", wraplength=430)
+        workflow_effective_label.pack(fill="x", pady=(0, 8))
+        workflow_feedback_label = ctk.CTkLabel(
+            workflows_inner, text="", text_color=DIM, font=font_caption,
+            anchor="w", justify="left", wraplength=430)
+        workflow_feedback_label.pack(fill="x", pady=(0, 8))
+        workflow_actions = ctk.CTkFrame(
+            workflows_inner, fg_color="transparent")
+        workflow_actions.pack(fill="x", anchor="w")
+        workflow_test_button = ctk.CTkButton(
+            workflow_actions, text=self._t("workflow_test"), width=82,
+            height=30, corner_radius=15, fg_color="#242424",
+            hover_color="#303030", text_color=TEXT, font=font_label)
+        workflow_test_button.pack(side="left", padx=(0, 7))
+        workflow_reset_button = ctk.CTkButton(
+            workflow_actions, text=self._t("workflow_reset"), width=82,
+            height=30, corner_radius=15, fg_color="transparent",
+            hover_color="#242424", border_width=1, border_color="#333333",
+            text_color=DIM, font=font_label)
+        workflow_reset_button.pack(side="left")
+
+        workflow_widgets.update({
+            "scope_menu": workflow_scope_menu,
+            "provider_menu": workflow_provider_menu,
+            "model": workflow_model_entry,
+            "endpoint": workflow_endpoint_entry,
+            "prompt": workflow_prompt_box,
+            "enabled": workflow_enabled_switch,
+            "effective": workflow_effective_label,
+            "feedback": workflow_feedback_label,
+        })
+
+        def workflow_scope_value(label):
+            for value, display in workflow_scope_labels.items():
+                if display == label:
+                    return value
+            return WorkflowScope.TRANSCRIPTION.value
+
+        def refresh_workflow_effective():
+            scope = workflow_scope_state["scope"]
+            try:
+                effective = workflow_controller.effective_route(scope)
+            except (ValueError, ProviderError) as error:
+                workflow_effective_label.configure(
+                    text=self._t("workflow_invalid").format(error=str(error)),
+                    text_color="#d17878")
+                return
+            endpoint = effective.get("custom_endpoint") or "default endpoint"
+            workflow_effective_label.configure(
+                text=self._t("workflow_effective").format(
+                    provider=effective["provider_id"],
+                    model=effective["model_id"],
+                    execution=effective["execution"],
+                    endpoint=endpoint),
+                text_color="#69c58a")
+
+        def load_workflow_form(scope=None):
+            if scope is not None:
+                workflow_scope_state["scope"] = str(scope)
+            scope = workflow_scope_state["scope"]
+            route = workflow_controller.route(scope)
+            workflow_scope_menu.set(workflow_scope_labels.get(
+                scope, workflow_scope_labels[WorkflowScope.TRANSCRIPTION.value]))
+            workflow_provider_menu.set(route.provider_id)
+            workflow_model_entry.delete(0, "end")
+            workflow_model_entry.insert(0, route.model_id)
+            workflow_endpoint_entry.delete(0, "end")
+            workflow_endpoint_entry.insert(0, route.custom_endpoint)
+            workflow_prompt_box.delete("1.0", "end")
+            workflow_prompt_box.insert("1.0", route.prompt)
+            if route.enabled:
+                workflow_enabled_switch.select()
+            else:
+                workflow_enabled_switch.deselect()
+            workflow_feedback_label.configure(text="", text_color=DIM)
+            refresh_workflow_effective()
+
+        def store_workflow_form():
+            scope = workflow_scope_state["scope"]
+            _store_workflow_form_draft(
+                workflow_controller,
+                scope,
+                provider_id=workflow_provider_menu.get(),
+                model_id=workflow_model_entry.get().strip(),
+                prompt=workflow_prompt_box.get("1.0", "end-1c").strip(),
+                custom_endpoint=workflow_endpoint_entry.get().strip(),
+                enabled=bool(workflow_enabled_switch.get()),
+            )
+            refresh_workflow_effective()
+
+        def workflow_form_changed(_event=None):
+            """Keep the current workflow draft and Undo affordance live."""
+            store_workflow_form()
+            refresh_dirty_state()
+
+        workflow_provider_menu.configure(command=workflow_form_changed)
+        workflow_model_entry.bind("<KeyRelease>", workflow_form_changed)
+        workflow_endpoint_entry.bind("<KeyRelease>", workflow_form_changed)
+        workflow_prompt_box.bind("<KeyRelease>", workflow_form_changed)
+        workflow_enabled_switch.configure(command=workflow_form_changed)
+
+        def select_workflow_scope(label):
+            store_workflow_form()
+            load_workflow_form(workflow_scope_value(label))
+            refresh_dirty_state()
+
+        def test_workflow_route():
+            store_workflow_form()
+            scope = workflow_scope_state["scope"]
+            try:
+                result = workflow_controller.test(scope)
+            except (ValueError, ProviderError) as error:
+                workflow_feedback_label.configure(
+                    text=self._t("workflow_test_failed").format(error=str(error)),
+                    text_color="#d17878")
+                return
+            workflow_feedback_label.configure(
+                text=self._t("workflow_test_ok").format(
+                    provider=result.provider_id, model=result.model_id),
+                text_color="#69c58a")
+            refresh_workflow_effective()
+            refresh_dirty_state()
+
+        def reset_workflow_route():
+            scope = workflow_scope_state["scope"]
+            try:
+                reset_config = workflow_controller.reset(scope)
+                _activate_repositories(self.repositories)
+            except (OSError, ValueError, ProviderError) as error:
+                workflow_feedback_label.configure(
+                    text=self._t("workflow_reset_failed").format(error=str(error)),
+                    text_color="#d17878")
+                return
+            load_workflow_form(scope)
+            normalized_scope = normalize_workflow_scope(scope)
+            if normalized_scope == WorkflowScope.TRANSCRIPTION.value:
+                selected["provider"] = str(APP_CONFIG.get(
+                    "transcription_provider", selected["provider"]))
+                selected["model"] = str(APP_CONFIG.get(
+                    model_keys.get(selected["provider"], "gemini_model"),
+                    selected["model"]))
+            elif normalized_scope == WorkflowScope.REFINEMENT.value:
+                selected_refinement["provider"] = str(APP_CONFIG.get(
+                    "refinement_provider", selected_refinement["provider"]))
+                selected_refinement["model"] = str(APP_CONFIG.get(
+                    "refinement_model", selected_refinement["model"]))
+            _sync_saved_settings_after_workflow_reset(
+                saved_settings,
+                normalized_scope,
+                reset_config.workflow(normalized_scope),
+                selected,
+                selected_refinement,
+            )
+            workflow_feedback_label.configure(
+                text=self._t("workflow_reset_done"), text_color="#69c58a")
+            refresh_model_ui(rebuild_menu=False)
+            refresh_dirty_state()
+
+        workflow_scope_menu.configure(command=select_workflow_scope)
+        workflow_test_button.configure(command=test_workflow_route)
+        workflow_reset_button.configure(command=reset_workflow_route)
+        load_workflow_form()
+
         # Settings contains local runtime preferences, diagnostics, and an
         # explicit secure update action. Update checks never run in the background.
         preferences_inner = ctk.CTkFrame(
@@ -8128,6 +8816,7 @@ class App(ctk.CTk):
             "transcription": (selected["provider"], selected["model"]),
             "refinement": (
                 selected_refinement["provider"], selected_refinement["model"]),
+            "workflows": workflow_controller.workflows,
             "autostart": bool(autostart_switch.get()),
         }
 
@@ -8136,6 +8825,7 @@ class App(ctk.CTk):
                 "transcription": (selected["provider"], selected["model"]),
                 "refinement": (
                     selected_refinement["provider"], selected_refinement["model"]),
+                "workflows": workflow_controller.workflows,
                 "autostart": bool(autostart_switch.get()),
             }
 
@@ -8154,6 +8844,11 @@ class App(ctk.CTk):
                 autostart_switch.select()
             else:
                 autostart_switch.deselect()
+            workflow_controller._config = replace(
+                workflow_controller.config,
+                workflows=saved_settings["workflows"],
+            )
+            load_workflow_form(workflow_scope_state["scope"])
             model_menu_visible["value"] = False
             menu_shell.pack_forget()
             refinement_menu_visible["value"] = False
@@ -9042,6 +9737,21 @@ class App(ctk.CTk):
                         error = "Could not save local-ASR refinement setting"
                         message.configure(text=f"Could not save setting: {error}")
                         return
+                    # This preference is persisted immediately, while the
+                    # settings window keeps a longer-lived typed draft.  Sync
+                    # only the local refinement flag in that draft so a later
+                    # global Apply cannot write the old value back over the
+                    # just-saved preference or disturb other unsaved routes.
+                    _sync_local_asr_refinement_draft(
+                        workflow_controller, saved_settings, requested)
+                    _sync_selected_workflow_form_widgets(
+                        workflow_scope_state["scope"],
+                        WorkflowScope.LOCAL_ASR_REFINEMENT,
+                        workflow_widgets,
+                        workflow_controller.route(
+                            WorkflowScope.LOCAL_ASR_REFINEMENT),
+                        fields=("enabled",),
+                    )
                     refresh_dirty_state()
 
                 refinement_switch.configure(command=apply_local_preference)
@@ -9111,6 +9821,12 @@ class App(ctk.CTk):
                 def remove_local():
                     persisted_provider = str(APP_CONFIG.get(
                         "transcription_provider", "gemini")).strip().lower()
+                    if _local_asr_removal_has_transcription_draft_conflict(
+                            workflow_controller, persisted_provider):
+                        message.configure(
+                            text=("Apply a cloud transcription workflow before "
+                                  "removing the local assets."))
+                        return
                     if persisted_provider == provider:
                         if not _persist_cloud_selection_before_local_removal(
                                 selected, active_options(), model_keys,
@@ -9121,8 +9837,16 @@ class App(ctk.CTk):
                             return
                         # The cloud route is now durable even if the user
                         # closes Settings without pressing Apply.
-                        saved_settings["transcription"] = (
-                            selected["provider"], selected["model"])
+                        _sync_forced_cloud_transcription_draft(
+                            workflow_controller, saved_settings, selected)
+                        _sync_selected_workflow_form_widgets(
+                            workflow_scope_state["scope"],
+                            WorkflowScope.TRANSCRIPTION,
+                            workflow_widgets,
+                            workflow_controller.route(
+                                WorkflowScope.TRANSCRIPTION),
+                            fields=("provider_id", "model_id"),
+                        )
                     elif selected["provider"] == provider:
                         message.configure(
                             text=("Select a cloud provider explicitly before removing "
@@ -9258,6 +9982,12 @@ class App(ctk.CTk):
             text_color=TEXT, font=font_body,
             command=lambda: show_page("models"))
         nav_buttons["models"].pack(fill="x", padx=9, pady=(12, 3))
+        nav_buttons["workflows"] = ctk.CTkButton(sidebar,
+            text=self._t("workflows_section"), anchor="w", height=38,
+            corner_radius=9, fg_color="transparent", hover_color="#242424",
+            text_color=DIM, font=font_body,
+            command=lambda: show_page("workflows"))
+        nav_buttons["workflows"].pack(fill="x", padx=9, pady=3)
         nav_buttons["providers"] = ctk.CTkButton(sidebar,
             text=self._t("providers_section"), anchor="w", height=38,
             corner_radius=9, fg_color="transparent", hover_color="#242424",
@@ -9334,11 +10064,15 @@ class App(ctk.CTk):
             if apply_feedback_job["active"]:
                 return
             try:
+                store_workflow_form()
                 _apply_settings_transaction(
                     selected, selected_refinement, active_options(),
                     active_text_options(), model_keys,
-                    bool(autostart_switch.get()), self.repositories)
-            except OSError:
+                    bool(autostart_switch.get()), self.repositories,
+                    workflow_mapping=workflow_controller.workflows.to_mapping())
+                workflow_controller.reload()
+                load_workflow_form(workflow_scope_state["scope"])
+            except (OSError, ValueError, ProviderError):
                 return
             saved_settings.clear()
             saved_settings.update(current_settings())
@@ -9564,15 +10298,17 @@ def _run_cli(argv: list[str]) -> int:
         parser.print_help()
         return 0
 
+    transcription_route = _workflow_route(WorkflowScope.TRANSCRIPTION)
+    transcription_provider = transcription_route.provider_id
+
     if args.command == "headless-transcribe-stdin":
-        provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
         raw_audio = sys.stdin.buffer.read()
         if not raw_audio:
             print(json.dumps({
                 "ok": False,
                 "error": "no_audio_stdin",
             }, ensure_ascii=False))
-            _shutdown_cli_transcription_provider(provider)
+            _shutdown_cli_transcription_provider(transcription_provider)
             return 1
 
         temp_path = DATA_DIR / f"headless_stdin_{int(time.time() * 1000)}.wav"
@@ -9583,13 +10319,14 @@ def _run_cli(argv: list[str]) -> int:
                 wav_file.setframerate(16000)
                 wav_file.writeframes(raw_audio)
 
-            text = call_transcription_provider(temp_path, args.mode, args.lang)
+            text = call_transcription_provider(
+                temp_path, args.mode, args.lang, route=transcription_route)
         finally:
             try:
                 temp_path.unlink(missing_ok=True)
             except Exception:
                 pass
-            _shutdown_cli_transcription_provider(provider)
+            _shutdown_cli_transcription_provider(transcription_provider)
 
         if text.startswith("[Error"):
             print(json.dumps({
@@ -9617,11 +10354,11 @@ def _run_cli(argv: list[str]) -> int:
         }, ensure_ascii=False))
         return 1
 
-    provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
     try:
-        text = call_transcription_provider(audio_path, args.mode, args.lang)
+        text = call_transcription_provider(
+            audio_path, args.mode, args.lang, route=transcription_route)
     finally:
-        _shutdown_cli_transcription_provider(provider)
+        _shutdown_cli_transcription_provider(transcription_provider)
     if text.startswith("[Error"):
         print(json.dumps({
             "ok": False,
