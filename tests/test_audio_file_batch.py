@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import threading
 import time
 from tempfile import TemporaryDirectory
@@ -10,6 +11,7 @@ from audio_file_batch import (
     AudioBatchConfigurationError,
     AudioBatchCancelledError,
     AudioBatchJob,
+    AudioConversionError,
     AudioFileResult,
     AudioFileBatchService,
     AudioFileStatus,
@@ -19,6 +21,7 @@ from audio_file_batch import (
     RetryableAudioBatchError,
     SUPPORTED_AUDIO_EXTENSIONS,
     UnsupportedAudioFormatError,
+    SoxAudioConverter,
     validate_audio_path,
 )
 from provider_http import CancellationToken
@@ -89,6 +92,10 @@ class AudioFileValidationTests(unittest.TestCase):
         with self.assertRaises(AudioFileValidationError) as raised:
             validate_audio_path("https://example.test/audio.wav")
         self.assertIn("local audio files", str(raised.exception))
+
+    def test_malformed_path_is_a_validation_error(self):
+        with self.assertRaises(AudioFileValidationError):
+            validate_audio_path("bad\x00name.wav")
 
     def test_selection_and_batch_limits_fail_before_worker_start(self):
         gateway = _FakeGateway()
@@ -243,6 +250,37 @@ class AudioFileBatchTests(unittest.TestCase):
             self.assertEqual(result.files[0].attempts, 2)
             self.assertEqual(attempts, 2)
 
+    def test_retries_reuse_one_immutable_audio_snapshot(self):
+        requests = []
+
+        class MutatingRetryGateway:
+            def transcribe(self, request, selection, cancel_token):
+                requests.append(request)
+                if len(requests) == 1:
+                    path.write_bytes(b"changed-after-snapshot")
+                    raise RetryableAudioBatchError("try again")
+                return TranscriptionResult("ok", selection.provider_id, selection.model)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"immutable-source")
+            result = AudioFileBatchService(
+                MutatingRetryGateway(), max_attempts=2).run([path], _selection())
+            self.assertEqual(result.files[0].status, AudioFileStatus.SUCCEEDED)
+            self.assertEqual([request.audio_bytes for request in requests], [
+                b"immutable-source", b"immutable-source",
+            ])
+
+    def test_malformed_path_does_not_abort_other_batch_files(self):
+        gateway = _FakeGateway()
+        with TemporaryDirectory() as directory:
+            valid = Path(directory) / "valid.wav"
+            valid.write_bytes(b"fixture")
+            result = AudioFileBatchService(gateway).run(
+                ["bad\x00name.wav", valid], _selection())
+            self.assertEqual(result.files[0].status, AudioFileStatus.FAILED)
+            self.assertEqual(result.files[1].status, AudioFileStatus.SUCCEEDED)
+
     def test_permanent_quota_failure_is_not_retried(self):
         attempts = 0
 
@@ -298,6 +336,46 @@ class AudioFileBatchTests(unittest.TestCase):
             )
             self.assertEqual(job._results[0].status, AudioFileStatus.CANCELLED)
             self.assertFalse(job._results[0].text)
+
+
+class AudioConverterTests(unittest.TestCase):
+    def test_kill_fallback_waits_for_process_before_cleanup(self):
+        class KilledProcess:
+            def __init__(self):
+                self.wait_calls = []
+                self.terminated = False
+                self.killed = False
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout=None):
+                self.wait_calls.append(timeout)
+                if len(self.wait_calls) == 1:
+                    raise subprocess.TimeoutExpired("sox", timeout)
+                return -9
+
+        process = KilledProcess()
+        converter = SoxAudioConverter(
+            executable="sox",
+            timeout_seconds=0.001,
+            popen=lambda *args, **kwargs: process,
+        )
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "input.ogg"
+            destination = Path(directory) / "output.wav"
+            source.write_bytes(b"fixture")
+            with self.assertRaises(AudioConversionError):
+                converter.convert(source, destination, CancellationToken())
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+        self.assertEqual(len(process.wait_calls), 2)
 
 
 class RegistryGatewayTests(unittest.TestCase):

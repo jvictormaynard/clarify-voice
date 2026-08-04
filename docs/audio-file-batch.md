@@ -50,8 +50,9 @@ containers are rejected with a per-file error because the packaged runtime
 does not ship the optional codecs needed to claim those formats.
 
 WAV files are read into an immutable byte snapshot and sent to the typed
-provider. Other accepted formats are converted by `SoxAudioConverter` to a
-16 kHz, mono, signed-PCM temporary WAV. The source path is never passed to a
+provider. Other accepted formats are converted once by `SoxAudioConverter` to
+a 16 kHz, mono, signed-PCM temporary WAV, which is then snapshotted and reused
+for every bounded provider attempt. The source path is never passed to a
 cleanup operation and is never deleted or replaced. Conversion output is
 required to stay inside the service-owned temporary directory.
 
@@ -86,9 +87,10 @@ meeting capture, diarization, cloud sync, or persistent background queue.
 ## Acceptance evidence
 
 Deterministic tests in `tests/test_audio_file_batch.py` cover the extension
-allowlist, URL rejection, typed registry reuse, partial failures, retry,
-bounded concurrency, cooperative cancellation, source preservation, and
-temporary conversion cleanup. Packaged Windows acceptance should later add a
+allowlist, URL and malformed-path rejection, typed registry reuse, partial
+failures, immutable retry snapshots, bounded concurrency, cooperative
+cancellation, source preservation, converter termination, and temporary
+conversion cleanup. Packaged Windows acceptance should later add a
 real file-picker/drag-and-drop surface, representative fixtures for every
 advertised format, and offline local-ASR/cloud endpoint evidence; this issue's
 service does not claim that UI evidence.

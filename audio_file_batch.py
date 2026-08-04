@@ -15,8 +15,9 @@ providers/converters.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import os
@@ -298,6 +299,13 @@ def _terminate_process(process: Any) -> None:
             process.kill()
         except OSError:
             pass
+        try:
+            # ``kill`` is asynchronous on Windows.  The temporary directory
+            # must not be removed until the child has actually detached from
+            # the normalized WAV.
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def _cancelled_error(error: BaseException) -> bool:
@@ -366,13 +374,15 @@ def validate_audio_path(
     if "://" in value:
         raise AudioFileValidationError(
             "Only local audio files are supported; URL downloads are disabled")
-    candidate = Path(value).expanduser()
     try:
+        candidate = Path(value).expanduser()
         resolved = candidate.resolve(strict=False)
-    except OSError as error:
+        exists = resolved.exists()
+        is_file = resolved.is_file()
+    except (OSError, RuntimeError, ValueError) as error:
         raise AudioFileValidationError(
             f"Could not resolve audio file: {value}") from error
-    if not resolved.exists() or not resolved.is_file():
+    if not exists or not is_file:
         raise AudioFileValidationError(f"Audio file does not exist: {value}")
     extension = resolved.suffix.casefold()
     if extension not in SUPPORTED_AUDIO_EXTENSIONS:
@@ -388,7 +398,7 @@ def validate_audio_path(
             raise AudioFileValidationError(
                 f"Audio file exceeds the {max_bytes} byte limit: "
                 f"{resolved.name}")
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise AudioFileValidationError(
             f"Could not inspect audio file: {resolved.name}") from error
     return resolved
@@ -424,6 +434,14 @@ class AudioBatchResult:
     def cancelled_files(self) -> tuple[AudioFileResult, ...]:
         return tuple(item for item in self.files
                      if item.status is AudioFileStatus.CANCELLED)
+
+
+@dataclass(frozen=True)
+class _PreparedAudio:
+    """One immutable request snapshot shared by all provider attempts."""
+
+    request_path: Path
+    audio_bytes: bytes
 
 
 ProgressCallback = Callable[[AudioFileResult], None]
@@ -466,23 +484,30 @@ class AudioBatchJob:
     def cancel(self) -> None:
         """Stop new submissions and cooperatively cancel active operations."""
 
-        # Publish the cancellation intent before waiting for the scheduler's
-        # lock.  If a provider future has returned but is waiting to publish,
-        # the terminal publication below will observe this token and convert a
-        # would-be success into ``cancelled``.
-        self._cancel_token.cancel()
+        callbacks: list[AudioFileResult] = []
         with self._lock:
+            # Cancellation and pending/active state transitions are one
+            # linearizable operation.  A terminal success publication either
+            # acquires this lock first, or observes the cancellation token
+            # after this block and is converted to ``CANCELLED``.
+            self._cancel_token.cancel()
             tokens = tuple(self._active_tokens.values())
             pending = tuple(
                 index for index, item in enumerate(self._results)
                 if item.status is AudioFileStatus.PENDING
             )
-        for index in pending:
-            self._publish(index, replace(
-                self._results[index], status=AudioFileStatus.CANCELLED,
-                error="Batch cancelled before processing"))
-        for token in tokens:
-            token.cancel()
+            for index in pending:
+                item = replace(
+                    self._results[index],
+                    status=AudioFileStatus.CANCELLED,
+                    error="Batch cancelled before processing",
+                )
+                self._results[index] = item
+                callbacks.append(item)
+            for token in tokens:
+                token.cancel()
+        for item in callbacks:
+            self._notify(item)
 
     @property
     def done(self) -> bool:
@@ -521,7 +546,10 @@ class AudioBatchJob:
             self._results[index] = item
             if active_token is not None:
                 self._active_tokens.pop(index, None)
-            callback = self._callback
+        self._notify(item)
+
+    def _notify(self, item: AudioFileResult) -> None:
+        callback = self._callback
         if callback is not None:
             try:
                 callback(item)
@@ -601,38 +629,55 @@ class AudioBatchJob:
         current = self._results[index]
         attempts = 0
         last_error: BaseException | None = None
-        while attempts < self._service.max_attempts:
-            attempts += 1
-            if token.cancelled or self._cancel_token.cancelled:
+        try:
+            # Normalize and snapshot once.  Every provider attempt below uses
+            # these same bytes, even if the caller mutates or removes the
+            # original path after a transient failure.
+            with self._service._prepare_audio(path, token) as prepared:
+                while attempts < self._service.max_attempts:
+                    attempts += 1
+                    if token.cancelled or self._cancel_token.cancelled:
+                        return replace(current, status=AudioFileStatus.CANCELLED,
+                                       attempts=attempts - 1,
+                                       error="File processing was cancelled")
+                    try:
+                        result = self._service._transcribe_prepared(
+                            prepared, self._selection, token)
+                        # A provider may finish concurrently with
+                        # ``job.cancel()`` after its final token check.  Do
+                        # not publish that result as successful once
+                        # cancellation has won the batch boundary.
+                        if token.cancelled or self._cancel_token.cancelled:
+                            return replace(
+                                current, status=AudioFileStatus.CANCELLED,
+                                attempts=attempts,
+                                error="File processing was cancelled")
+                        return AudioFileResult(
+                            path=path,
+                            status=AudioFileStatus.SUCCEEDED,
+                            text=result.text,
+                            provider_id=result.provider_id,
+                            model=result.model,
+                            attempts=attempts,
+                        )
+                    except BaseException as error:
+                        last_error = error
+                        if (token.cancelled or self._cancel_token.cancelled
+                                or _cancelled_error(error)):
+                            return replace(
+                                current, status=AudioFileStatus.CANCELLED,
+                                attempts=attempts,
+                                error="File processing was cancelled")
+                        if (attempts >= self._service.max_attempts
+                                or not _retryable_error(error)):
+                            break
+        except BaseException as error:
+            last_error = error
+            if (token.cancelled or self._cancel_token.cancelled
+                    or _cancelled_error(error)):
                 return replace(current, status=AudioFileStatus.CANCELLED,
-                               attempts=attempts - 1,
+                               attempts=attempts,
                                error="File processing was cancelled")
-            try:
-                result = self._service._transcribe_one(path, self._selection, token)
-                # A provider may finish concurrently with ``job.cancel()``
-                # after its final token check.  Do not publish that result as
-                # successful once cancellation has won the batch boundary.
-                if token.cancelled or self._cancel_token.cancelled:
-                    return replace(current, status=AudioFileStatus.CANCELLED,
-                                   attempts=attempts,
-                                   error="File processing was cancelled")
-                return AudioFileResult(
-                    path=path,
-                    status=AudioFileStatus.SUCCEEDED,
-                    text=result.text,
-                    provider_id=result.provider_id,
-                    model=result.model,
-                    attempts=attempts,
-                )
-            except BaseException as error:
-                last_error = error
-                if (token.cancelled or self._cancel_token.cancelled
-                        or _cancelled_error(error)):
-                    return replace(current, status=AudioFileStatus.CANCELLED,
-                                   attempts=attempts,
-                                   error="File processing was cancelled")
-                if attempts >= self._service.max_attempts or not _retryable_error(error):
-                    break
         return replace(current, status=AudioFileStatus.FAILED,
                        attempts=attempts, error=str(last_error or "Unknown error"))
 
@@ -731,20 +776,45 @@ class AudioFileBatchService:
         selection: FileTranscriptionSelection,
         cancel_token: CancellationToken,
     ) -> TranscriptionResult:
+        """Transcribe one file for callers that do not need retries."""
+
+        with self._prepare_audio(path, cancel_token) as prepared:
+            return self._transcribe_prepared(prepared, selection, cancel_token)
+
+    def _transcribe_prepared(
+        self,
+        prepared: _PreparedAudio,
+        selection: FileTranscriptionSelection,
+        cancel_token: CancellationToken,
+    ) -> TranscriptionResult:
+        if cancel_token.cancelled:
+            raise AudioBatchCancelledError("File processing was cancelled")
+        return self.gateway.transcribe(
+            _selection_request(
+                prepared.request_path, prepared.audio_bytes, selection),
+            selection,
+            cancel_token,
+        )
+
+    @contextmanager
+    def _prepare_audio(
+        self,
+        path: Path,
+        cancel_token: CancellationToken,
+    ) -> Iterator[_PreparedAudio]:
+        """Create one bounded immutable snapshot for all provider attempts."""
+
         if cancel_token.cancelled:
             raise AudioBatchCancelledError("File processing was cancelled")
         # A private directory is used only when conversion is necessary.  No
         # cleanup path ever points at the imported source.
         if path.suffix.casefold() == CANONICAL_AUDIO_EXTENSION:
-            source = path
-            audio_bytes = _snapshot_audio(
-                source, cancel_token, max_bytes=self.max_audio_bytes)
-            request_path = source
-            return self.gateway.transcribe(
-                _selection_request(request_path, audio_bytes, selection),
-                selection,
-                cancel_token,
+            yield _PreparedAudio(
+                request_path=path,
+                audio_bytes=_snapshot_audio(
+                    path, cancel_token, max_bytes=self.max_audio_bytes),
             )
+            return
         if self.temp_root is not None:
             self.temp_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
@@ -766,10 +836,9 @@ class AudioFileBatchService:
                     "Audio converter returned a path outside its temporary directory")
             audio_bytes = _snapshot_audio(
                 normalized, cancel_token, max_bytes=self.max_audio_bytes)
-            return self.gateway.transcribe(
-                _selection_request(normalized, audio_bytes, selection),
-                selection,
-                cancel_token,
+            yield _PreparedAudio(
+                request_path=normalized,
+                audio_bytes=audio_bytes,
             )
 
 
