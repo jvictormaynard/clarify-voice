@@ -186,6 +186,18 @@ class ProviderHttpPolicyTests(unittest.TestCase):
         self.assertEqual(session.post.call_count, 1)
         self.assertTrue(first.closed)
 
+    def test_unsafe_post_typed_error_preserves_retry_after_for_outer_retries(self):
+        for status, error_type in ((429, RateLimitError), (503, ServiceUnavailableError)):
+            with self.subTest(status=status):
+                first = FakeResponse(status, headers={"Retry-After": "30"})
+                client, session = self.make_client(post=[first])
+                with self.assertRaises(error_type) as raised:
+                    client.request(
+                        "POST", "https://api.example/transcribe",
+                        provider="openai", operation="transcription")
+                self.assertEqual(raised.exception.retry_after_seconds, 30.0)
+                self.assertEqual(session.post.call_count, 1)
+
     def test_generic_quota_text_is_rate_limit_not_permanent_quota(self):
         first = FakeResponse(
             429, {"error": {"message": "quota temporarily exceeded; retry later"}})

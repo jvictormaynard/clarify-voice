@@ -138,6 +138,24 @@ The hotkeys capture the original `SelectionTarget` before Tk can take focus and
 dispatch explicit workflow commands; legacy helpers remain only for narrow
 compatibility tests until their callers are retired.
 
+### `audio_file_batch.py`
+
+Defines the UI-independent local-file import boundary staged for issue #54.
+`AudioFileBatchService` validates a finite local path list, exposes explicit
+provider/model/language selection, snapshots WAV inputs, and normalizes other
+allowlisted SoX formats into a private temporary WAV. `AudioBatchJob` submits
+at most a configured number of provider operations, publishes per-file states,
+propagates cooperative cancellation, and preserves successful results when
+another file fails. `RegistryAudioTranscriptionGateway` reuses the typed
+`ProviderRegistry` contract rather than duplicating provider or HTTP logic.
+
+Imported paths remain user-owned. The service never deletes an original,
+resolves a URL, or creates a persistent queue; conversion directories are
+removed in a bounded `TemporaryDirectory` scope. A future Tk file-picker or
+drag-and-drop surface should marshal the callback onto the Tk loop and own only
+the presentation/lifecycle controls. Packaged UI and representative Windows
+format acceptance remain follow-up evidence, not a claim of this extraction.
+
 ### `desktop_state.py`
 
 Contains the legacy `WorkflowController` used by the current Tk path to prevent

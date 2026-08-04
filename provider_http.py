@@ -381,22 +381,36 @@ def _http_error(response: requests.Response, provider: str,
         "status_code": status,
         "operation_id": operation_id,
     }
+    headers = getattr(response, "headers", {}) or {}
+    try:
+        retry_after_seconds = _retry_after_seconds(
+            headers.get("Retry-After"))
+    except (AttributeError, TypeError, ValueError):
+        retry_after_seconds = None
+
+    def finish(error: ProviderError) -> ProviderError:
+        if retry_after_seconds is not None:
+            # Keep the typed error content-free while carrying the server's
+            # bounded wait hint to an outer operation-level retry policy.
+            setattr(error, "retry_after_seconds", retry_after_seconds)
+        return error
+
     if status in (401, 403):
-        return AuthenticationError(**details)
+        return finish(AuthenticationError(**details))
     if status == 429:
         if _is_permanent_quota(classification):
-            return QuotaError(**details)
-        return RateLimitError(**details)
+            return finish(QuotaError(**details))
+        return finish(RateLimitError(**details))
     if status in (408,):
-        return ProviderTimeoutError(**details)
+        return finish(ProviderTimeoutError(**details))
     if status in (502, 503, 504) or status >= 500:
-        return ServiceUnavailableError(**details)
+        return finish(ServiceUnavailableError(**details))
     if status in (400, 404) and _is_invalid_model_response(
             operation, error_code, classification_text, error_status):
-        return InvalidModelError(**details)
+        return finish(InvalidModelError(**details))
     if status in (400, 404, 405, 409, 415, 422):
-        return InvalidRequestError(**details)
-    return ProviderError(**details)
+        return finish(InvalidRequestError(**details))
+    return finish(ProviderError(**details))
 
 
 def _network_error(error: BaseException, provider: str,
