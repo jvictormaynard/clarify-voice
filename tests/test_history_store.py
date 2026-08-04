@@ -277,6 +277,35 @@ class HistoryStoreTests(unittest.TestCase):
             persisted = Path(store.path).read_text(encoding="utf-8")
             self.assertNotIn("123456789", persisted)
 
+    def test_escaped_unquoted_structures_ignore_string_delimiters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            errors = (
+                'body="{\\"token\\": {\\"a\\": \\"}\\", '
+                '\\"tail\\": \\"SUPERSECRET\\"}}"',
+                'body="{\\"token\\": [\\"&\\", \\"ARRAYSECRET\\"]}"',
+            )
+            for index, error in enumerate(errors):
+                store.add(
+                    status="error",
+                    error=error,
+                    record_id=f"escaped-structural-unquoted-{index}",
+                )
+
+            redacted = [record.error for record in store.list_records()]
+            self.assertEqual(redacted, [
+                'body="{\\"token\\": <redacted>}"',
+                'body="{\\"token\\": <redacted>}"',
+            ])
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            for value in ("SUPERSECRET", "ARRAYSECRET"):
+                self.assertNotIn(value, persisted)
+
     def test_escaped_mapping_credentials_with_escaped_quotes_are_fully_redacted(
         self,
     ):

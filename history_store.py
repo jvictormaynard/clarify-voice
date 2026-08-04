@@ -252,25 +252,31 @@ def _escaped_unquoted_field_value_end(value: str, start: int) -> int:
 
     depth = 0
     quote: str | None = None
-    escaped = False
+    delimiter_run: int | None = None
+    backslash_run = 0
     for index in range(start, len(value)):
         character = value[index]
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == quote:
-                quote = None
-            continue
-        if escaped:
-            escaped = False
-            continue
         if character == "\\":
-            escaped = True
-        elif character in "'\"":
-            quote = character
-        elif character in "{[":
+            backslash_run += 1
+            continue
+        if character in "'\"":
+            if delimiter_run is None:
+                delimiter_run = backslash_run
+            modulus = 2 * (delimiter_run + 1)
+            is_delimiter = (
+                backslash_run - delimiter_run
+            ) % modulus == 0
+            if is_delimiter:
+                if quote is None:
+                    quote = character
+                elif quote == character:
+                    quote = None
+            backslash_run = 0
+            continue
+        if quote is not None:
+            backslash_run = 0
+            continue
+        if character in "{[":
             depth += 1
         elif character in "}]":
             if depth:
@@ -279,6 +285,7 @@ def _escaped_unquoted_field_value_end(value: str, start: int) -> int:
                 return index
         elif depth == 0 and character in ",;&\n":
             return index
+        backslash_run = 0
     return len(value)
 
 
