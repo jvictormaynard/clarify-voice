@@ -958,15 +958,58 @@ def _sync_local_asr_refinement_draft(
     controller and in the saved baseline; other workflow edits remain drafts.
     """
     requested = bool(enabled)
-    workflow_controller.sync_local_asr_refinement(requested)
+    route = replace(
+        workflow_controller.route(WorkflowScope.LOCAL_ASR_REFINEMENT),
+        enabled=requested,
+    )
+    _sync_persisted_workflow_route_draft(
+        workflow_controller,
+        saved_settings,
+        WorkflowScope.LOCAL_ASR_REFINEMENT,
+        route,
+    )
+
+
+def _sync_persisted_workflow_route_draft(
+        workflow_controller: WorkflowSettingsController,
+        saved_settings: dict[str, object],
+        scope: WorkflowScope | str,
+        route: WorkflowRoute) -> None:
+    """Merge one externally persisted route into the draft and baseline."""
+    workflow_controller.sync_persisted_route(scope, route)
     saved_workflows = saved_settings.get("workflows")
     if not isinstance(saved_workflows, WorkflowConfig):
         return
-    saved_local = saved_workflows.route(WorkflowScope.LOCAL_ASR_REFINEMENT)
     saved_settings["workflows"] = saved_workflows.with_route(
-        WorkflowScope.LOCAL_ASR_REFINEMENT,
-        replace(saved_local, enabled=requested),
+        normalize_workflow_scope(scope), route,
     )
+
+
+def _sync_selected_workflow_enabled_widget(
+        scope: WorkflowScope | str, widget, enabled: bool) -> None:
+    """Reflect a typed route's enabled state in the selected form widget."""
+    if normalize_workflow_scope(scope) != WorkflowScope.LOCAL_ASR_REFINEMENT.value:
+        return
+    if bool(enabled):
+        widget.select()
+    else:
+        widget.deselect()
+
+
+def _sync_forced_cloud_transcription_draft(
+        workflow_controller: WorkflowSettingsController,
+        saved_settings: dict[str, object],
+        selected: Mapping[str, object]) -> None:
+    """Reflect the cloud route forced before local-ASR asset removal."""
+    route = _typed_app_config().workflow(WorkflowScope.TRANSCRIPTION)
+    _sync_persisted_workflow_route_draft(
+        workflow_controller,
+        saved_settings,
+        WorkflowScope.TRANSCRIPTION,
+        route,
+    )
+    saved_settings["transcription"] = (
+        selected.get("provider"), selected.get("model"))
 
 
 def _sync_saved_settings_after_workflow_reset(
@@ -8321,7 +8364,7 @@ class App(ctk.CTk):
         # Workflow routes have their own small, typed settings surface.  The
         # page edits a repository-backed draft; Apply persists all scopes in a
         # single transaction while Reset/Test act on the selected scope.
-        workflows_inner = ctk.CTkFrame(
+        workflows_inner = ctk.CTkScrollableFrame(
             pages["workflows"], fg_color="transparent")
         workflows_inner.pack(fill="both", expand=True, padx=24, pady=22)
         ctk.CTkLabel(
@@ -8475,6 +8518,17 @@ class App(ctk.CTk):
                 enabled=bool(workflow_enabled_switch.get()),
             )
             refresh_workflow_effective()
+
+        def workflow_form_changed(_event=None):
+            """Keep the current workflow draft and Undo affordance live."""
+            store_workflow_form()
+            refresh_dirty_state()
+
+        workflow_provider_menu.configure(command=workflow_form_changed)
+        workflow_model_entry.bind("<KeyRelease>", workflow_form_changed)
+        workflow_endpoint_entry.bind("<KeyRelease>", workflow_form_changed)
+        workflow_prompt_box.bind("<KeyRelease>", workflow_form_changed)
+        workflow_enabled_switch.configure(command=workflow_form_changed)
 
         def select_workflow_scope(label):
             store_workflow_form()
@@ -9583,12 +9637,11 @@ class App(ctk.CTk):
                     # just-saved preference or disturb other unsaved routes.
                     _sync_local_asr_refinement_draft(
                         workflow_controller, saved_settings, requested)
-                    if (workflow_scope_state["scope"]
-                            == WorkflowScope.LOCAL_ASR_REFINEMENT.value):
-                        if requested:
-                            workflow_enabled_switch.select()
-                        else:
-                            workflow_enabled_switch.deselect()
+                    _sync_selected_workflow_enabled_widget(
+                        workflow_scope_state["scope"],
+                        workflow_enabled_switch,
+                        requested,
+                    )
                     refresh_dirty_state()
 
                 refinement_switch.configure(command=apply_local_preference)
@@ -9668,8 +9721,8 @@ class App(ctk.CTk):
                             return
                         # The cloud route is now durable even if the user
                         # closes Settings without pressing Apply.
-                        saved_settings["transcription"] = (
-                            selected["provider"], selected["model"])
+                        _sync_forced_cloud_transcription_draft(
+                            workflow_controller, saved_settings, selected)
                     elif selected["provider"] == provider:
                         message.configure(
                             text=("Select a cloud provider explicitly before removing "

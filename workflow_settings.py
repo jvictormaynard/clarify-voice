@@ -117,6 +117,23 @@ class WorkflowSettingsController:
         self._config = self.repository.apply(self._config)
         return self._config
 
+    def sync_persisted_route(
+        self, scope: WorkflowScope | str, route: WorkflowRoute
+    ) -> AppConfig:
+        """Reflect one external route save without discarding other drafts."""
+
+        normalized = normalize_workflow_scope(scope)
+        self._config = replace(
+            self._config,
+            workflows=self.workflows.with_route(normalized, route),
+            local_asr_cloud_refinement=(
+                route.enabled
+                if normalized == WorkflowScope.LOCAL_ASR_REFINEMENT.value
+                else self._config.local_asr_cloud_refinement
+            ),
+        )
+        return self._config
+
     def sync_local_asr_refinement(self, enabled: bool) -> AppConfig:
         """Reflect an immediate legacy preference save in the current draft.
 
@@ -128,12 +145,7 @@ class WorkflowSettingsController:
 
         normalized = WorkflowScope.LOCAL_ASR_REFINEMENT.value
         route = replace(self.route(normalized), enabled=bool(enabled))
-        self._config = replace(
-            self._config,
-            workflows=self.workflows.with_route(normalized, route),
-            local_asr_cloud_refinement=bool(enabled),
-        )
-        return self._config
+        return self.sync_persisted_route(normalized, route)
 
     def reset(self, scope: WorkflowScope | str) -> AppConfig:
         """Persist one scope's canonical defaults while retaining all others."""

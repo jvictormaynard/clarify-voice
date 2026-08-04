@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import tempfile
 import unittest
 from pathlib import Path
@@ -157,6 +158,32 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             saved_settings["workflows"].route(
                 WorkflowScope.LOCAL_ASR_REFINEMENT).enabled)
 
+    def test_immediate_local_refinement_save_updates_selected_widget_both_ways(self):
+        class FakeSwitch:
+            def __init__(self):
+                self.calls = []
+
+            def select(self):
+                self.calls.append("select")
+
+            def deselect(self):
+                self.calls.append("deselect")
+
+        for enabled, expected_call in ((True, "select"), (False, "deselect")):
+            with self.subTest(enabled=enabled):
+                switch = FakeSwitch()
+                app._sync_selected_workflow_enabled_widget(
+                    WorkflowScope.LOCAL_ASR_REFINEMENT,
+                    switch,
+                    enabled,
+                )
+                self.assertEqual(switch.calls, [expected_call])
+
+        unrelated = FakeSwitch()
+        app._sync_selected_workflow_enabled_widget(
+            WorkflowScope.REWRITE, unrelated, True)
+        self.assertEqual(unrelated.calls, [])
+
     def test_reset_baseline_updates_one_scope_and_keeps_other_drafts_dirty(self):
         controller = WorkflowSettingsController(self.repository())
         baseline = controller.repository.load()
@@ -172,8 +199,10 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
         }
 
         reset_config = controller.reset(WorkflowScope.TRANSLATION)
-        selected = {"provider": "gemini", "model": "gemini-2.5-flash"}
-        selected_refinement = {"provider": "openai", "model": "gpt-4o-mini"}
+        selected = {"provider": "groq", "model": "whisper-large-v3"}
+        selected_refinement = {
+            "provider": "groq", "model": "llama-3.3-70b-versatile"
+        }
         app._sync_saved_settings_after_workflow_reset(
             saved_settings,
             WorkflowScope.TRANSLATION,
@@ -190,9 +219,94 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             saved_settings["workflows"].route(WorkflowScope.REWRITE),
             baseline.workflow(WorkflowScope.REWRITE),
         )
+        self.assertEqual(
+            saved_settings["transcription"],
+            ("gemini", "gemini-2.5-flash"),
+        )
+        self.assertEqual(
+            saved_settings["refinement"],
+            ("openai", "gpt-4o-mini"),
+        )
         self.assertNotEqual(
             controller.route(WorkflowScope.REWRITE),
             saved_settings["workflows"].route(WorkflowScope.REWRITE),
+        )
+
+    def test_reset_baseline_updates_legacy_compatibility_for_reset_scope(self):
+        controller = WorkflowSettingsController(self.repository())
+        baseline = controller.repository.load()
+        saved_settings = {
+            "transcription": ("gemini", "gemini-2.5-flash"),
+            "refinement": ("openai", "gpt-4o-mini"),
+            "workflows": baseline.workflows,
+            "autostart": False,
+        }
+        selected = {"provider": "groq", "model": "whisper-large-v3"}
+        selected_refinement = {
+            "provider": "groq", "model": "llama-3.3-70b-versatile"
+        }
+
+        app._sync_saved_settings_after_workflow_reset(
+            saved_settings,
+            WorkflowScope.TRANSCRIPTION,
+            baseline.workflow(WorkflowScope.TRANSCRIPTION),
+            selected,
+            selected_refinement,
+        )
+
+        self.assertEqual(
+            saved_settings["transcription"],
+            ("groq", "whisper-large-v3"),
+        )
+        self.assertEqual(
+            saved_settings["refinement"],
+            ("openai", "gpt-4o-mini"),
+        )
+
+    def test_forced_cloud_selection_updates_transcription_draft(self):
+        controller = WorkflowSettingsController(self.repository())
+        controller.set_route(
+            WorkflowScope.TRANSCRIPTION,
+            provider_id="local_asr",
+            model_id="ggml-small",
+        )
+        controller.set_route(
+            WorkflowScope.REWRITE,
+            prompt="unsaved rewrite policy",
+        )
+        persisted = controller.repository.load()
+        forced_route = replace(
+            persisted.workflow(WorkflowScope.TRANSCRIPTION),
+            provider_id="openai",
+            model_id="whisper-1",
+        )
+        forced_config = replace(
+            persisted,
+            workflows=persisted.workflows.with_route(
+                WorkflowScope.TRANSCRIPTION, forced_route),
+        )
+        saved_settings = {"workflows": persisted.workflows}
+        with patch.object(app, "_typed_app_config", return_value=forced_config):
+            app._sync_forced_cloud_transcription_draft(
+                controller,
+                saved_settings,
+                {"provider": "openai", "model": "whisper-1"},
+            )
+        controller.apply()
+
+        restarted = WorkflowSettingsController(controller.repository)
+        self.assertEqual(
+            restarted.route(WorkflowScope.TRANSCRIPTION).provider_id,
+            "openai",
+        )
+        self.assertEqual(
+            restarted.route(WorkflowScope.REWRITE).prompt,
+            "unsaved rewrite policy",
+        )
+        self.assertEqual(
+            saved_settings["workflows"].route(
+                WorkflowScope.TRANSCRIPTION).provider_id,
+            "openai",
         )
 
 
