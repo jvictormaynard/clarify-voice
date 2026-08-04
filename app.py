@@ -7366,6 +7366,8 @@ class App(ctk.CTk):
                 )
                 return
             if phase is VoiceTranslationPhase.CANCELLED:
+                if not voice_terminal_is_current(event.operation_id):
+                    return
                 self._set_state("ready")
 
         try:

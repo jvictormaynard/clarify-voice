@@ -1774,6 +1774,38 @@ class WorkflowAppBridgeTests(unittest.TestCase):
         set_state.assert_not_called()
         show_result.assert_not_called()
 
+    def test_voice_translation_cancellation_ignores_new_workflow(self):
+        set_state = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _workflow_service=SimpleNamespace(
+                state=SimpleNamespace(phase=app.WorkflowPhase.RECORDING)),
+            _set_state=set_state,
+            after=lambda _delay, callback: callback(),
+            app_state="recording",
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.CANCELLED,
+                2,
+            ),
+        )
+
+        set_state.assert_not_called()
+
+        harness._workflow_service.state.phase = app.WorkflowPhase.READY
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.CANCELLED,
+                2,
+            ),
+        )
+        set_state.assert_called_once_with("ready")
+
     def test_voice_translation_failure_shows_retained_translation_or_raw_text(self):
         show_result = Mock()
         set_state = Mock()
