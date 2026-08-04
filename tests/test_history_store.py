@@ -84,6 +84,28 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(records[1].error, "HTTP timeout; api_key=<redacted>")
             self.assertNotIn("live-secret", Path(store.path).read_text(encoding="utf-8"))
 
+    def test_authorization_and_bearer_values_are_redacted_in_error_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            store.add(
+                status="error",
+                error="Authorization: Bearer sk-secret; Bearer another-secret",
+            )
+
+            error = store.list_records()[0].error
+            self.assertEqual(
+                error,
+                "Authorization=<redacted>; Bearer <redacted>",
+            )
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            self.assertNotIn("sk-secret", persisted)
+            self.assertNotIn("another-secret", persisted)
+
     def test_v0_migration_is_idempotent_and_drops_unsupported_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
@@ -241,6 +263,20 @@ class HistoryStoreTests(unittest.TestCase):
             with self.assertRaises(UnsupportedHistorySchemaVersionError):
                 store.list_records()
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+
+    def test_corrupt_primary_fails_closed_and_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.json"
+            path.write_text('{"schema_version": 1,', encoding="utf-8")
+            before = path.read_bytes()
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+
+            with self.assertRaises(HistoryStoreError):
+                store.list_records()
+            with self.assertRaises(HistoryStoreError):
+                store.add(raw_text="must not replace corruption")
+            self.assertEqual(path.read_bytes(), before)
 
     def test_future_interrupted_snapshot_cannot_replace_supported_primary(self):
         with tempfile.TemporaryDirectory() as directory:

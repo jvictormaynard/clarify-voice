@@ -10,6 +10,8 @@ versioned JSON document rather than adding a database dependency.  Writes are
 made to a same-directory temporary file, flushed, and atomically replaced.
 An intact temporary document can be recovered when startup finds the primary
 file missing or interrupted, while malformed temporary files are discarded.
+An unrecoverable corrupt primary is surfaced as a typed error and is never
+silently overwritten.
 No audio, API keys, provider payloads, or telemetry fields are accepted by the
 typed record and they are not included in any export format.
 """
@@ -90,11 +92,22 @@ def _format_timestamp(value: datetime) -> str:
 
 
 _SENSITIVE_ERROR_PATTERNS = (
-    re.compile(
-        r"(?i)(api[_ -]?key|access[_ -]?token|authorization|bearer|"
-        r"client[_ -]?secret|password|secret)\s*[:=]\s*([^\s,;&]+)"),
-    re.compile(r"(?i)([?&](?:api[_-]?key|access[_-]?token|token)=)"
-               r"[^&#\s]+"),
+    (
+        re.compile(
+            r"(?i)(api[_ -]?key|access[_ -]?token|authorization|"
+            r"client[_ -]?secret|password|secret)\s*[:=]\s*"
+            r"(?:bearer\s+)?([^\s,;&]+)"),
+        r"\1=<redacted>",
+    ),
+    (
+        re.compile(r"(?i)(bearer)\s+([^\s,;&]+)"),
+        r"\1 <redacted>",
+    ),
+    (
+        re.compile(r"(?i)([?&](?:api[_-]?key|access[_-]?token|token)=)"
+                   r"[^&#\s]+"),
+        r"\1<redacted>",
+    ),
 )
 
 
@@ -108,11 +121,8 @@ def _safe_error(value: str | None) -> str | None:
     if not value:
         return None
     sanitized = value
-    for pattern in _SENSITIVE_ERROR_PATTERNS:
-        if pattern.groups == 2:
-            sanitized = pattern.sub(r"\1=<redacted>", sanitized)
-        else:
-            sanitized = pattern.sub(r"\1<redacted>", sanitized)
+    for pattern, replacement in _SENSITIVE_ERROR_PATTERNS:
+        sanitized = pattern.sub(replacement, sanitized)
     return sanitized
 
 
@@ -334,10 +344,19 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
-def _read_json_mapping(path: Path) -> dict[str, Any] | None:
+def _read_json_mapping(
+    path: Path,
+    *,
+    strict: bool = False,
+) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, TypeError, ValueError):
+    except FileNotFoundError:
+        return None
+    except (OSError, TypeError, ValueError) as error:
+        if strict:
+            raise HistoryStoreError(
+                "The history file is unreadable or corrupt") from error
         return None
     return dict(payload) if isinstance(payload, Mapping) else None
 
@@ -444,6 +463,17 @@ class HistoryStore:
             return current
 
         if not temporary_payloads:
+            try:
+                primary_exists = self.path.exists()
+            except OSError as error:
+                raise HistoryStoreError(
+                    "The history file could not be inspected") from error
+            if primary_exists:
+                # Re-read in strict mode to preserve a typed cause for both
+                # malformed JSON and an unreadable file.
+                _read_json_mapping(self.path, strict=True)
+                raise HistoryStoreError(
+                    "The history file is unreadable or corrupt")
             return None
         _, _, selected, payload = max(temporary_payloads)
         try:

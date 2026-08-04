@@ -51,6 +51,11 @@ to version 1. Malformed entries are skipped while valid records remain
 available, and the repaired canonical document is written atomically. A newer
 schema is refused rather than overwritten by an older executable.
 
+If the primary JSON is malformed or unreadable and no intact temporary
+snapshot can be recovered, reads and appends fail closed with a typed error.
+The corrupt bytes are left in place for diagnosis or manual recovery rather
+than being silently replaced by a new snapshot.
+
 ## Retention, deletion, and export
 
 `retention_days` defaults to 30 for an enabled store. Pass another
