@@ -2971,10 +2971,11 @@ STRINGS = {
 _HOTKEY_TRANSLATIONS = {
     "en": {
         "hotkeys_section": "Keyboard shortcuts",
-        "hotkeys_subtitle": "Configure the four ClarifyVoice global actions.",
+        "hotkeys_subtitle": "Configure the five ClarifyVoice global actions.",
         "hotkey_recording": "Record / stop",
         "hotkey_rewrite": "Rewrite selected text",
         "hotkey_translation": "Translate selected text",
+        "hotkey_voice_translation": "Translate voice",
         "hotkey_visibility": "Show / hide window",
         "hotkey_capture": "Capture",
         "hotkey_capture_prompt": "Press a shortcut…",
@@ -2993,10 +2994,11 @@ _HOTKEY_TRANSLATIONS = {
     },
     "pt": {
         "hotkeys_section": "Atalhos de teclado",
-        "hotkeys_subtitle": "Configure as quatro ações globais do ClarifyVoice.",
+        "hotkeys_subtitle": "Configure as cinco ações globais do ClarifyVoice.",
         "hotkey_recording": "Gravar / parar",
         "hotkey_rewrite": "Reescrever texto selecionado",
         "hotkey_translation": "Traduzir texto selecionado",
+        "hotkey_voice_translation": "Traduzir voz",
         "hotkey_visibility": "Mostrar / ocultar janela",
         "hotkey_capture": "Capturar",
         "hotkey_capture_prompt": "Pressione um atalho…",
@@ -3015,10 +3017,11 @@ _HOTKEY_TRANSLATIONS = {
     },
     "es": {
         "hotkeys_section": "Atajos de teclado",
-        "hotkeys_subtitle": "Configura las cuatro acciones globales de ClarifyVoice.",
+        "hotkeys_subtitle": "Configura las cinco acciones globales de ClarifyVoice.",
         "hotkey_recording": "Grabar / detener",
         "hotkey_rewrite": "Reescribir texto seleccionado",
         "hotkey_translation": "Traducir texto seleccionado",
+        "hotkey_voice_translation": "Traducir voz",
         "hotkey_visibility": "Mostrar / ocultar ventana",
         "hotkey_capture": "Capturar",
         "hotkey_capture_prompt": "Pulsa un atajo…",
@@ -3037,10 +3040,11 @@ _HOTKEY_TRANSLATIONS = {
     },
     "de": {
         "hotkeys_section": "Tastenkürzel",
-        "hotkeys_subtitle": "Die vier globalen ClarifyVoice-Aktionen konfigurieren.",
+        "hotkeys_subtitle": "Die fünf globalen ClarifyVoice-Aktionen konfigurieren.",
         "hotkey_recording": "Aufnehmen / stoppen",
         "hotkey_rewrite": "Ausgewählten Text umschreiben",
         "hotkey_translation": "Ausgewählten Text übersetzen",
+        "hotkey_voice_translation": "Sprache übersetzen",
         "hotkey_visibility": "Fenster anzeigen / ausblenden",
         "hotkey_capture": "Aufnehmen",
         "hotkey_capture_prompt": "Tastenkürzel drücken…",
@@ -3059,10 +3063,11 @@ _HOTKEY_TRANSLATIONS = {
     },
     "ru": {
         "hotkeys_section": "Сочетания клавиш",
-        "hotkeys_subtitle": "Настройте четыре глобальных действия ClarifyVoice.",
+        "hotkeys_subtitle": "Настройте пять глобальных действий ClarifyVoice.",
         "hotkey_recording": "Запись / остановка",
         "hotkey_rewrite": "Переписать выделенный текст",
         "hotkey_translation": "Перевести выделенный текст",
+        "hotkey_voice_translation": "Перевести голос",
         "hotkey_visibility": "Показать / скрыть окно",
         "hotkey_capture": "Задать",
         "hotkey_capture_prompt": "Нажмите сочетание…",
@@ -7187,6 +7192,24 @@ class App(ctk.CTk):
                 self._update_focused_icon(self._voice_translation_target_executable)
                 self._set_state("translating")
                 return
+
+            def voice_terminal_is_current(
+                    operation_id, *, require_success_ui=False):
+                current_runtime = getattr(
+                    self, "_voice_translation_runtime", None)
+                if (current_runtime is not None
+                        and current_runtime.operation_id != operation_id):
+                    return False
+                service = getattr(self, "_workflow_service", None)
+                service_state = getattr(service, "state", None)
+                if (service_state is not None
+                        and service_state.phase is not WorkflowPhase.READY):
+                    return False
+                if (require_success_ui and hasattr(self, "app_state")
+                        and self.app_state != "success"):
+                    return False
+                return True
+
             result = event.workflow_state
             if phase is VoiceTranslationPhase.COMPLETED:
                 text = result.published_text if result is not None else ""
@@ -7199,21 +7222,10 @@ class App(ctk.CTk):
                 completed_operation_id = event.operation_id
 
                 def success_is_current(*, delayed=False):
-                    current_runtime = getattr(
-                        self, "_voice_translation_runtime", None)
-                    if (current_runtime is not None
-                            and current_runtime.operation_id
-                            != completed_operation_id):
-                        return False
-                    service = getattr(self, "_workflow_service", None)
-                    service_state = getattr(service, "state", None)
-                    if (service_state is not None
-                            and service_state.phase is not WorkflowPhase.READY):
-                        return False
-                    if (delayed and hasattr(self, "app_state")
-                            and self.app_state != "success"):
-                        return False
-                    return True
+                    return voice_terminal_is_current(
+                        completed_operation_id,
+                        require_success_ui=delayed,
+                    )
 
                 def finish_success(*, delayed=False):
                     if not success_is_current(delayed=delayed):
@@ -7235,6 +7247,8 @@ class App(ctk.CTk):
                     finish_success()
                 return
             if phase is VoiceTranslationPhase.FAILED:
+                if not voice_terminal_is_current(event.operation_id):
+                    return
                 error_code = getattr(event, "error_code", "")
                 if error_code == "MicrophoneUnavailableError":
                     self._set_state("microphone_unavailable")
