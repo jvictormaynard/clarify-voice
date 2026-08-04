@@ -331,6 +331,23 @@ class HistoryStoreTests(unittest.TestCase):
                 store.add(raw_text="must not replace corruption")
             self.assertEqual(path.read_bytes(), before)
 
+    def test_current_schema_invalid_records_container_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.json"
+            path.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": {"raw_text": "must not be treated as empty"},
+            }), encoding="utf-8")
+            before = path.read_bytes()
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+
+            with self.assertRaises(HistoryStoreError):
+                store.list_records()
+            with self.assertRaises(HistoryStoreError):
+                store.add(raw_text="must not erase the object")
+            self.assertEqual(path.read_bytes(), before)
+
     def test_future_interrupted_snapshot_cannot_replace_supported_primary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

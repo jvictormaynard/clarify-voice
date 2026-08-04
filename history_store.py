@@ -505,6 +505,14 @@ class HistoryStore:
                 f"version {HISTORY_SCHEMA_VERSION}")
 
         migrated = migrate_history_payload(payload)
+        if version == HISTORY_SCHEMA_VERSION and not isinstance(
+                payload.get("records"), list):
+            # A current-schema document with a missing or non-list record
+            # container is structural corruption, not an empty history.  Do
+            # not canonicalize it to ``records: []``: doing so would erase
+            # data that may still be recoverable from the original bytes.
+            raise HistoryStoreError(
+                "The history file has an invalid records container")
         raw_records = migrated.get("records", [])
         records: list[HistoryRecord] = []
         if isinstance(raw_records, list):
