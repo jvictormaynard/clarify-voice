@@ -319,9 +319,28 @@ class AppConfig:
         except (ProviderError, ValueError):
             pass
 
-        workflow_mapping = (
-            workflow_values if isinstance(workflow_values, Mapping) else {}
-        )
+        workflow_mapping: dict[str, Any] = {}
+        if isinstance(workflow_values, Mapping):
+            # Mirror WorkflowConfig.from_mapping() here so compatibility
+            # fields are derived from the same effective route regardless of
+            # whether callers used canonical scopes or a documented alias.
+            canonical_values: dict[str, Any] = {}
+            alias_values: dict[str, Any] = {}
+            for raw_scope, route in workflow_values.items():
+                normalized = normalize_workflow_scope(raw_scope)
+                if normalized not in WORKFLOW_SCOPES:
+                    continue
+                raw_value = (
+                    raw_scope.value
+                    if isinstance(raw_scope, WorkflowScope)
+                    else str(raw_scope or "")
+                ).strip().lower()
+                if raw_value == normalized:
+                    canonical_values[normalized] = route
+                else:
+                    alias_values[normalized] = route
+            workflow_mapping.update(alias_values)
+            workflow_mapping.update(canonical_values)
         effective_transcription_provider = (
             workflows.transcription.provider_id
             if "transcription" in workflow_mapping else provider

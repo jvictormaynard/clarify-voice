@@ -73,6 +73,36 @@ class WorkflowConfigurationTests(unittest.TestCase):
         with self.assertRaises(WorkflowConfigurationError):
             validate_workflow_config(invalid)
 
+    def test_app_config_compatibility_fields_follow_scope_aliases(self):
+        config = AppConfig.from_mapping({
+            "workflows": {
+                "dictation": {
+                    "provider_id": "groq",
+                    "model_id": "whisper-large-v3",
+                },
+                "text_refinement": {
+                    "provider_id": "groq",
+                    "model_id": "llama-3.3-70b-versatile",
+                },
+                "local-refinement": {
+                    "provider_id": "openai",
+                    "model_id": "gpt-4o-mini",
+                    "enabled": True,
+                },
+            },
+        })
+
+        self.assertEqual(config.selection.transcription_provider, "groq")
+        self.assertEqual(config.selection.refinement_provider, "groq")
+        self.assertEqual(
+            config.selection.refinement_model, "llama-3.3-70b-versatile"
+        )
+        self.assertTrue(config.local_asr_cloud_refinement)
+        legacy = config.to_legacy_mapping()
+        self.assertEqual(legacy["transcription_provider"], "groq")
+        self.assertEqual(legacy["refinement_provider"], "groq")
+        self.assertTrue(legacy["local_asr_cloud_refinement"])
+
     def test_migration_splits_legacy_refinement_into_idempotent_scopes(self):
         legacy = {
             "transcription_provider": "groq",
