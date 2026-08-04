@@ -932,6 +932,13 @@ class LocalConfigRepository(ConfigRepository):
                 model = self._model_from_mapping(config, current_payload)
                 supplied_keys = set(config)
 
+            # ``save`` is also a public application-facing write path (the
+            # legacy UI still uses it), so it must enforce the same route
+            # boundary as ``apply`` before serializing any endpoint or model.
+            model = replace(
+                model,
+                workflows=validate_workflow_config(model.workflows),
+            )
             values = model.to_mapping()
             changes: dict[str, str] = {}
             preserve_legacy: set[str] = set()

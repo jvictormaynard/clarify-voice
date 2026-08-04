@@ -180,6 +180,49 @@ class WorkflowConfigurationTests(unittest.TestCase):
                 "local_asr", connection, "https://proxy.example"
             )
 
+    def test_direct_repository_save_validates_workflow_routes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            invalid_mappings = (
+                {
+                    "rewrite": {
+                        "provider_id": "openai",
+                        "custom_endpoint": (
+                            "https://user:password@proxy.example/v1"
+                        ),
+                    },
+                },
+                {
+                    "rewrite": {
+                        "provider_id": "openai",
+                        "custom_endpoint": "https://proxy.example:0/v1",
+                    },
+                },
+                {
+                    "transcription": {
+                        "provider_id": "local_asr",
+                        "model_id": "ggml-medium",
+                    },
+                },
+            )
+            for routes in invalid_mappings:
+                with self.assertRaises(WorkflowConfigurationError):
+                    repository.save({"workflows": routes})
+
+            typed = AppConfig.from_mapping({
+                "workflows": {
+                    "rewrite": {
+                        "provider_id": "openai",
+                        "custom_endpoint": "https://proxy.example:0/v1",
+                    },
+                },
+            })
+            with self.assertRaises(WorkflowConfigurationError):
+                repository.save(typed)
+            self.assertFalse(path.exists())
+
     def test_scoped_configuration_test_ignores_unrelated_invalid_routes(self):
         workflows = AppConfig.from_mapping({
             "workflows": {
