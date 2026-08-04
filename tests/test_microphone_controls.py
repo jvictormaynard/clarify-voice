@@ -186,7 +186,14 @@ class MicrophoneControlsTests(unittest.TestCase):
         self.assertEqual(selection.state, MicrophoneSelectionState.DEFAULT)
         self.assertTrue(selection.can_record)
         self.assertEqual(selection.device.name, "Shared headset")
+        self.assertTrue(selection.device.is_default)
+        self.assertTrue(selection.device.available)
         self.assertEqual(inventory.available_devices, ())
+
+        saved_default = inventory.resolve(selection.device.stable_id)
+        self.assertEqual(
+            saved_default.state, MicrophoneSelectionState.FALLBACK_DEFAULT)
+        self.assertEqual(saved_default.device.stable_id, selection.device.stable_id)
 
     def test_missing_default_is_explicitly_unavailable_not_arbitrary(self):
         inventory = MicrophoneInventory.from_records([

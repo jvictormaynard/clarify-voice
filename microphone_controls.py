@@ -462,7 +462,11 @@ class MicrophoneInventory:
 
         fallback = self._default_device()
         if fallback is not None:
-            if requested and (len(matches) != 1 or not matches[0].usable):
+            if requested and (
+                len(matches) != 1
+                or not matches[0].usable
+                or matches[0].name.casefold() in ambiguous_names
+            ):
                 return MicrophoneSelection(
                     MicrophoneSelectionState.FALLBACK_DEFAULT,
                     fallback,

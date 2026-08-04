@@ -3777,6 +3777,29 @@ def _resolve_microphone_selection(
     return inventory, inventory.resolve(settings.selected_id)
 
 
+def _selected_microphone_stream_device(
+        selection: MicrophoneSelection | None):
+    """Return the backend target for an explicitly selected input.
+
+    A transient PortAudio index is preferred when the inventory has one. A
+    source-backed inventory may omit that index, in which case the name is
+    the same fallback used by Recorder's SoX route. System-default and
+    fallback-default selections intentionally return ``None`` so the
+    backend's own default input remains in use.
+    """
+    if (
+        selection is None
+        or selection.device is None
+        or selection.state is not MicrophoneSelectionState.SELECTED
+    ):
+        return None
+    return (
+        selection.device.backend_index
+        if selection.device.backend_index is not None
+        else selection.device.name
+    )
+
+
 def _has_active_microphone():
     """Return whether the selected/current-default input is usable.
 
@@ -3992,13 +4015,10 @@ class Recorder:
                     "channels": 1, "samplerate": 16000, "blocksize": 256,
                     "dtype": "int16", "callback": self._audio_cb,
                 }
-                selected = self.microphone_selection
-                if (selected is not None and selected.device is not None
-                        and selected.state is MicrophoneSelectionState.SELECTED):
-                    stream_kwargs["device"] = (
-                        selected.device.backend_index
-                        if selected.device.backend_index is not None
-                        else selected.device.name)
+                stream_device = _selected_microphone_stream_device(
+                    self.microphone_selection)
+                if stream_device is not None:
+                    stream_kwargs["device"] = stream_device
                 self.mic_stream = sd.RawInputStream(
                     **stream_kwargs)
                 self.mic_stream.start()
@@ -11063,8 +11083,9 @@ class App(ctk.CTk):
                 try:
                     kwargs = {"channels": 1, "samplerate": 16000,
                               "blocksize": 256, "dtype": "int16"}
-                    if selection.device.backend_index is not None:
-                        kwargs["device"] = selection.device.backend_index
+                    stream_device = _selected_microphone_stream_device(selection)
+                    if stream_device is not None:
+                        kwargs["device"] = stream_device
 
                     def callback(indata, _frames, _time_info, _status):
                         nonlocal peak

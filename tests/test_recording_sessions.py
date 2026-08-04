@@ -162,6 +162,48 @@ class RecordingSessionTests(unittest.TestCase):
             stream.start.assert_called_once_with()
             recorder.stop()
 
+    def test_selected_microphone_without_backend_index_routes_stream_by_name(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "System default",
+                "host_api": "WASAPI",
+                "max_input_channels": 1,
+                "is_default": True,
+            },
+            {
+                "name": "USB headset",
+                "host_api": "WASAPI",
+                "max_input_channels": 1,
+            },
+        ])
+        selected_id = inventory.devices[1].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+        stream = Mock()
+        fake_sounddevice = SimpleNamespace(RawInputStream=Mock(return_value=stream))
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", fake_sounddevice), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            recorder.start(
+                Path(directory) / "recording.wav",
+                microphone=selected_id,
+            )
+
+            self.assertEqual(
+                fake_sounddevice.RawInputStream.call_args.kwargs["device"],
+                "USB headset",
+            )
+            recorder.stop()
+
     def test_production_recorder_reloads_controls_after_settings_apply(self):
         initial = app.RecordingControls(max_duration_seconds=30)
         updated = app.RecordingControls(
