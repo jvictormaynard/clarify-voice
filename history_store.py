@@ -304,6 +304,12 @@ def _has_canonical_v1_fields(payload: Mapping[str, Any]) -> bool:
     return True
 
 
+def _legacy_container_keys(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        key for key in ("records", "entries", "history") if key in payload
+    )
+
+
 def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
     """Return whether this executable can safely load a snapshot payload."""
 
@@ -313,9 +319,9 @@ def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
     if version == HISTORY_SCHEMA_VERSION:
         raw_records = payload.get("records")
     else:
+        legacy_keys = _legacy_container_keys(payload)
         if (not _legacy_containers_are_valid(payload)
-                or not any(key in payload
-                           for key in ("records", "entries", "history"))
+                or len(legacy_keys) != 1
                 or not _legacy_entries_are_safe(payload)):
             return False
         # Reject malformed legacy entries too; promoting a snapshot that the
@@ -350,7 +356,10 @@ def _snapshot_container_is_valid(payload: Mapping[str, Any]) -> bool:
         return False
     if version == HISTORY_SCHEMA_VERSION:
         return isinstance(payload.get("records"), list)
-    return _legacy_containers_are_valid(payload)
+    return (
+        _legacy_containers_are_valid(payload)
+        and len(_legacy_container_keys(payload)) == 1
+    )
 
 
 def _legacy_containers_are_valid(payload: Mapping[str, Any]) -> bool:
@@ -712,6 +721,10 @@ class HistoryStore:
             # data that may still be recoverable from the original bytes.
             raise HistoryStoreError(
                 "The history file has an invalid records container")
+        if version < HISTORY_SCHEMA_VERSION and not _snapshot_container_is_valid(
+                payload):
+            raise HistoryStoreError(
+                "The legacy history file has an ambiguous records container")
         raw_records = migrated.get("records", [])
         records: list[HistoryRecord] = []
         if isinstance(raw_records, list):
