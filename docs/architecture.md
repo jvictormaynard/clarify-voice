@@ -261,7 +261,9 @@ artifact. `LocalDictionarySnippetsRepository` owns its JSON schema, migration,
 validation, and atomic replacement; it does not read or write provider keys
 and therefore does not duplicate the `SecretStore` boundary. The
 `DictionarySnippetService` keeps a validated in-memory snapshot for matching
-and context construction. Snippet expansion is provider-neutral and bounded;
+and context construction. Snippet expansion derives canonical NFC spans from
+the active Unicode database and walks a bounded prefix trie, so it is
+provider-neutral and does not scale with every rule at every input character;
 cloud adapters receive optional vocabulary through the typed
 `TranscriptionRequest`, while offline adapters can ignore it. Usage statistics
 never receive dictionary or snippet content. The settings UI and complete

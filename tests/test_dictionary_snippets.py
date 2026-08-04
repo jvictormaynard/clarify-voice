@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import tempfile
+import unicodedata
 import unittest
 from unittest.mock import patch
 
@@ -161,6 +162,30 @@ class DictionarySnippetTests(unittest.TestCase):
 
         self.assertEqual(service.expand("가"), "ga")
         self.assertEqual(service.expand("각"), "각")
+
+    def test_nfc_matching_covers_newer_starter_compositions_when_available(self):
+        starter = "\U00016D67"
+        composed = "\U00016D68"
+        if unicodedata.name(starter, "") == "":
+            self.skipTest("this Python Unicode database predates Kirat Rai")
+        self.assertEqual(unicodedata.normalize("NFC", starter * 2), composed)
+        service = DictionarySnippetService(self.repository)
+        service.replace(DictionarySnippets(snippets=(Snippet(composed, "rai"),)))
+        self.assertEqual(service.expand(starter * 2), "rai")
+
+    def test_trie_prefix_index_avoids_boundary_checks_for_unmatched_prefixes(self):
+        service = DictionarySnippetService(self.repository)
+        service.replace(DictionarySnippets(snippets=tuple(
+            Snippet(f"trigger-{index}", "replacement")
+            for index in range(512)
+        )))
+
+        with patch(
+                "dictionary_snippets._has_word_boundaries",
+                wraps=lambda text, start, end: True,
+        ) as boundary:
+            self.assertEqual(service.expand("z" * 10_000), "z" * 10_000)
+        self.assertEqual(boundary.call_count, 0)
 
     def test_case_sensitive_and_disabled_rules_are_explicit(self):
         service = DictionarySnippetService(self.repository)

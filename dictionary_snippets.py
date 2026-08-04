@@ -11,7 +11,7 @@ bounded snippet expander after a result is received.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -37,15 +37,6 @@ MAX_TRIGGER_LENGTH = 256
 MAX_REPLACEMENT_LENGTH = 4096
 MAX_CONTEXT_CHARS = 4096
 MAX_EXPANSION_CHARS = 1_000_000
-
-_HANGUL_LBASE = 0x1100
-_HANGUL_LCOUNT = 19
-_HANGUL_VBASE = 0x1161
-_HANGUL_VCOUNT = 21
-_HANGUL_TBASE = 0x11A7
-_HANGUL_TCOUNT = 28
-_HANGUL_SBASE = 0xAC00
-_HANGUL_SCOUNT = 11172
 
 
 class DictionarySnippetsError(ValueError):
@@ -394,6 +385,35 @@ def _snippet_sort_key(item: tuple[int, Snippet]) -> tuple[int, int]:
     return (-len(snippet.trigger.casefold()), index)
 
 
+@dataclass
+class _SnippetTrieNode:
+    children: dict[str, "_SnippetTrieNode"] = field(default_factory=dict)
+    rules: list[tuple[int, Snippet]] = field(default_factory=list)
+
+
+def _build_snippet_trie(
+        snippets: list[tuple[int, Snippet]], *, case_sensitive: bool,
+) -> _SnippetTrieNode:
+    root = _SnippetTrieNode()
+    for index, snippet in snippets:
+        if not snippet.enabled or snippet.case_sensitive != case_sensitive:
+            continue
+        trigger = snippet.trigger if case_sensitive else snippet.trigger.casefold()
+        node = root
+        for character in trigger:
+            node = node.children.setdefault(character, _SnippetTrieNode())
+        node.rules.append((index, snippet))
+    for node in _walk_trie(root):
+        node.rules.sort(key=_snippet_sort_key)
+    return root
+
+
+def _walk_trie(root: _SnippetTrieNode):
+    yield root
+    for child in root.children.values():
+        yield from _walk_trie(child)
+
+
 @dataclass(frozen=True)
 class _CanonicalText:
     """Canonical text plus an index map back to the original string."""
@@ -405,24 +425,29 @@ class _CanonicalText:
     cluster_boundaries: frozenset[int]
 
 
-def _hangul_cluster_end(text: str, start: int) -> int:
-    """Return the end of a Hangul Jamo composition sequence, if present."""
-    codepoint = ord(text[start])
+def _canonical_cluster_end(text: str, start: int) -> int:
+    """Find a maximal span participating in NFC composition.
+
+    Combining marks always remain with the preceding span.  For starter
+    characters, comparing NFC of the combined prefix with NFC of each part
+    detects every composition defined by the active Unicode database,
+    including Hangul and newer starter-to-starter scripts, without a
+    script-specific code-point table.
+    """
     end = start + 1
-    if _HANGUL_LBASE <= codepoint < _HANGUL_LBASE + _HANGUL_LCOUNT:
-        if (end < len(text)
-                and _HANGUL_VBASE <= ord(text[end])
-                < _HANGUL_VBASE + _HANGUL_VCOUNT):
+    raw = text[start]
+    while end < len(text):
+        char = text[end]
+        if unicodedata.category(char).startswith("M"):
+            raw += char
             end += 1
-            if (end < len(text)
-                    and _HANGUL_TBASE < ord(text[end])
-                    < _HANGUL_TBASE + _HANGUL_TCOUNT):
-                end += 1
-    elif (_HANGUL_SBASE <= codepoint
-          < _HANGUL_SBASE + _HANGUL_SCOUNT
-          and end < len(text)
-          and _HANGUL_TBASE < ord(text[end])
-          < _HANGUL_TBASE + _HANGUL_TCOUNT):
+            continue
+        combined = unicodedata.normalize("NFC", raw + char)
+        separate = (unicodedata.normalize("NFC", raw)
+                    + unicodedata.normalize("NFC", char))
+        if combined == separate:
+            break
+        raw += char
         end += 1
     return end
 
@@ -446,10 +471,7 @@ def _canonical_text(text: str, *, casefold: bool) -> _CanonicalText:
 
     while original_index < len(text):
         cluster_start = original_index
-        original_index = _hangul_cluster_end(text, cluster_start)
-        while (original_index < len(text)
-               and unicodedata.category(text[original_index]).startswith("M")):
-            original_index += 1
+        original_index = _canonical_cluster_end(text, cluster_start)
         cluster = unicodedata.normalize(
             "NFC", text[cluster_start:original_index])
         if casefold:
@@ -551,6 +573,10 @@ class DictionarySnippetService:
             True: _canonical_text(text, casefold=False),
             False: _canonical_text(text, casefold=True),
         }
+        tries = {
+            True: _build_snippet_trie(candidates, case_sensitive=True),
+            False: _build_snippet_trie(candidates, case_sensitive=False),
+        }
 
         output: list[str] = []
         output_length = 0
@@ -558,26 +584,33 @@ class DictionarySnippetService:
         while index < len(text):
             replacement: str | None = None
             consumed = 0
-            for _rule_index, snippet in candidates:
-                if index not in canonical[snippet.case_sensitive].cluster_starts:
+            matches: list[tuple[int, int, Snippet]] = []
+            for case_sensitive in (True, False):
+                normalized = canonical[case_sensitive]
+                if index not in normalized.cluster_starts:
                     continue
-                normalized = canonical[snippet.case_sensitive]
                 normalized_start = normalized.original_to_normalized[index]
-                trigger = (snippet.trigger if snippet.case_sensitive
-                           else snippet.trigger.casefold())
-                if not normalized.value.startswith(trigger, normalized_start):
-                    continue
-                normalized_end = normalized_start + len(trigger)
-                # Do not match only the first code point of a casefold/NFC
-                # expansion.  The complete original cluster must be consumed.
-                if normalized_end not in normalized.cluster_boundaries:
-                    continue
-                end = normalized.normalized_ends[normalized_end - 1]
-                matches = _has_word_boundaries(text, index, end)
-                if matches:
-                    replacement = snippet.replacement
-                    consumed = end - index
-                    break
+                node = tries[case_sensitive]
+                cursor = normalized_start
+                while cursor < len(normalized.value):
+                    node = node.children.get(normalized.value[cursor])
+                    if node is None:
+                        break
+                    cursor += 1
+                    # Do not match only part of an NFC/casefold expansion. The
+                    # complete original cluster must be consumed.
+                    if (node.rules
+                            and cursor in normalized.cluster_boundaries):
+                        end = normalized.normalized_ends[cursor - 1]
+                        if _has_word_boundaries(text, index, end):
+                            for rule_index, snippet in node.rules:
+                                matches.append((rule_index, end, snippet))
+            if matches:
+                matches.sort(key=lambda item: _snippet_sort_key(
+                    (item[0], item[2])))
+                _rule_index, end, snippet = matches[0]
+                replacement = snippet.replacement
+                consumed = end - index
             if replacement is None:
                 if output_length + 1 > self.max_expansion_chars:
                     raise DictionarySnippetsError(
