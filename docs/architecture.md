@@ -82,7 +82,10 @@ independent `transcription`, `refinement`, `rewrite`, `translation`, and
 model ID, prompt policy, optional custom endpoint, and an explicit enabled
 flag; API keys are never part of a route. `validate_workflow_config` checks the
 registry capability required by every scope and rejects unsupported
-combinations before an adapter or local sidecar can start. Its
+combinations before an adapter or local sidecar can start. Custom endpoints are
+HTTP(S)-only and cannot contain URL userinfo, query parameters, or fragments;
+this keeps adapter path composition deterministic and avoids credential-bearing
+URLs at rest. Its
 `test_workflow_configuration` result is local and diagnostic-safe: it makes no
 provider request and does not persist prompt text.
 
@@ -277,8 +280,11 @@ leaves the prior configuration recoverable. `reset_workflow` and
 neither operation sends transcript/prompt content to diagnostics.
 Until the existing UI is migrated to typed routes, legacy flat saves compare
 against the previous on-disk flat values and synchronize only the routes whose
-legacy fields changed; independent custom workflow routes therefore survive an
-unrelated settings save.
+legacy fields changed; endpoint-bearing routes in the independent rewrite,
+translation, and local-ASR scopes therefore survive a shared legacy provider
+change, while the primary refinement route drops its endpoint when its
+provider/model is changed. All independent custom routes survive an unrelated
+settings save.
 
 ### `dictionary_snippets.py`
 

@@ -113,6 +113,14 @@ class WorkflowConfigurationTests(unittest.TestCase):
                 "prompt": "translate independently",
                 "custom_endpoint": "https://proxy.example/v1",
             }
+            independent["workflows"]["rewrite"] = {
+                "provider_id": "openai",
+                "model_id": "gpt-4o-mini",
+                "prompt": "rewrite independently",
+                "custom_endpoint": "https://rewrite-proxy.example/v1",
+            }
+            independent["workflows"]["refinement"][
+                "custom_endpoint"] = "https://refinement-proxy.example/v1"
             repository.save(independent)
             repository.save({
                 "workflows": {
@@ -147,7 +155,15 @@ class WorkflowConfigurationTests(unittest.TestCase):
             )
             self.assertEqual(
                 loaded.workflow(WorkflowScope.REWRITE).provider_id,
-                "groq",
+                "openai",
+            )
+            self.assertEqual(
+                loaded.workflow(WorkflowScope.REWRITE).custom_endpoint,
+                "https://rewrite-proxy.example/v1",
+            )
+            self.assertEqual(
+                loaded.workflow(WorkflowScope.REFINEMENT).custom_endpoint,
+                "",
             )
             self.assertTrue(loaded.workflow(
                 WorkflowScope.LOCAL_ASR_REFINEMENT).enabled)
@@ -227,6 +243,18 @@ class WorkflowConfigurationTests(unittest.TestCase):
                         },
                     },
                 }).workflows)
+        for suffix in ("?region=eu", "#fragment"):
+            with self.assertRaises(WorkflowConfigurationError):
+                validate_workflow_config(AppConfig.from_mapping({
+                    "workflows": {
+                        "rewrite": {
+                            "provider_id": "openai",
+                            "custom_endpoint": (
+                                f"https://proxy.example/v1{suffix}"
+                            ),
+                        },
+                    },
+                }).workflows)
 
         config = AppConfig.from_mapping({
             "workflows": {
@@ -242,8 +270,8 @@ class WorkflowConfigurationTests(unittest.TestCase):
             "https://proxy.example/v1",
         )
         self.assertNotIn("region", json.dumps(diagnostic))
-        result = test_workflow_configuration(config.workflows, "rewrite")
-        self.assertNotIn("region", json.dumps(result.to_mapping()))
+        with self.assertRaises(WorkflowConfigurationError):
+            test_workflow_configuration(config.workflows, "rewrite")
 
     def test_capability_errors_are_actionable_before_provider_work(self):
         workflows = AppConfig.from_mapping({

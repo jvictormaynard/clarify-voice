@@ -388,6 +388,17 @@ def validate_workflow_route(
             # Accessing .port is what makes urllib reject non-numeric and
             # out-of-range ports; hostname alone does not perform that check.
             _ = endpoint_parts.port
+            # Provider adapters append operation paths to the configured
+            # endpoint.  Keeping a query or fragment here would either put
+            # that path inside the query (``...?region=eu/v1``) or discard it
+            # at the HTTP layer.  Reject both until a URL composer can carry
+            # parsed components through every adapter safely.
+            if endpoint_parts.query or endpoint_parts.fragment:
+                raise WorkflowConfigurationError(
+                    normalized_scope,
+                    "Custom endpoint must not contain a query or fragment.",
+                    provider_id=provider, field="custom_endpoint",
+                )
             if (not endpoint_parts.hostname or endpoint_parts.username
                     or endpoint_parts.password or has_sensitive_query):
                 raise WorkflowConfigurationError(
@@ -395,6 +406,8 @@ def validate_workflow_route(
                     "Custom endpoint must not contain URL credentials or tokens.",
                     provider_id=provider, field="custom_endpoint",
                 )
+        except WorkflowConfigurationError:
+            raise
         except ValueError as error:
             raise WorkflowConfigurationError(
                 normalized_scope, "Custom endpoint must be an HTTP(S) URL.",

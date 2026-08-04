@@ -436,12 +436,27 @@ class AppConfig:
                 current = workflows[scope]
                 if (current.provider_id == previous_shared.provider_id
                         and current.model_id == previous_shared.model_id):
+                    # A custom endpoint is part of an independently selected
+                    # route.  Do not move that route to a different provider
+                    # while retaining a provider-specific proxy URL.  The
+                    # primary legacy refinement route remains synchronized,
+                    # but its endpoint is cleared when the provider/model
+                    # changes so the route cannot combine incompatible
+                    # settings.
+                    if (current.custom_endpoint
+                            and scope != WorkflowScope.REFINEMENT.value):
+                        continue
                     workflows = workflows.with_route(
                         scope,
                         replace(
                             current,
                             provider_id=legacy_route.provider_id,
                             model_id=legacy_route.model_id,
+                            custom_endpoint=(
+                                ""
+                                if scope == WorkflowScope.REFINEMENT.value
+                                else current.custom_endpoint
+                            ),
                         ),
                     )
             selection = replace(
