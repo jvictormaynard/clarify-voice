@@ -1523,6 +1523,69 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
 
 
 class WorkflowAppBridgeTests(unittest.TestCase):
+    def test_voice_translation_hotkey_preserves_hidden_origin(self):
+        target = app.SelectionTarget(77, "editor.exe")
+        runtime = SimpleNamespace(
+            active=False,
+            start=Mock(return_value=True),
+        )
+        harness = SimpleNamespace(
+            _voice_translation_runtime=runtime,
+            _workflow_service=SimpleNamespace(
+                state=SimpleNamespace(phase=app.WorkflowPhase.READY)),
+            _translation_active=False,
+            _rewrite_active=False,
+            _workflow_target=Mock(return_value=target),
+            _voice_translation_target_executable=None,
+            _was_hidden_before_recording=False,
+            winfo_viewable=Mock(return_value=False),
+            result_frame=SimpleNamespace(winfo_manager=Mock(return_value=False)),
+            _closing=False,
+        )
+
+        with patch.object(app, "IS_WIN", True):
+            app.App._voice_translation_hotkey(harness)
+
+        self.assertTrue(harness._was_hidden_before_recording)
+        runtime.start.assert_called_once_with(target)
+
+    def test_voice_translation_ignores_stale_intermediate_events(self):
+        set_state = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _set_state=set_state,
+            after=lambda _delay, callback: callback(),
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.TRANSCRIBING, 1),
+        )
+
+        set_state.assert_not_called()
+
+    def test_voice_translation_maps_microphone_failure_to_existing_state(self):
+        set_state = Mock()
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=SimpleNamespace(operation_id=2),
+            _set_state=set_state,
+            after=lambda _delay, callback: callback(),
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.FAILED,
+                2,
+                error_code="MicrophoneUnavailableError",
+            ),
+        )
+
+        set_state.assert_called_once_with("microphone_unavailable")
+
     def test_dictation_uses_platform_copy_and_paste_on_non_windows(self):
         target = app.SelectionTarget(77, "editor.exe")
         with patch.object(app, "IS_WIN", False), \

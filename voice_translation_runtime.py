@@ -60,6 +60,9 @@ class VoiceTranslationRuntimeState:
     operation_id: int = 0
     workflow_state: VoiceTranslationState | None = None
     error: str = ""
+    # Keep desktop-specific exception handling at the adapter boundary while
+    # still identifying well-known failures that need a dedicated UI flow.
+    error_code: str = ""
 
 
 class VoiceTranslationRuntime:
@@ -177,6 +180,7 @@ class VoiceTranslationRuntime:
                         VoiceTranslationPhase.FAILED,
                         operation_id,
                         error=str(error) or type(error).__name__,
+                        error_code=type(error).__name__,
                     )
                 )
 
@@ -276,6 +280,7 @@ class VoiceTranslationRuntime:
                     else VoiceTranslationPhase.FAILED,
                     operation_id,
                     error=str(error) or type(error).__name__,
+                    error_code=type(error).__name__,
                 )
             )
 

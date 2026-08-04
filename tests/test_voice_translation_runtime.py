@@ -62,6 +62,15 @@ class _Recording:
         return True
 
 
+class MicrophoneUnavailableError(RuntimeError):
+    """Exception name used by the desktop recorder at the adapter boundary."""
+
+
+class _UnavailableRecording(_Recording):
+    def start(self):
+        raise MicrophoneUnavailableError("no input")
+
+
 class _Provider:
     def __init__(self):
         self.raw = "Olá"
@@ -175,6 +184,24 @@ class VoiceTranslationRuntimeTests(unittest.TestCase):
         self.assertTrue(self.recording.cancelled)
         self.assertEqual(self.events[-1].phase, VoiceTranslationPhase.CANCELLED)
         self.assertEqual(self.provider.requests, [])
+
+    def test_recording_failure_preserves_exception_code_for_ui_adapters(self):
+        recording = _UnavailableRecording()
+        runtime = VoiceTranslationRuntime(
+            self.provider,
+            self.clipboard,
+            lambda: recording,
+            _Scheduler(),
+            _config,
+            on_state=self.events.append,
+        )
+
+        self.assertTrue(runtime.start("target"))
+
+        self.assertFalse(runtime.active)
+        self.assertEqual(self.events[-1].phase, VoiceTranslationPhase.FAILED)
+        self.assertEqual(
+            self.events[-1].error_code, "MicrophoneUnavailableError")
 
 
 if __name__ == "__main__":

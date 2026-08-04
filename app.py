@@ -7146,9 +7146,13 @@ class App(ctk.CTk):
         if target is None:
             return
         self._voice_translation_target_executable = target.executable
+        self._was_hidden_before_recording = not self.winfo_viewable()
         if self.result_frame.winfo_manager():
             self._hide_result()
-        runtime.start(target)
+        if not runtime.start(target):
+            # Do not let an overlap/factory failure leave a stale hidden-origin
+            # flag that could withdraw the window after a later operation.
+            self._was_hidden_before_recording = False
 
     def _on_voice_translation_state(self, event: VoiceTranslationRuntimeState):
         """Marshal runtime snapshots onto Tk and keep raw fallback visible."""
@@ -7157,15 +7161,7 @@ class App(ctk.CTk):
             if self._closing:
                 return
             runtime = getattr(self, "_voice_translation_runtime", None)
-            if (
-                runtime is not None
-                and event.operation_id != runtime.operation_id
-                and event.phase in (
-                    VoiceTranslationPhase.COMPLETED,
-                    VoiceTranslationPhase.FAILED,
-                    VoiceTranslationPhase.CANCELLED,
-                )
-            ):
+            if runtime is not None and event.operation_id != runtime.operation_id:
                 return
             phase = event.phase
             if phase is VoiceTranslationPhase.RECORDING:
@@ -7204,6 +7200,9 @@ class App(ctk.CTk):
                     finish_success()
                 return
             if phase is VoiceTranslationPhase.FAILED:
+                if getattr(event, "error_code", "") == "MicrophoneUnavailableError":
+                    self._set_state("microphone_unavailable")
+                    return
                 text = result.published_text if result is not None else ""
                 self._set_state(
                     "ready",
