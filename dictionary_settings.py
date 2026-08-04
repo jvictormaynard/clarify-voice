@@ -31,6 +31,10 @@ class DictionarySettingsItem:
     label: str
     detail: str
     enabled: bool
+    # Dictionary metadata stays structured so the UI can localize its labels.
+    # ``detail`` remains the plain replacement preview used by snippets.
+    pronunciation: str = ""
+    aliases: tuple[str, ...] = ()
 
 
 class DictionarySettingsController:
@@ -61,16 +65,11 @@ class DictionarySettingsController:
         state = self.service.state
         items: list[DictionarySettingsItem] = []
         for index, entry in enumerate(state.dictionary):
-            detail_parts = []
-            if entry.pronunciation:
-                detail_parts.append(f"pronunciation: {entry.pronunciation}")
-            if entry.aliases:
-                detail_parts.append("aliases: " + ", ".join(entry.aliases))
-            detail = " · ".join(detail_parts)
             haystack = " ".join((entry.term, entry.pronunciation, *entry.aliases))
             if not needle or needle in haystack.casefold():
                 items.append(DictionarySettingsItem(
-                    "dictionary", index, entry.term, detail, entry.enabled))
+                    "dictionary", index, entry.term, "", entry.enabled,
+                    pronunciation=entry.pronunciation, aliases=entry.aliases))
         for index, snippet in enumerate(state.snippets):
             detail = snippet.replacement.replace("\n", " ")
             haystack = f"{snippet.trigger} {snippet.replacement}"

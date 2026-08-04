@@ -253,6 +253,22 @@ def _dictionary_aliases_from_text(value: str) -> tuple[str, ...]:
                  if alias.strip())
 
 
+def _dictionary_item_detail(item, translate) -> str:
+    """Format a Settings row's metadata through the active locale."""
+    if item.kind == "dictionary":
+        detail_parts = []
+        if item.pronunciation:
+            detail_parts.append(
+                f"{translate('dictionary_pronunciation_prefix')}: "
+                f"{item.pronunciation}")
+        if item.aliases:
+            detail_parts.append(
+                f"{translate('dictionary_aliases_prefix')}: "
+                f"{', '.join(item.aliases)}")
+        return " · ".join(detail_parts)
+    return item.detail
+
+
 def _run_update_check(current_version, cache_directory, publish):
     """Run a typed update check and deliver exactly one UI result."""
     try:
@@ -1891,7 +1907,9 @@ STRINGS = {
         "dictionary_empty": "No entries match your search.",
         "dictionary_term": "Term",
         "dictionary_pronunciation": "Pronunciation (optional)",
+        "dictionary_pronunciation_prefix": "pronunciation",
         "dictionary_aliases": "Aliases (one per line)",
+        "dictionary_aliases_prefix": "aliases",
         "dictionary_trigger": "Trigger",
         "dictionary_replacement": "Replacement",
         "dictionary_enabled": "Enabled",
@@ -2213,7 +2231,9 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_add_term": "+ Termo do dicionário", "dictionary_add_snippet": "+ Snippet",
         "dictionary_empty": "Nenhum item corresponde à busca.", "dictionary_term": "Termo",
         "dictionary_pronunciation": "Pronúncia (opcional)",
+        "dictionary_pronunciation_prefix": "pronúncia",
         "dictionary_aliases": "Aliases (um por linha)", "dictionary_trigger": "Gatilho",
+        "dictionary_aliases_prefix": "aliases",
         "dictionary_replacement": "Substituição", "dictionary_enabled": "Ativo",
         "dictionary_disabled": "Desativado",
         "dictionary_case_sensitive": "Diferenciar maiúsculas", "dictionary_edit": "Editar",
@@ -2234,7 +2254,9 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_add_term": "+ Término del diccionario", "dictionary_add_snippet": "+ Snippet",
         "dictionary_empty": "Ningún elemento coincide con la búsqueda.", "dictionary_term": "Término",
         "dictionary_pronunciation": "Pronunciación (opcional)",
+        "dictionary_pronunciation_prefix": "pronunciación",
         "dictionary_aliases": "Alias (uno por línea)", "dictionary_trigger": "Activador",
+        "dictionary_aliases_prefix": "alias",
         "dictionary_replacement": "Reemplazo", "dictionary_enabled": "Activado",
         "dictionary_disabled": "Desactivado",
         "dictionary_case_sensitive": "Distinguir mayúsculas", "dictionary_edit": "Editar",
@@ -2255,7 +2277,9 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_add_term": "+ Wörterbuchbegriff", "dictionary_add_snippet": "+ Snippet",
         "dictionary_empty": "Keine Einträge entsprechen der Suche.", "dictionary_term": "Begriff",
         "dictionary_pronunciation": "Aussprache (optional)",
+        "dictionary_pronunciation_prefix": "Aussprache",
         "dictionary_aliases": "Aliase (einer pro Zeile)", "dictionary_trigger": "Auslöser",
+        "dictionary_aliases_prefix": "Aliase",
         "dictionary_replacement": "Ersetzung", "dictionary_enabled": "Aktiviert",
         "dictionary_disabled": "Deaktiviert",
         "dictionary_case_sensitive": "Groß-/Kleinschreibung beachten", "dictionary_edit": "Bearbeiten",
@@ -2276,7 +2300,9 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_add_term": "+ Термин словаря", "dictionary_add_snippet": "+ Сниппет",
         "dictionary_empty": "Нет элементов, соответствующих поиску.", "dictionary_term": "Термин",
         "dictionary_pronunciation": "Произношение (необязательно)",
+        "dictionary_pronunciation_prefix": "произношение",
         "dictionary_aliases": "Псевдонимы (по одному в строке)", "dictionary_trigger": "Триггер",
+        "dictionary_aliases_prefix": "псевдонимы",
         "dictionary_replacement": "Замена", "dictionary_enabled": "Включён",
         "dictionary_disabled": "Отключён",
         "dictionary_case_sensitive": "Учитывать регистр", "dictionary_edit": "Изменить",
@@ -8363,8 +8389,9 @@ class App(ctk.CTk):
                 ctk.CTkLabel(label_frame,
                     text=f"{item.label}  ·  {kind_label}", text_color=TEXT,
                     font=font_label, anchor="w").pack(fill="x")
-                if item.detail:
-                    ctk.CTkLabel(label_frame, text=item.detail,
+                item_detail = _dictionary_item_detail(item, self._t)
+                if item_detail:
+                    ctk.CTkLabel(label_frame, text=item_detail,
                         text_color="#777777", font=font_caption, anchor="w",
                         wraplength=255).pack(fill="x")
                 state_text = (self._t("dictionary_enabled")

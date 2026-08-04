@@ -1065,6 +1065,22 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(app.STRINGS["es"]["dictionary_disabled"], "Desactivado")
         self.assertEqual(app.STRINGS["de"]["dictionary_disabled"], "Deaktiviert")
         self.assertEqual(app.STRINGS["ru"]["dictionary_disabled"], "Отключён")
+        dictionary_item = SimpleNamespace(
+            kind="dictionary", detail="", pronunciation="open whisper",
+            aliases=("Acme, Inc",))
+        expected_details = {
+            "en": "pronunciation: open whisper · aliases: Acme, Inc",
+            "pt": "pronúncia: open whisper · aliases: Acme, Inc",
+            "es": "pronunciación: open whisper · alias: Acme, Inc",
+            "de": "Aussprache: open whisper · Aliase: Acme, Inc",
+            "ru": "произношение: open whisper · псевдонимы: Acme, Inc",
+        }
+        for language, expected in expected_details.items():
+            with self.subTest(language=language):
+                self.assertEqual(
+                    app._dictionary_item_detail(
+                        dictionary_item, app.STRINGS[language].get),
+                    expected)
 
         source = inspect.getsource(app.App._open_settings)
         self.assertIn('"dictionary": ctk.CTkScrollableFrame(', source)
@@ -1072,6 +1088,7 @@ class ProviderTests(unittest.TestCase):
         self.assertIn('dictionary_rows.pack(fill="x", expand=False', source)
         self.assertIn('fields["aliases"].get("1.0", "end-1c")', source)
         self.assertIn('else self._t("dictionary_disabled")', source)
+        self.assertIn('_dictionary_item_detail(item, self._t)', source)
 
     def test_every_locale_translates_the_complete_interface_catalog(self):
         english_keys = set(app.STRINGS["en"])

@@ -37,6 +37,10 @@ class DictionarySettingsControllerTests(unittest.TestCase):
             [(item.kind, item.index, item.label)
              for item in self.controller.search("agenda")],
             [("snippet", 0, ";meet")])
+        dictionary_item = self.controller.search("WHIS")[0]
+        self.assertEqual(dictionary_item.detail, "")
+        self.assertEqual(dictionary_item.pronunciation, "open whisper")
+        self.assertEqual(dictionary_item.aliases, ("OW",))
         self.assertEqual(
             self.controller.preview("Use ;meet today"),
             "Use Agenda:\n1. Confirm scope today")
