@@ -608,10 +608,12 @@ class HistoryStoreTests(unittest.TestCase):
                 provider="openai", model="gpt-test").to_mapping()
             record["provider"] = None
             record["model"] = {"name": "gpt-test"}
-            candidate.write_text(json.dumps({
+            payload = {
                 "schema_version": HISTORY_SCHEMA_VERSION,
                 "records": [record],
-            }), encoding="utf-8")
+            }
+            self.assertFalse(history_store._is_recoverable_snapshot(payload))
+            candidate.write_text(json.dumps(payload), encoding="utf-8")
             target_mtime = path.stat().st_mtime
             os.utime(candidate, (target_mtime + 1, target_mtime + 1))
 

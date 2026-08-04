@@ -285,11 +285,23 @@ def _is_future_schema(payload: Mapping[str, Any]) -> bool:
 
 
 def _has_canonical_v1_fields(payload: Mapping[str, Any]) -> bool:
-    return (
-        all(field in payload for field in _HISTORY_RECORD_FIELDS)
-        and isinstance(payload["provider"], str)
-        and isinstance(payload["model"], str)
-    )
+    """Require the serialized v1 record contract before recovery promotion."""
+
+    if not all(field in payload for field in _HISTORY_RECORD_FIELDS):
+        return False
+    for field in ("id", "workflow", "provider", "model", "status"):
+        value = payload[field]
+        if not isinstance(value, str) or not value.strip():
+            return False
+    if not isinstance(payload["timestamp"], str):
+        return False
+    for field in ("raw_text", "refined_text", "error"):
+        value = payload[field]
+        if value is not None and not isinstance(value, str):
+            return False
+    if payload["status"].strip().lower() not in HISTORY_STATUSES:
+        return False
+    return True
 
 
 def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
