@@ -1003,7 +1003,7 @@ class LocalConfigRepository(ConfigRepository):
             )
             if supplied_keys is None:
                 self.save(validated)
-                return validated
+                return self.load()
             persisted = validated.to_mapping()
             for key in PROVIDER_SECRET_KEYS.values():
                 if key not in supplied_keys:

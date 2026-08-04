@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -310,6 +311,31 @@ class WorkflowConfigurationTests(unittest.TestCase):
             self.assertEqual(applied.ui.language, "pt")
             self.assertEqual(applied.openai.api_key, "keep-test-key")
             self.assertEqual(secrets.get("openai"), "keep-test-key")
+
+    def test_typed_apply_returns_reloaded_selection_after_route_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            current = repository.load()
+            candidate = replace(
+                current,
+                workflows=current.workflows.with_route(
+                    WorkflowScope.REFINEMENT,
+                    WorkflowRoute(
+                        provider_id="groq",
+                        model_id="llama-3.3-70b-versatile",
+                    ),
+                ),
+            )
+
+            applied = repository.apply(candidate)
+
+            self.assertEqual(applied.selection.refinement_provider, "groq")
+            self.assertEqual(
+                applied.workflow(WorkflowScope.REFINEMENT).provider_id,
+                "groq",
+            )
 
     def test_reset_and_test_are_local_and_preserve_other_routes(self):
         with tempfile.TemporaryDirectory() as directory:
