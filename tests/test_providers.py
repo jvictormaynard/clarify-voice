@@ -743,6 +743,37 @@ class ProviderTests(unittest.TestCase):
             "groq", self.audio_path, "transcription", "en",
             audio_bytes=None, cancel_token=None)
 
+    def test_voice_provider_preserves_typed_transcription_details(self):
+        route = SimpleNamespace(
+            provider_id="gemini",
+            model_id="gemini-audio",
+            enabled=True,
+        )
+        detailed = app.TranscriptionResult(
+            "refined transcript",
+            "gemini",
+            "gemini-audio",
+            raw_text="rough transcript",
+            refined_text="refined transcript",
+            refinement_provider_id="openai",
+            refinement_model="gpt-4o-mini",
+        )
+        audio_source = SimpleNamespace(
+            audio_path=self.audio_path,
+            audio_bytes=b"audio",
+            cancel_token=None,
+        )
+        with patch.object(app, "_workflow_route", return_value=route), \
+                patch.object(
+                    app, "call_transcription_provider",
+                    return_value=detailed) as transcribe:
+            result = app.AppVoiceTranslationProvider.transcribe(
+                audio_source, "auto")
+
+        self.assertIs(result, detailed)
+        transcribe.assert_called_once()
+        self.assertTrue(transcribe.call_args.kwargs["details"])
+
     @patch("app.PROVIDER_HTTP.session.post")
     def test_selected_text_rewrite_preserves_language_with_openai(self, post):
         app.APP_CONFIG.update({

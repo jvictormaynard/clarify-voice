@@ -4818,17 +4818,24 @@ class AppVoiceTranslationProvider:
             and bool(APP_CONFIG.get("local_asr_cloud_refinement", False))
             else "transcription"
         )
-        text = call_transcription_provider(
+        result = call_transcription_provider(
             audio_source.audio_path,
             mode,
             language,
             audio_bytes=audio_source.audio_bytes,
             cancel_token=audio_source.cancel_token,
             route=route,
+            details=True,
         )
+        if isinstance(result, TranscriptionResult):
+            typed_result = result
+        else:
+            typed_result = TranscriptionResult(
+                str(result), route.provider_id, route.model_id)
+        text = typed_result.text
         if not text or text.startswith("[Error"):
             raise RuntimeError(text or "Transcription returned no text")
-        return TranscriptionResult(text, route.provider_id, route.model_id)
+        return typed_result
 
     @staticmethod
     def translate(request: VoiceTranslationRequest):
