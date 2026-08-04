@@ -196,6 +196,30 @@ class WorkflowConfigurationTests(unittest.TestCase):
                     },
                 },
             }).workflows)
+        for query_name in ("x-api-key", "subscription-key"):
+            with self.assertRaises(WorkflowConfigurationError):
+                validate_workflow_config(AppConfig.from_mapping({
+                    "workflows": {
+                        "rewrite": {
+                            "provider_id": "openai",
+                            "custom_endpoint": (
+                                f"https://proxy.example/v1?{query_name}=secret"
+                            ),
+                        },
+                    },
+                }).workflows)
+        for port in ("notaport", "99999"):
+            with self.assertRaises(WorkflowConfigurationError):
+                validate_workflow_config(AppConfig.from_mapping({
+                    "workflows": {
+                        "rewrite": {
+                            "provider_id": "openai",
+                            "custom_endpoint": (
+                                f"https://proxy.example:{port}/v1"
+                            ),
+                        },
+                    },
+                }).workflows)
 
         config = AppConfig.from_mapping({
             "workflows": {

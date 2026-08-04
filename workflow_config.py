@@ -369,12 +369,25 @@ def validate_workflow_route(
         try:
             endpoint_parts = urlsplit(endpoint)
             query_keys = {
-                key.strip().lower()
+                key.strip().lower().replace("-", "_")
                 for key, _value in parse_qsl(
                         endpoint_parts.query, keep_blank_values=True)
             }
-            has_sensitive_query = bool(
-                query_keys & _SENSITIVE_ENDPOINT_QUERY_KEYS)
+            has_sensitive_query = any(
+                key in _SENSITIVE_ENDPOINT_QUERY_KEYS
+                or key.endswith(("_key", "_token", "_secret"))
+                or any(
+                    marker in key
+                    for marker in (
+                        "apikey", "auth", "credential", "password",
+                        "secret", "signature", "token",
+                    )
+                )
+                for key in query_keys
+            )
+            # Accessing .port is what makes urllib reject non-numeric and
+            # out-of-range ports; hostname alone does not perform that check.
+            _ = endpoint_parts.port
             if (not endpoint_parts.hostname or endpoint_parts.username
                     or endpoint_parts.password or has_sensitive_query):
                 raise WorkflowConfigurationError(
