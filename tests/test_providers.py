@@ -1728,6 +1728,27 @@ class WorkflowAppBridgeTests(unittest.TestCase):
         self.assertEqual(states, [])
         self.assertEqual(results, [])
 
+        service.state.phase = app.WorkflowPhase.READY
+        harness.app_state = "success"
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.COMPLETED,
+                3,
+                workflow_state=SimpleNamespace(
+                    published_text="current translation",
+                    publication=app.VoiceTranslationPublication.PASTED,
+                ),
+            ),
+        )
+        self.assertEqual(len(deferred), 2)
+        deferred[1]()
+
+        self.assertEqual(len(states), 1)
+        self.assertEqual(states[0][0], ("ready", ""))
+        states[0][1]["after_ready"]()
+        self.assertEqual(results, ["current translation"])
+
     def test_dictation_uses_platform_copy_and_paste_on_non_windows(self):
         target = app.SelectionTarget(77, "editor.exe")
         with patch.object(app, "IS_WIN", False), \
