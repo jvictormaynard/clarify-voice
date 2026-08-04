@@ -115,7 +115,8 @@ global actions cannot paste over one another. The policy is side-effect free
 and can be reviewed independently of any desktop API. Every worker carries the
 operation ID captured when it starts; all transitions and publication claims
 verify that ID, so a late completion from a cancelled run fails closed instead
-of mutating or publishing into a newer operation.
+of mutating or publishing into a newer operation. Its caller receives the
+originating operation's terminal snapshot, never the newer operation's state.
 
 This is intentionally scaffolding, not the packaged feature. A follow-up must
 connect the state machine to recording, global hotkey dispatch, the focus-safe

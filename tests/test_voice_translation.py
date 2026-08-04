@@ -479,7 +479,11 @@ class VoiceTranslationConcurrencyTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0].operation_id, current.operation_id)
+        self.assertEqual(outcomes[0].operation_id, 1)
+        self.assertEqual(outcomes[0].phase, VoiceTranslationPhase.CANCELLED)
+        self.assertEqual(outcomes[0].failure_code, "cancelled")
+        self.assertEqual(current.operation_id, 2)
+        self.assertEqual(current.phase, VoiceTranslationPhase.COMPLETED)
         self.assertEqual(
             clipboard.published,
             [

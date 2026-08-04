@@ -536,6 +536,23 @@ class VoiceTranslationStateMachine:
         with self._lock:
             return tuple(self._history)
 
+    def state_for_operation(self, operation_id: int) -> VoiceTranslationState:
+        """Return the latest snapshot owned by ``operation_id``.
+
+        A worker can finish after a newer operation has started. Returning the
+        current state in that case would make the stale worker report the
+        newer operation's result to its caller, so callers use this lookup for
+        a stable, operation-owned outcome instead.
+        """
+
+        with self._lock:
+            for snapshot in reversed(self._history):
+                if snapshot.operation_id == operation_id:
+                    return snapshot
+        raise VoiceTranslationStateError(
+            f"no voice translation state exists for operation {operation_id}"
+        )
+
     def _set(self, **changes: Any) -> VoiceTranslationState:
         with self._lock:
             self._state = VoiceTranslationState(
@@ -900,6 +917,28 @@ class VoiceTranslationWorkflow:
     def history(self) -> tuple[VoiceTranslationState, ...]:
         return self.state_machine.history
 
+    def _state_for_operation(self, operation_id: int) -> VoiceTranslationState:
+        """Keep a stale worker's return value scoped to its own operation."""
+
+        try:
+            return self.state_machine.state_for_operation(operation_id)
+        except VoiceTranslationStateError:
+            # Every workflow run begins with a state snapshot. Keep a safe
+            # fallback for custom state-machine implementations that do not
+            # retain history, without exposing a newer operation as this
+            # worker's result.
+            return VoiceTranslationState(
+                phase=VoiceTranslationPhase.CANCELLED,
+                operation_id=operation_id,
+                source_language=self.config.source_language,
+                target_language=self.config.target_language,
+                failure_code="stale_operation",
+                failure_message=(
+                    "voice translation worker completed after its operation "
+                    "was superseded"
+                ),
+            )
+
     @staticmethod
     def _text(result: TranscriptionResult | TranslationResult | str) -> str:
         value = getattr(result, "text", result)
@@ -930,7 +969,7 @@ class VoiceTranslationWorkflow:
                     publication_reason=decision.reason,
                 )
             except VoiceTranslationStateError:
-                return self.state
+                return self._state_for_operation(operation_id)
         try:
             # Claim the state-machine barrier before taking the shared
             # coordinator.  This ordering makes cancel-vs-publish atomic: a
@@ -938,7 +977,7 @@ class VoiceTranslationWorkflow:
             # the external clipboard effect is in flight.
             self.state_machine.claim_publication(operation_id)
         except VoiceTranslationStateError:
-            return self.state
+            return self._state_for_operation(operation_id)
         if not self.coordinator.claim(operation_id):
             try:
                 return self.state_machine.fail(
@@ -949,7 +988,7 @@ class VoiceTranslationWorkflow:
                     publication_reason="publication_coordinator_busy",
                 )
             except VoiceTranslationStateError:
-                return self.state
+                return self._state_for_operation(operation_id)
         try:
             self.clipboard.publish(
                 decision.text,
@@ -966,15 +1005,18 @@ class VoiceTranslationWorkflow:
                     publication_reason="clipboard_publish_failed",
                 )
             except VoiceTranslationStateError:
-                return self.state
+                return self._state_for_operation(operation_id)
         finally:
             self.coordinator.release(operation_id)
-        return self.state_machine.complete(
-            decision,
-            operation_id=operation_id,
-            failure_code=failure_code,
-            failure_message=failure_message,
-        )
+        try:
+            return self.state_machine.complete(
+                decision,
+                operation_id=operation_id,
+                failure_code=failure_code,
+                failure_message=failure_message,
+            )
+        except VoiceTranslationStateError:
+            return self._state_for_operation(operation_id)
 
     def run(self, audio_source: Any, *, allow_paste: bool = True) -> VoiceTranslationState:
         """Transcribe, translate, and apply the explicit publication policy."""
@@ -988,8 +1030,6 @@ class VoiceTranslationWorkflow:
                 self.provider.transcribe(audio_source, self.config.source_language)
             )
         except Exception as error:
-            if self.state.phase is VoiceTranslationPhase.CANCELLED:
-                return self.state
             try:
                 return self.state_machine.fail(
                     "transcription_failed",
@@ -998,19 +1038,22 @@ class VoiceTranslationWorkflow:
                     publication_reason=target_capture_reason,
                 )
             except VoiceTranslationStateError:
-                return self.state
+                return self._state_for_operation(operation_id)
         if not raw:
             try:
                 return self.state_machine.transcript_received(raw, operation_id)
             except VoiceTranslationStateError:
-                return self.state
+                return self._state_for_operation(operation_id)
 
         try:
             self.state_machine.transcript_received(raw, operation_id)
         except VoiceTranslationStateError:
-            return self.state
-        if self.state.phase is VoiceTranslationPhase.CANCELLED:
-            return self.state
+            return self._state_for_operation(operation_id)
+        current = self.state
+        if current.operation_id != operation_id:
+            return self._state_for_operation(operation_id)
+        if current.phase is VoiceTranslationPhase.CANCELLED:
+            return current
         request = VoiceTranslationRequest(
             text=raw,
             source_language=self.config.source_language,
@@ -1023,7 +1066,7 @@ class VoiceTranslationWorkflow:
             try:
                 self.state_machine.publishing(operation_id)
             except VoiceTranslationStateError:
-                return self.state
+                return self._state_for_operation(operation_id)
             decision = self.policy.decide(
                 raw_transcript=raw,
                 translated_text="",
@@ -1043,7 +1086,7 @@ class VoiceTranslationWorkflow:
             try:
                 self.state_machine.publishing(operation_id)
             except VoiceTranslationStateError:
-                return self.state
+                return self._state_for_operation(operation_id)
             decision = self.policy.decide(
                 raw_transcript=raw,
                 translated_text="",
@@ -1063,7 +1106,7 @@ class VoiceTranslationWorkflow:
         try:
             self.state_machine.translation_received(translated, operation_id)
         except VoiceTranslationStateError:
-            return self.state
+            return self._state_for_operation(operation_id)
         target_current = False
         clipboard_owned = False
         if target is not None:
