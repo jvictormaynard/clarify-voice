@@ -71,17 +71,18 @@ do not need Python, Node.js, or SoX.
 1. Open the [latest release](https://github.com/jvictormaynard/clarify-voice/releases/latest).
 2. Download `ClarifyVoice.exe` and place it in a folder you control.
 3. Double-click the executable.
-4. Open **Providers** first and choose the matching onboarding path:
-   - **Cloud provider:** select Gemini, OpenAI, Groq, or a compatible custom
-     endpoint, then add and validate an API key. After the provider is active,
-     open **Models** to select the transcription model and, when using Prompt
-     mode, the text-refinement model.
-   - **Local Whisper:** select Local Whisper in **Providers**, review its
-     requirements, and click **Download local ASR**. No API key is required for
-     local transcription. After installation, open **Models** and select Local
-     Whisper for transcription. Prompt-mode cloud refinement remains optional:
-     configure a cloud provider in **Providers**, select its model in **Models**,
-     and enable **Allow cloud refinement for Prompt mode** only if desired. The
+4. Open **Providers** first and choose one explicit onboarding path:
+   - **Cloud setup (credential required):** in **Providers**, select Gemini,
+     OpenAI, Groq, or a compatible custom endpoint, then add and validate an API
+     key. After the provider is active, open **Models** to select the
+     transcription model and, when using Prompt mode, the text-refinement model.
+   - **Local Whisper setup (keyless):** in **Providers**, select **Local
+     Whisper**, review its requirements, and use **Download local ASR**. No API
+     key or text-refinement model is required for local transcription. After the
+     installation completes, open **Models** and select Local Whisper for
+     transcription. Prompt-mode cloud refinement remains optional: configure a
+     cloud provider in **Providers**, select its model in **Models**, and enable
+     **Allow cloud refinement for Prompt mode** only if desired. The
      Windows/offline acceptance for Local Whisper is still pending; see [Local
      ASR](docs/local-asr.md).
 
@@ -147,11 +148,14 @@ result remains available for manual paste and the newer clipboard contents win.
 
 ## Providers
 
-Open **Models** to configure a provider, base URL, API key, and models. Local
-Whisper does not require an API key or cloud endpoint: choose **Download local
-ASR** explicitly to install its verified optional assets. Ordinary settings are
-stored in `%APPDATA%\ClarifyVoice\config.json`; cloud API keys are kept
-separately with Windows Data Protection API (DPAPI).
+Open **Providers** to configure a cloud provider, base URL, and API key, or to
+install Local Whisper. Local Whisper does not require an API key or cloud
+endpoint: use **Providers → Local Whisper → Download local ASR** explicitly to
+install its verified optional assets. After a provider is active or Local
+Whisper is installed, open **Models** only to select among the active
+transcription and refinement models. Ordinary settings are stored in
+`%APPDATA%\ClarifyVoice\config.json`; cloud API keys are kept separately with
+Windows Data Protection API (DPAPI).
 
 | Provider | Transcription | Text refinement | Default endpoint |
 | --- | --- | --- | --- |
