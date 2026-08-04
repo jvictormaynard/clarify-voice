@@ -8,6 +8,8 @@ keeps these public types available as compatibility imports.
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -62,6 +64,9 @@ _SENSITIVE_ENDPOINT_QUERY_KEYS = frozenset({
     "client_secret", "credential", "password", "passwd", "secret",
     "key", "sig", "signature", "token",
 })
+_HOST_LABEL_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+)
 
 
 def normalize_workflow_scope(scope: WorkflowScope | str) -> str:
@@ -69,6 +74,37 @@ def normalize_workflow_scope(scope: WorkflowScope | str) -> str:
     value = scope.value if isinstance(scope, WorkflowScope) else str(scope or "")
     value = value.strip().lower()
     return _WORKFLOW_SCOPE_ALIASES.get(value, value)
+
+
+def _valid_endpoint_hostname(hostname: str) -> bool:
+    """Accept DNS names and IP literals that HTTP clients can resolve."""
+    value = str(hostname or "").strip()
+    if not value or any(character.isspace() for character in value):
+        return False
+    candidate = value.rstrip(".")
+    if not candidate:
+        return False
+    try:
+        if ipaddress.ip_address(candidate):
+            return True
+    except ValueError:
+        pass
+    try:
+        ascii_host = candidate.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(ascii_host) > 253:
+        return False
+    labels = ascii_host.split(".")
+    # A four-label all-numeric host is intended as an IPv4 literal.  Reject
+    # malformed values instead of allowing a resolver to interpret them
+    # inconsistently as a DNS name.
+    if len(labels) == 4 and all(label.isdigit() for label in labels):
+        return False
+    return all(
+        len(label) <= 63 and _HOST_LABEL_RE.fullmatch(label)
+        for label in labels
+    )
 
 
 def _safe_endpoint_for_diagnostics(endpoint: str) -> str:
@@ -79,7 +115,8 @@ def _safe_endpoint_for_diagnostics(endpoint: str) -> str:
     try:
         parts = urlsplit(value)
         hostname = parts.hostname
-        if parts.scheme.lower() not in ("http", "https") or not hostname:
+        if (parts.scheme.lower() not in ("http", "https")
+                or not _valid_endpoint_hostname(hostname)):
             return ""
         if ":" in hostname and not hostname.startswith("["):
             hostname = f"[{hostname}]"
@@ -399,8 +436,9 @@ def validate_workflow_route(
                     "Custom endpoint must not contain a query or fragment.",
                     provider_id=provider, field="custom_endpoint",
                 )
-            if (not endpoint_parts.hostname or endpoint_parts.username
-                    or endpoint_parts.password or has_sensitive_query):
+            if (not _valid_endpoint_hostname(endpoint_parts.hostname)
+                    or endpoint_parts.username or endpoint_parts.password
+                    or has_sensitive_query):
                 raise WorkflowConfigurationError(
                     normalized_scope,
                     "Custom endpoint must not contain URL credentials or tokens.",

@@ -243,6 +243,18 @@ class WorkflowConfigurationTests(unittest.TestCase):
                         },
                     },
                 }).workflows)
+        for hostname in (
+                "proxy example", "proxy..example", "-proxy.example",
+                "proxy-.example", "999.999.999.999"):
+            with self.assertRaises(WorkflowConfigurationError):
+                validate_workflow_config(AppConfig.from_mapping({
+                    "workflows": {
+                        "rewrite": {
+                            "provider_id": "openai",
+                            "custom_endpoint": f"https://{hostname}/v1",
+                        },
+                    },
+                }).workflows)
         for suffix in ("?region=eu", "#fragment"):
             with self.assertRaises(WorkflowConfigurationError):
                 validate_workflow_config(AppConfig.from_mapping({
