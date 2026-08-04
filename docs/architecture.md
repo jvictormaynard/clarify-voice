@@ -89,6 +89,15 @@ URLs at rest. Its
 `test_workflow_configuration` result is local and diagnostic-safe: it makes no
 provider request and does not persist prompt text.
 
+`workflow_settings.py` is the UI-free settings controller used by the desktop
+surface. It keeps an immutable typed draft, changes one scope at a time, and
+delegates Apply, Reset, and Test to `LocalConfigRepository` so validation and
+atomic persistence remain outside Tk. The controller exposes only redacted
+effective-route summaries (provider, model, endpoint, and local/cloud state).
+`AppWorkflowProvider` resolves the route for each operation, including the
+rewrite and translation-specific prompt and endpoint, while `app.py` retains
+flat selectors only as a compatibility bridge for older settings files.
+
 ### Voice translation foundation (`voice_translation.py`)
 
 Issue #49 adds a separate, UI-free contract for voice translation rather than
