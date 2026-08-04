@@ -382,7 +382,28 @@ def _snippet_sort_key(item: tuple[int, Snippet]) -> tuple[int, int]:
     # Longest first handles overlapping triggers.  Original list order is the
     # stable tie-breaker, making imported/exported documents deterministic.
     index, snippet = item
-    return (-len(snippet.trigger), index)
+    return (-len(snippet.trigger.casefold()), index)
+
+
+def _casefold_match_end(text: str, start: int, trigger: str) -> int | None:
+    """Find the original-text end for a casefolded trigger.
+
+    Unicode case folding is not one code point in, one code point out:
+    ``"ß".casefold() == "ss"``.  Building the folded prefix incrementally
+    keeps the consumed span correct without using a lossy regex transform.
+    """
+    target = trigger.casefold()
+    folded = ""
+    end = start
+    while end < len(text) and len(folded) <= len(target):
+        piece = text[end].casefold()
+        folded += piece
+        end += 1
+        if folded == target:
+            return end
+        if not target.startswith(folded):
+            return None
+    return None
 
 
 class DictionarySnippetService:
@@ -468,18 +489,22 @@ class DictionarySnippetService:
             replacement: str | None = None
             consumed = 0
             for _rule_index, snippet in candidates:
-                length = len(snippet.trigger)
-                end = index + length
-                if end > len(text) or not _has_word_boundaries(text, index, end):
-                    continue
-                candidate = text[index:end]
                 if snippet.case_sensitive:
-                    matches = candidate == snippet.trigger
+                    end = index + len(snippet.trigger)
+                    matches = (
+                        end <= len(text)
+                        and _has_word_boundaries(text, index, end)
+                        and text[index:end] == snippet.trigger
+                    )
                 else:
-                    matches = candidate.casefold() == snippet.trigger.casefold()
+                    end = _casefold_match_end(text, index, snippet.trigger)
+                    matches = (
+                        end is not None
+                        and _has_word_boundaries(text, index, end)
+                    )
                 if matches:
                     replacement = snippet.replacement
-                    consumed = length
+                    consumed = end - index
                     break
             if replacement is None:
                 if output_length + 1 > self.max_expansion_chars:

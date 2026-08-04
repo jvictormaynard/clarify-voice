@@ -127,11 +127,12 @@ class DictionarySnippetTests(unittest.TestCase):
             Snippet("meet", "short"),
             Snippet("meet me", "long"),
             Snippet("café", "coffee", case_sensitive=False),
+            Snippet("straße", "street", case_sensitive=False),
         )))
 
         self.assertEqual(
-            service.expand("meet me, meet meeting café CAFÉ xmeet café-bar"),
-            "long, short meeting coffee coffee xmeet coffee-bar",
+            service.expand("meet me, meet meeting café CAFÉ xmeet café-bar STRASSE"),
+            "long, short meeting coffee coffee xmeet coffee-bar street",
         )
 
     def test_case_sensitive_and_disabled_rules_are_explicit(self):
@@ -251,6 +252,35 @@ class DictionarySnippetTests(unittest.TestCase):
             self.assertEqual(result, "be right back")
             self.assertEqual(len(request_seen), 1)
             self.assertIn("ClarifyVoice", request_seen[0].dictionary_context)
+        finally:
+            app.APP_CONFIG.clear()
+            app.APP_CONFIG.update(original_config)
+
+    def test_recording_path_does_not_expand_refinement_error_sentinel(self):
+        service = DictionarySnippetService(self.repository)
+        service.replace(DictionarySnippets(snippets=(Snippet("Error", "success"),)))
+        original_config = app.APP_CONFIG.copy()
+        try:
+            app.APP_CONFIG.update({
+                "transcription_provider": "openai",
+                "openai_api_key": "test-key",
+                "openai_base_url": "https://proxy.example/v1",
+                "openai_audio_model": "whisper-1",
+                "refinement_provider": "openai",
+                "refinement_model": "gpt-4o-mini",
+            })
+            with patch.object(app, "DICTIONARY_SERVICE", service), \
+                    patch.object(
+                        app.PROVIDER_REGISTRY,
+                        "transcribe",
+                        return_value=type("Result", (), {"text": "raw"})(),
+                    ), patch.object(
+                        app, "_refine_transcript", return_value="[Error: failed]"
+                    ):
+                result = app._call_provider_audio(
+                    "openai", Path(self.directory.name) / "audio.wav", "prompt")
+
+            self.assertEqual(result, "[Error: failed]")
         finally:
             app.APP_CONFIG.clear()
             app.APP_CONFIG.update(original_config)

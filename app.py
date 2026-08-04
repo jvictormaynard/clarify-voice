@@ -2278,6 +2278,11 @@ def _call_provider_audio(
                 and (provider != LOCAL_ASR_PROVIDER_ID
                      or bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))):
             transcript = _refine_transcript(transcript, lang, cancel_token)
+        # Refinement uses a localized ``[Error: ...]`` sentinel for failures.
+        # Do not run user snippets over that sentinel: changing it could make
+        # the workflow publish an error as if it were a successful transcript.
+        if isinstance(transcript, str) and transcript.startswith("[Error"):
+            return transcript
         return DICTIONARY_SERVICE.expand(transcript)
     except Exception as error:
         try:
