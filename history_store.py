@@ -666,7 +666,10 @@ class HistoryStore:
         """Delete the history snapshot and any interrupted-write leftovers."""
 
         with self._lock:
-            targets = [self.path, *self._temporary_paths()]
+            # Remove recovery snapshots first. If one cannot be unlinked, the
+            # committed primary must remain so a later startup cannot
+            # resurrect supposedly deleted transcripts from that snapshot.
+            targets = [*self._temporary_paths(), self.path]
             for target in targets:
                 try:
                     target.unlink()
