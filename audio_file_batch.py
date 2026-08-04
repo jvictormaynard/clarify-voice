@@ -32,6 +32,7 @@ from typing import Any, Protocol
 from provider_http import (
     CancellationToken,
     NetworkError,
+    QuotaError,
     ProviderCancelledError,
     ProviderTimeoutError,
     RateLimitError,
@@ -65,6 +66,9 @@ DEFAULT_MAX_FILES = 64
 MAX_MAX_FILES = 256
 DEFAULT_MAX_ATTEMPTS = 1
 MAX_MAX_ATTEMPTS = 3
+DEFAULT_MAX_AUDIO_BYTES = 256 * 1024 * 1024
+MAX_MAX_AUDIO_BYTES = 1024 * 1024 * 1024
+_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 
 
 class AudioBatchError(RuntimeError):
@@ -306,6 +310,10 @@ def _retryable_error(error: BaseException) -> bool:
     # still useful; request bodies are reconstructed from the immutable bytes
     # snapshot, and callers can keep max_attempts at one when charges must not
     # be repeated.
+    if isinstance(error, QuotaError):
+        # QuotaError is deliberately a RateLimitError subtype in the shared
+        # HTTP policy, but exhausted quota is permanent and must not be retried.
+        return False
     return isinstance(error, (
         RetryableAudioBatchError,
         NetworkError,
@@ -341,7 +349,11 @@ def _selection_request(
     )
 
 
-def validate_audio_path(path: str | os.PathLike[str] | Path) -> Path:
+def validate_audio_path(
+        path: str | os.PathLike[str] | Path,
+        *,
+        max_bytes: int | None = None,
+        ) -> Path:
     """Resolve and validate one local import without opening or mutating it."""
 
     try:
@@ -368,9 +380,14 @@ def validate_audio_path(path: str | os.PathLike[str] | Path) -> Path:
         raise UnsupportedAudioFormatError(
             f"Unsupported audio format '{extension or '[none]'}'; supported: {supported}")
     try:
-        if resolved.stat().st_size <= 0:
+        size = resolved.stat().st_size
+        if size <= 0:
             raise AudioFileValidationError(
                 f"Audio file is empty: {resolved.name}")
+        if max_bytes is not None and size > max_bytes:
+            raise AudioFileValidationError(
+                f"Audio file exceeds the {max_bytes} byte limit: "
+                f"{resolved.name}")
     except OSError as error:
         raise AudioFileValidationError(
             f"Could not inspect audio file: {resolved.name}") from error
@@ -570,6 +587,13 @@ class AudioBatchJob:
                                error="File processing was cancelled")
             try:
                 result = self._service._transcribe_one(path, self._selection, token)
+                # A provider may finish concurrently with ``job.cancel()``
+                # after its final token check.  Do not publish that result as
+                # successful once cancellation has won the batch boundary.
+                if token.cancelled or self._cancel_token.cancelled:
+                    return replace(current, status=AudioFileStatus.CANCELLED,
+                                   attempts=attempts,
+                                   error="File processing was cancelled")
                 return AudioFileResult(
                     path=path,
                     status=AudioFileStatus.SUCCEEDED,
@@ -602,6 +626,7 @@ class AudioFileBatchService:
         max_workers: int = DEFAULT_MAX_WORKERS,
         max_files: int = DEFAULT_MAX_FILES,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        max_audio_bytes: int = DEFAULT_MAX_AUDIO_BYTES,
         temp_root: Path | None = None,
     ):
         if not 1 <= int(max_workers) <= MAX_MAX_WORKERS:
@@ -613,11 +638,15 @@ class AudioFileBatchService:
         if not 1 <= int(max_attempts) <= MAX_MAX_ATTEMPTS:
             raise AudioBatchConfigurationError(
                 f"max_attempts must be between 1 and {MAX_MAX_ATTEMPTS}")
+        if not 1 <= int(max_audio_bytes) <= MAX_MAX_AUDIO_BYTES:
+            raise AudioBatchConfigurationError(
+                "max_audio_bytes must be between 1 byte and 1 GiB")
         self.gateway = gateway
         self.converter = converter or SoxAudioConverter()
         self.max_workers = int(max_workers)
         self.max_files = int(max_files)
         self.max_attempts = int(max_attempts)
+        self.max_audio_bytes = int(max_audio_bytes)
         self.temp_root = Path(temp_root) if temp_root is not None else None
 
     def start(
@@ -641,7 +670,7 @@ class AudioFileBatchService:
         initial: list[AudioFileResult] = []
         for raw in raw_paths:
             try:
-                path = validate_audio_path(raw)
+                path = validate_audio_path(raw, max_bytes=self.max_audio_bytes)
             except AudioBatchError as error:
                 # Invalid imports remain visible to the caller, while valid
                 # files in the same batch continue independently.
@@ -686,7 +715,8 @@ class AudioFileBatchService:
         # cleanup path ever points at the imported source.
         if path.suffix.casefold() == CANONICAL_AUDIO_EXTENSION:
             source = path
-            audio_bytes = _snapshot_audio(source, cancel_token)
+            audio_bytes = _snapshot_audio(
+                source, cancel_token, max_bytes=self.max_audio_bytes)
             request_path = source
             return self.gateway.transcribe(
                 _selection_request(request_path, audio_bytes, selection),
@@ -712,7 +742,8 @@ class AudioFileBatchService:
                     or normalized_resolved.suffix.casefold() != CANONICAL_AUDIO_EXTENSION):
                 raise AudioConversionError(
                     "Audio converter returned a path outside its temporary directory")
-            audio_bytes = _snapshot_audio(normalized, cancel_token)
+            audio_bytes = _snapshot_audio(
+                normalized, cancel_token, max_bytes=self.max_audio_bytes)
             return self.gateway.transcribe(
                 _selection_request(normalized, audio_bytes, selection),
                 selection,
@@ -720,11 +751,31 @@ class AudioFileBatchService:
             )
 
 
-def _snapshot_audio(path: Path, cancel_token: CancellationToken) -> bytes:
+def _snapshot_audio(
+        path: Path,
+        cancel_token: CancellationToken,
+        *,
+        max_bytes: int = DEFAULT_MAX_AUDIO_BYTES,
+        ) -> bytes:
     if cancel_token.cancelled:
         raise AudioBatchCancelledError("File processing was cancelled")
     try:
-        audio = path.read_bytes()
+        chunks: list[bytes] = []
+        total = 0
+        with Path(path).open("rb") as stream:
+            while True:
+                if cancel_token.cancelled:
+                    raise AudioBatchCancelledError("File processing was cancelled")
+                chunk = stream.read(_SNAPSHOT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise AudioFileValidationError(
+                        f"Audio file exceeds the {max_bytes} byte limit: "
+                        f"{Path(path).name}")
+                chunks.append(chunk)
+        audio = b"".join(chunks)
     except OSError as error:
         raise AudioFileValidationError(
             f"Could not read audio file: {path.name}") from error

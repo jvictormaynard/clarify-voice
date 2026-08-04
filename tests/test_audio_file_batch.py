@@ -20,6 +20,7 @@ from audio_file_batch import (
     validate_audio_path,
 )
 from provider_http import CancellationToken
+from provider_http import QuotaError
 from provider_types import (
     ProviderConnection,
     TranscriptionRequest,
@@ -98,6 +99,17 @@ class AudioFileValidationTests(unittest.TestCase):
             limited = AudioFileBatchService(gateway, max_files=1)
             with self.assertRaises(AudioBatchConfigurationError):
                 limited.run([path, path], _selection())
+
+    def test_per_file_byte_limit_rejects_before_snapshot_or_provider(self):
+        gateway = _FakeGateway()
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "large.wav"
+            path.write_bytes(b"0123456789")
+            result = AudioFileBatchService(
+                gateway, max_audio_bytes=4).run([path], _selection())
+            self.assertEqual(result.files[0].status, AudioFileStatus.FAILED)
+            self.assertIn("limit", result.files[0].error)
+            self.assertEqual(gateway.requests, [])
 
 
 class AudioFileBatchTests(unittest.TestCase):
@@ -228,6 +240,37 @@ class AudioFileBatchTests(unittest.TestCase):
             self.assertEqual(result.files[0].status, AudioFileStatus.SUCCEEDED)
             self.assertEqual(result.files[0].attempts, 2)
             self.assertEqual(attempts, 2)
+
+    def test_permanent_quota_failure_is_not_retried(self):
+        attempts = 0
+
+        class QuotaGateway:
+            def transcribe(self, request, selection, cancel_token):
+                nonlocal attempts
+                attempts += 1
+                raise QuotaError(provider="local-test", operation="transcription")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"fixture")
+            result = AudioFileBatchService(
+                QuotaGateway(), max_attempts=3).run([path], _selection())
+            self.assertEqual(result.files[0].status, AudioFileStatus.FAILED)
+            self.assertEqual(result.files[0].attempts, 1)
+            self.assertEqual(attempts, 1)
+
+    def test_cancellation_wins_when_provider_returns_after_cancellation(self):
+        class RaceGateway:
+            def transcribe(self, request, selection, cancel_token):
+                cancel_token.cancel()
+                return TranscriptionResult("late", selection.provider_id, selection.model)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"fixture")
+            result = AudioFileBatchService(RaceGateway()).run([path], _selection())
+            self.assertEqual(result.files[0].status, AudioFileStatus.CANCELLED)
+            self.assertFalse(result.files[0].text)
 
 
 class RegistryGatewayTests(unittest.TestCase):

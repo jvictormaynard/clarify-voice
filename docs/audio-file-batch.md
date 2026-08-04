@@ -63,7 +63,9 @@ submits no more than `max_workers` futures at once; a dropped folder therefore
 cannot become an unbounded executor queue. Each file reports `pending`,
 `processing`, `succeeded`, `failed`, or `cancelled` and retains its successful
 text/provider/model or an actionable error. A failed file does not hide other
-results.
+results. Each source snapshot is capped at 256 MiB by default (1 GiB hard
+maximum) and is read in 1 MiB chunks with cancellation checks, so a large file
+cannot create an unbounded allocation before provider work starts.
 
 `job.cancel()` stops new submissions and cancels active provider/conversion
 tokens. Cancellation is cooperative: a provider or converter must return from
@@ -73,9 +75,9 @@ failure.
 
 Automatic attempts default to one. Callers may set `max_attempts` to at most
 three; only explicitly retryable/transient typed errors are retried. The
-provider HTTP layer remains responsible for its own safe request retry policy,
-and callers should keep one attempt when a provider operation could be charged
-again.
+provider HTTP layer remains responsible for its own safe request retry policy;
+permanent quota exhaustion is never retried, and callers should keep one
+attempt when a provider operation could be charged again.
 
 The service accepts `Path`-like local values only. URL-looking values are
 rejected before any network-capable code is reached. There is no URL download,
