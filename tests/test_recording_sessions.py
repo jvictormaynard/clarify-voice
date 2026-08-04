@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import app
+from microphone_controls import RecordingBoundaryReason
 
 
 class RecordingSessionTests(unittest.TestCase):
@@ -15,7 +16,7 @@ class RecordingSessionTests(unittest.TestCase):
         class BoundaryRecorder:
             def __init__(self):
                 self.boundary_event = threading.Event()
-                self.boundary_reason = app.RecordingBoundaryReason.MAX_DURATION
+                self.boundary_reason = RecordingBoundaryReason.MAX_DURATION
                 self.path = None
 
             def start(self, audio_path, cancel_event=None):
@@ -47,7 +48,7 @@ class RecordingSessionTests(unittest.TestCase):
 
             self.assertTrue(callback_seen.wait(1))
             self.assertEqual(
-                callback_details[0][0], app.RecordingBoundaryReason.MAX_DURATION)
+                callback_details[0][0], RecordingBoundaryReason.MAX_DURATION)
             self.assertNotEqual(callback_details[0][1], threading.current_thread().name)
 
             self.assertTrue(session.cancel())
@@ -95,7 +96,7 @@ class RecordingSessionTests(unittest.TestCase):
 
         self.assertTrue(recorder.boundary_event.is_set())
         self.assertEqual(
-            recorder.boundary_reason, app.RecordingBoundaryReason.MAX_DURATION)
+            recorder.boundary_reason, RecordingBoundaryReason.MAX_DURATION)
 
     def test_recorder_routes_selected_microphone_by_current_backend_handle(self):
         inventory = app.MicrophoneInventory.from_records([
