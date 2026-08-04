@@ -482,6 +482,12 @@ class HistoryStore:
                 # primary with an older temporary snapshot.  The newer file
                 # remains intact for the executable that understands it.
                 return current
+            if not _is_recoverable_snapshot(current):
+                # Keep every interrupted snapshot available while the
+                # committed primary is still structurally invalid.  The load
+                # path will fail closed (or migrate safely) without deleting
+                # the only recoverable copy first.
+                return current
             # A complete temp written after the primary may represent a crash
             # between flushing the new snapshot and ``os.replace``. Recover it
             # when its mtime proves it is newer; an older leftover is from a

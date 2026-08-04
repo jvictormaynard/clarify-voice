@@ -534,6 +534,32 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertTrue(candidate.exists())
 
+    def test_structurally_corrupt_primary_keeps_older_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            path.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": {"raw_text": "corrupt-primary"},
+            }), encoding="utf-8")
+            before = path.read_bytes()
+            candidate = root / ".history.json.older.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [HistoryRecord(
+                    raw_text="recoverable", timestamp=NOW,
+                    provider="openai", model="gpt-test").to_mapping()],
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime - 1, target_mtime - 1))
+
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            with self.assertRaises(HistoryStoreError):
+                store.list_records()
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(candidate.exists())
+
     def test_invalid_legacy_snapshot_cannot_replace_valid_primary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
