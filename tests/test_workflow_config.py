@@ -166,8 +166,12 @@ class WorkflowConfigurationTests(unittest.TestCase):
             config.workflow("rewrite").provider_id,
             config.workflow("translation").provider_id,
         )
+        self.assertFalse(migrated["workflows"]["transcription"]["independent"])
+        self.assertFalse(migrated["workflows"]["refinement"]["independent"])
         self.assertFalse(migrated["workflows"]["rewrite"]["independent"])
         self.assertFalse(migrated["workflows"]["translation"]["independent"])
+        self.assertFalse(
+            migrated["workflows"]["local_asr_refinement"]["independent"])
 
     def test_authored_equal_routes_survive_legacy_picker_changes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -189,7 +193,6 @@ class WorkflowConfigurationTests(unittest.TestCase):
                         "prompt": "authored rewrite policy",
                         "custom_endpoint": "",
                         "enabled": True,
-                        "independent": True,
                     },
                     "translation": {
                         "provider_id": "openai",
@@ -197,7 +200,6 @@ class WorkflowConfigurationTests(unittest.TestCase):
                         "prompt": "authored translation policy",
                         "custom_endpoint": "",
                         "enabled": True,
-                        "independent": True,
                     },
                 },
             })
@@ -228,6 +230,49 @@ class WorkflowConfigurationTests(unittest.TestCase):
             self.assertTrue(persisted["workflows"]["rewrite"]["independent"])
             self.assertTrue(
                 persisted["workflows"]["translation"]["independent"])
+
+    def test_authored_primary_routes_refresh_flat_compatibility_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            candidate = repository.load().to_mapping()
+            candidate["transcription_provider"] = "openai"
+            candidate["openai_audio_model"] = "whisper-1"
+            candidate["refinement_provider"] = "groq"
+            candidate["refinement_model"] = "llama-3.3-70b-versatile"
+            candidate["workflows"]["transcription"] = {
+                "provider_id": "groq",
+                "model_id": "whisper-large-v3",
+                "prompt": "scoped transcription",
+                "custom_endpoint": "",
+                "enabled": True,
+                "independent": True,
+            }
+            candidate["workflows"]["refinement"] = {
+                "provider_id": "openai",
+                "model_id": "gpt-4o-mini",
+                "prompt": "scoped refinement",
+                "custom_endpoint": "",
+                "enabled": True,
+                "independent": True,
+            }
+
+            applied = repository.apply(candidate)
+
+            self.assertEqual(
+                applied.workflow(WorkflowScope.TRANSCRIPTION).provider_id,
+                "groq",
+            )
+            self.assertEqual(
+                applied.workflow(WorkflowScope.REFINEMENT).provider_id,
+                "openai",
+            )
+            legacy = applied.to_legacy_mapping()
+            self.assertEqual(legacy["transcription_provider"], "groq")
+            self.assertEqual(legacy["groq_audio_model"], "whisper-large-v3")
+            self.assertEqual(legacy["refinement_provider"], "openai")
+            self.assertEqual(legacy["refinement_model"], "gpt-4o-mini")
 
     def test_routes_are_independent_and_custom_endpoint_is_not_a_secret(self):
         config = AppConfig.from_mapping({
@@ -335,6 +380,53 @@ class WorkflowConfigurationTests(unittest.TestCase):
             )
             self.assertTrue(loaded.workflow(
                 WorkflowScope.LOCAL_ASR_REFINEMENT).enabled)
+
+    def test_partial_primary_route_save_marks_authorship(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = LocalConfigRepository(
+                Path(directory) / "config.json",
+                secret_store=MemorySecretStore(),
+            )
+            repository.save({
+                "workflows": {
+                    "transcription": {
+                        "provider_id": "groq",
+                        "model_id": "whisper-large-v3",
+                        "independent": True,
+                    },
+                    "refinement": {
+                        "provider_id": "groq",
+                        "model_id": "llama-3.3-70b-versatile",
+                        "independent": True,
+                    },
+                },
+            })
+
+            loaded = repository.load()
+            self.assertTrue(loaded.workflow(WorkflowScope.TRANSCRIPTION).independent)
+            self.assertTrue(loaded.workflow(WorkflowScope.REFINEMENT).independent)
+
+            legacy = loaded.to_legacy_mapping()
+            legacy.update({
+                "transcription_provider": "gemini",
+                "gemini_model": "gemini-2.5-flash",
+                "refinement_provider": "openai",
+                "refinement_model": "gpt-4o-mini",
+            })
+            repository.apply(legacy)
+            preserved = repository.load()
+            self.assertEqual(
+                preserved.workflow(WorkflowScope.TRANSCRIPTION).provider_id,
+                "groq",
+            )
+            self.assertEqual(
+                preserved.workflow(WorkflowScope.REFINEMENT).provider_id,
+                "groq",
+            )
+            self.assertTrue(
+                preserved.workflow(WorkflowScope.TRANSCRIPTION).independent)
+            self.assertTrue(
+                preserved.workflow(WorkflowScope.REFINEMENT).independent)
 
     def test_transcription_provider_change_clears_endpoint_but_model_change_keeps_it(self):
         with tempfile.TemporaryDirectory() as directory:

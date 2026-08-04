@@ -77,9 +77,20 @@ class WorkflowSettingsController:
         ):
             if value is not _UNSET:
                 changes[field_name] = value
-        if normalized in (
-                WorkflowScope.REWRITE.value,
-                WorkflowScope.TRANSLATION.value):
+        if any(
+                value is not _UNSET
+                and value != getattr(current, field_name)
+                for field_name, value in (
+                    ("provider_id", provider_id),
+                    ("model_id", model_id),
+                    ("prompt", prompt),
+                    ("custom_endpoint", custom_endpoint),
+                    ("enabled", enabled),
+                )
+        ):
+            # The marker records authorship at the moment a scoped form is
+            # actually edited.  Merely opening/applying an untouched legacy
+            # route must not opt it out of flat compatibility migration.
             changes["independent"] = True
         route = replace(current, **changes)
         self._config = replace(

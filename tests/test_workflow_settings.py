@@ -204,20 +204,116 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             def deselect(self):
                 self.calls.append("deselect")
 
+        controller = WorkflowSettingsController(self.repository())
+        route = controller.route(WorkflowScope.LOCAL_ASR_REFINEMENT)
         for enabled, expected_call in ((True, "select"), (False, "deselect")):
             with self.subTest(enabled=enabled):
                 switch = FakeSwitch()
-                app._sync_selected_workflow_enabled_widget(
+                app._sync_selected_workflow_form_widgets(
                     WorkflowScope.LOCAL_ASR_REFINEMENT,
-                    switch,
-                    enabled,
+                    WorkflowScope.LOCAL_ASR_REFINEMENT,
+                    {"enabled": switch},
+                    replace(route, enabled=enabled),
+                    fields=("enabled",),
                 )
                 self.assertEqual(switch.calls, [expected_call])
 
         unrelated = FakeSwitch()
-        app._sync_selected_workflow_enabled_widget(
-            WorkflowScope.REWRITE, unrelated, True)
+        app._sync_selected_workflow_form_widgets(
+            WorkflowScope.REWRITE,
+            WorkflowScope.LOCAL_ASR_REFINEMENT,
+            {"enabled": unrelated},
+            route,
+            fields=("enabled",),
+        )
         self.assertEqual(unrelated.calls, [])
+
+    def test_immediate_local_refinement_toggle_only_baselines_enabled(self):
+        controller = WorkflowSettingsController(self.repository())
+        controller.set_route(
+            WorkflowScope.LOCAL_ASR_REFINEMENT,
+            provider_id="groq",
+            model_id="llama-3.3-70b-versatile",
+            prompt="unsaved local refinement policy",
+            custom_endpoint="https://local-refinement.example/v1",
+        )
+        persisted = controller.repository.load().workflows
+        saved_settings = {"workflows": persisted}
+
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                app._sync_local_asr_refinement_draft(
+                    controller, saved_settings, enabled)
+                draft = controller.route(WorkflowScope.LOCAL_ASR_REFINEMENT)
+                baseline = saved_settings["workflows"].route(
+                    WorkflowScope.LOCAL_ASR_REFINEMENT)
+                self.assertEqual(draft.provider_id, "groq")
+                self.assertEqual(draft.model_id, "llama-3.3-70b-versatile")
+                self.assertEqual(draft.prompt, "unsaved local refinement policy")
+                self.assertEqual(
+                    draft.custom_endpoint,
+                    "https://local-refinement.example/v1",
+                )
+                self.assertEqual(draft.enabled, enabled)
+                self.assertEqual(baseline.enabled, enabled)
+                self.assertNotEqual(baseline.provider_id, draft.provider_id)
+                self.assertNotEqual(baseline.prompt, draft.prompt)
+
+        controller.apply()
+        restarted = WorkflowSettingsController(controller.repository)
+        applied = restarted.route(WorkflowScope.LOCAL_ASR_REFINEMENT)
+        self.assertEqual(applied.provider_id, "groq")
+        self.assertEqual(applied.model_id, "llama-3.3-70b-versatile")
+        self.assertEqual(applied.prompt, "unsaved local refinement policy")
+        self.assertEqual(
+            applied.custom_endpoint,
+            "https://local-refinement.example/v1",
+        )
+        self.assertFalse(applied.enabled)
+
+    def test_selected_workflow_form_sync_updates_only_requested_fields(self):
+        class FakeMenu:
+            def __init__(self, value):
+                self.value = value
+
+            def set(self, value):
+                self.value = value
+
+        class FakeEntry:
+            def __init__(self, value):
+                self.value = value
+
+            def delete(self, *_args):
+                self.value = ""
+
+            def insert(self, _index, value):
+                self.value = value
+
+        controller = WorkflowSettingsController(self.repository())
+        route = replace(
+            controller.route(WorkflowScope.TRANSCRIPTION),
+            provider_id="openai",
+            model_id="whisper-1",
+        )
+        widgets = {
+            "provider_menu": FakeMenu("local_asr"),
+            "model": FakeEntry("ggml-small"),
+            "endpoint": FakeEntry("draft endpoint"),
+            "prompt": FakeEntry("draft prompt"),
+        }
+
+        app._sync_selected_workflow_form_widgets(
+            WorkflowScope.TRANSCRIPTION,
+            WorkflowScope.TRANSCRIPTION,
+            widgets,
+            route,
+            fields=("provider_id", "model_id"),
+        )
+
+        self.assertEqual(widgets["provider_menu"].value, "openai")
+        self.assertEqual(widgets["model"].value, "whisper-1")
+        self.assertEqual(widgets["endpoint"].value, "draft endpoint")
+        self.assertEqual(widgets["prompt"].value, "draft prompt")
 
     def test_reset_baseline_updates_one_scope_and_keeps_other_drafts_dirty(self):
         controller = WorkflowSettingsController(self.repository())
@@ -304,6 +400,7 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             WorkflowScope.TRANSCRIPTION,
             provider_id="local_asr",
             model_id="ggml-small",
+            prompt="unsaved transcription policy",
         )
         controller.set_route(
             WorkflowScope.REWRITE,
@@ -327,12 +424,50 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
                 saved_settings,
                 {"provider": "openai", "model": "whisper-1"},
             )
+        class FakeMenu:
+            def __init__(self, value):
+                self.value = value
+
+            def set(self, value):
+                self.value = value
+
+        class FakeEntry:
+            def __init__(self, value):
+                self.value = value
+
+            def delete(self, *_args):
+                self.value = ""
+
+            def insert(self, _index, value):
+                self.value = value
+
+        widgets = {
+            "provider_menu": FakeMenu("local_asr"),
+            "model": FakeEntry("ggml-small"),
+        }
+        app._sync_selected_workflow_form_widgets(
+            WorkflowScope.TRANSCRIPTION,
+            WorkflowScope.TRANSCRIPTION,
+            widgets,
+            controller.route(WorkflowScope.TRANSCRIPTION),
+            fields=("provider_id", "model_id"),
+        )
+        self.assertEqual(widgets["provider_menu"].value, "openai")
+        self.assertEqual(widgets["model"].value, "whisper-1")
+        self.assertEqual(
+            controller.route(WorkflowScope.TRANSCRIPTION).prompt,
+            "unsaved transcription policy",
+        )
         controller.apply()
 
         restarted = WorkflowSettingsController(controller.repository)
         self.assertEqual(
             restarted.route(WorkflowScope.TRANSCRIPTION).provider_id,
             "openai",
+        )
+        self.assertEqual(
+            restarted.route(WorkflowScope.TRANSCRIPTION).prompt,
+            "unsaved transcription policy",
         )
         self.assertEqual(
             restarted.route(WorkflowScope.REWRITE).prompt,
@@ -347,6 +482,106 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             saved_settings["transcription"],
             ("openai", "whisper-1"),
         )
+
+    def test_live_workflow_form_values_update_draft_and_dirty_state(self):
+        controller = WorkflowSettingsController(self.repository())
+        saved_settings = {"workflows": controller.workflows}
+
+        app._store_workflow_form_draft(
+            controller,
+            WorkflowScope.REWRITE,
+            provider_id="groq",
+            model_id="llama-3.3-70b-versatile",
+            prompt="live rewrite policy",
+            custom_endpoint="https://rewrite.example/v1",
+            enabled=False,
+        )
+        current_settings = {"workflows": controller.workflows}
+        route = controller.route(WorkflowScope.REWRITE)
+
+        self.assertNotEqual(current_settings, saved_settings)
+        self.assertEqual(route.provider_id, "groq")
+        self.assertEqual(route.model_id, "llama-3.3-70b-versatile")
+        self.assertEqual(route.prompt, "live rewrite policy")
+        self.assertEqual(route.custom_endpoint, "https://rewrite.example/v1")
+        self.assertFalse(route.enabled)
+        self.assertTrue(route.independent)
+
+    def test_primary_scoped_edits_survive_apply_and_stale_flat_runtime(self):
+        controller = WorkflowSettingsController(self.repository())
+        controller.set_route(
+            WorkflowScope.TRANSCRIPTION,
+            provider_id="groq",
+            model_id="whisper-large-v3",
+            prompt="scoped transcription policy",
+        )
+        controller.set_route(
+            WorkflowScope.REFINEMENT,
+            provider_id="groq",
+            model_id="llama-3.3-70b-versatile",
+            prompt="scoped refinement policy",
+        )
+        controller.apply()
+        reloaded = controller.repository.load()
+        self.assertTrue(reloaded.workflow(WorkflowScope.TRANSCRIPTION).independent)
+        self.assertTrue(reloaded.workflow(WorkflowScope.REFINEMENT).independent)
+
+        original = app.APP_CONFIG.copy()
+        self.addCleanup(lambda: (app.APP_CONFIG.clear(),
+                                 app.APP_CONFIG.update(original)))
+        app.APP_CONFIG.clear()
+        app.APP_CONFIG.update(reloaded.to_legacy_mapping())
+        # Simulate a stale flat Models picker while the scoped routes remain
+        # authored and persisted in the nested mapping.
+        app.APP_CONFIG.update({
+            "transcription_provider": "gemini",
+            "gemini_model": "gemini-2.5-flash",
+            "refinement_provider": "openai",
+            "refinement_model": "gpt-4o-mini",
+        })
+
+        transcription = app._workflow_route(WorkflowScope.TRANSCRIPTION)
+        refinement = app._workflow_route(WorkflowScope.REFINEMENT)
+        self.assertEqual(transcription.provider_id, "groq")
+        self.assertEqual(transcription.model_id, "whisper-large-v3")
+        self.assertEqual(refinement.provider_id, "groq")
+        self.assertEqual(refinement.model_id, "llama-3.3-70b-versatile")
+
+    def test_scoped_primary_form_edits_record_authorship(self):
+        controller = WorkflowSettingsController(self.repository())
+        legacy_route = controller.route(WorkflowScope.TRANSCRIPTION)
+        unchanged = controller.set_route(
+            WorkflowScope.TRANSCRIPTION,
+            provider_id=legacy_route.provider_id,
+            model_id=legacy_route.model_id,
+            prompt=legacy_route.prompt,
+            custom_endpoint=legacy_route.custom_endpoint,
+            enabled=legacy_route.enabled,
+        )
+        self.assertFalse(unchanged.independent)
+
+        app._store_workflow_form_draft(
+            controller,
+            WorkflowScope.TRANSCRIPTION,
+            provider_id="groq",
+            model_id="whisper-large-v3",
+            prompt="scoped transcription policy",
+            custom_endpoint="",
+            enabled=True,
+        )
+        app._store_workflow_form_draft(
+            controller,
+            WorkflowScope.REFINEMENT,
+            provider_id="groq",
+            model_id="llama-3.3-70b-versatile",
+            prompt="scoped refinement policy",
+            custom_endpoint="",
+            enabled=True,
+        )
+
+        self.assertTrue(
+            controller.route(WorkflowScope.TRANSCRIPTION).independent)
+        self.assertTrue(controller.route(WorkflowScope.REFINEMENT).independent)
 
     def test_forced_cloud_selection_refreshes_visible_transcription_fields(self):
         controller = WorkflowSettingsController(self.repository())
@@ -481,6 +716,38 @@ class WorkflowOperationRoutingTests(unittest.TestCase):
         self.assertEqual(result.provider_id, "openai")
         self.assertEqual(captured["request"].model, "gpt-4o-mini")
         self.assertIn("authored rewrite policy", captured["request"].instruction)
+
+    def test_scoped_primary_routes_override_stale_flat_selectors(self):
+        original = app.APP_CONFIG.copy()
+        self.addCleanup(lambda: (app.APP_CONFIG.clear(),
+                                 app.APP_CONFIG.update(original)))
+        app.APP_CONFIG.update({
+            "transcription_provider": "gemini",
+            "refinement_provider": "openai",
+            "refinement_model": "gpt-4o-mini",
+            "workflows": {
+                "transcription": {
+                    "provider_id": "groq",
+                    "model_id": "whisper-large-v3",
+                    "prompt": "scoped transcription",
+                    "independent": True,
+                },
+                "refinement": {
+                    "provider_id": "groq",
+                    "model_id": "llama-3.3-70b-versatile",
+                    "prompt": "scoped refinement",
+                    "independent": True,
+                },
+            },
+        })
+
+        transcription = app._workflow_route(WorkflowScope.TRANSCRIPTION)
+        refinement = app._workflow_route(WorkflowScope.REFINEMENT)
+
+        self.assertEqual(transcription.provider_id, "groq")
+        self.assertEqual(transcription.model_id, "whisper-large-v3")
+        self.assertEqual(refinement.provider_id, "groq")
+        self.assertEqual(refinement.model_id, "llama-3.3-70b-versatile")
 
     def test_effective_route_summaries_omit_prompts_and_mark_execution(self):
         app.APP_CONFIG["workflows"] = {

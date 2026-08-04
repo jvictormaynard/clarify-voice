@@ -356,31 +356,34 @@ def _workflow_route(scope: WorkflowScope | str) -> WorkflowRoute:
     """Return one effective route while honoring legacy flat UI edits.
 
     The existing settings surface still exposes flat transcription/refinement
-    selectors.  Those two fields remain authoritative for their primary
-    scopes; rewrite, translation, and local-ASR refinement stay independently
-    scoped in the typed ``workflows`` mapping.
+    selectors.  Those fields remain authoritative for routes that still carry
+    legacy provenance; an explicitly authored scoped route is authoritative
+    for every workflow, including the two primary scopes.
     """
 
     normalized = scope.value if isinstance(scope, WorkflowScope) else str(scope)
     config = _typed_app_config()
     route = config.workflow(normalized)
     if normalized == WorkflowScope.TRANSCRIPTION.value:
-        provider = str(APP_CONFIG.get(
-            "transcription_provider", route.provider_id)).strip().lower()
-        try:
-            model = PROVIDER_REGISTRY.audio_model_from_legacy(provider, APP_CONFIG)
-        except ProviderError:
-            model = route.model_id
-        route = replace(route, provider_id=provider, model_id=model)
+        if not route.independent:
+            provider = str(APP_CONFIG.get(
+                "transcription_provider", route.provider_id)).strip().lower()
+            try:
+                model = PROVIDER_REGISTRY.audio_model_from_legacy(
+                    provider, APP_CONFIG)
+            except ProviderError:
+                model = route.model_id
+            route = replace(route, provider_id=provider, model_id=model)
     elif normalized == WorkflowScope.REFINEMENT.value:
-        provider = str(APP_CONFIG.get(
-            "refinement_provider", route.provider_id)).strip().lower()
-        model = str(APP_CONFIG.get("refinement_model", route.model_id)).strip()
-        route = replace(
-            route,
-            provider_id=provider or route.provider_id,
-            model_id=model or route.model_id,
-        )
+        if not route.independent:
+            provider = str(APP_CONFIG.get(
+                "refinement_provider", route.provider_id)).strip().lower()
+            model = str(APP_CONFIG.get("refinement_model", route.model_id)).strip()
+            route = replace(
+                route,
+                provider_id=provider or route.provider_id,
+                model_id=model or route.model_id,
+            )
     elif normalized in (
             WorkflowScope.REWRITE.value, WorkflowScope.TRANSLATION.value):
         # A pre-#51 config contains cloned rewrite/translation routes.  Their

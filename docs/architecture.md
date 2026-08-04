@@ -79,8 +79,12 @@ reads environment variables itself.
 `workflow_config.py` is the UI-free boundary for routing decisions. It models
 independent `transcription`, `refinement`, `rewrite`, `translation`, and
 `local_asr_refinement` scopes. Each route carries a canonical provider ID,
-model ID, prompt policy, optional custom endpoint, and an explicit enabled
-flag; API keys are never part of a route. `validate_workflow_config` checks the
+model ID, prompt policy, optional custom endpoint, an explicit enabled flag,
+and an `independent` provenance marker; API keys are never part of a route.
+Migrated legacy clones keep the marker false and remain synchronized with the
+flat Models selectors, while a route authored through the scoped settings
+controller sets it true and remains authoritative even when its values match
+a legacy selector. `validate_workflow_config` checks the
 registry capability required by every scope and rejects unsupported
 combinations before an adapter or local sidecar can start. Custom endpoints are
 HTTP(S)-only and cannot contain URL userinfo, query parameters, or fragments;
@@ -362,11 +366,12 @@ leaves the prior configuration recoverable. `reset_workflow` and
 neither operation sends transcript/prompt content to diagnostics.
 Until the existing UI is migrated to typed routes, legacy flat saves compare
 against the previous on-disk flat values and synchronize only the routes whose
-legacy fields changed; endpoint-bearing routes in the independent rewrite,
-translation, and local-ASR scopes therefore survive a shared legacy provider
-change, while the primary refinement route drops its endpoint when its
-provider/model is changed. All independent custom routes survive an unrelated
-settings save.
+legacy fields changed. Routes with a false provenance marker retain that
+compatibility behavior, while explicitly authored routes in any scope remain
+authoritative; endpoint-bearing legacy rewrite, translation, and local-ASR
+routes therefore survive a shared provider change, while the primary
+refinement route drops its endpoint when its provider/model is changed. All
+independent custom routes survive an unrelated settings save.
 
 ### `dictionary_snippets.py`
 

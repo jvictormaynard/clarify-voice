@@ -447,43 +447,84 @@ class AppConfig:
             legacy_config.selection.transcription_provider).audio_model_key
         if {"transcription_provider", selected_audio_key} & changed_keys:
             current = workflows.transcription
-            transcription_route = legacy_config.workflow(
-                WorkflowScope.TRANSCRIPTION)
-            endpoint = current.custom_endpoint
-            if (current.provider_id != transcription_route.provider_id
-                    and WorkflowScope.TRANSCRIPTION.value
-                    not in preserve_endpoint_scopes):
-                endpoint = ""
-            workflows = workflows.with_route(
-                WorkflowScope.TRANSCRIPTION,
-                replace(
-                    current,
-                    provider_id=transcription_route.provider_id,
-                    model_id=transcription_route.model_id,
-                    custom_endpoint=endpoint,
-                ),
-            )
-            selection = replace(
-                selection,
-                transcription_provider=(
-                    legacy_config.selection.transcription_provider),
-            )
-            selected_config = getattr(
-                self, legacy_config.selection.transcription_provider, None)
-            route_model = str(transcription_route.model_id or "").strip()
+            if current.independent:
+                # A scoped primary-route edit must also win when a legacy
+                # picker changed in the same save.  Keep the typed route and
+                # derive the compatibility selection from it.
+                selection = replace(
+                    selection,
+                    transcription_provider=current.provider_id,
+                )
+                selected_config = getattr(self, current.provider_id, None)
+                route_model = str(current.model_id or "").strip()
+                compatibility_provider = current.provider_id
+            else:
+                transcription_route = legacy_config.workflow(
+                    WorkflowScope.TRANSCRIPTION)
+                endpoint = current.custom_endpoint
+                if (current.provider_id != transcription_route.provider_id
+                        and WorkflowScope.TRANSCRIPTION.value
+                        not in preserve_endpoint_scopes):
+                    endpoint = ""
+                workflows = workflows.with_route(
+                    WorkflowScope.TRANSCRIPTION,
+                    replace(
+                        current,
+                        provider_id=transcription_route.provider_id,
+                        model_id=transcription_route.model_id,
+                        custom_endpoint=endpoint,
+                    ),
+                )
+                selection = replace(
+                    selection,
+                    transcription_provider=(
+                        legacy_config.selection.transcription_provider),
+                )
+                selected_config = getattr(
+                    self, legacy_config.selection.transcription_provider, None)
+                route_model = str(transcription_route.model_id or "").strip()
+                compatibility_provider = legacy_config.selection.transcription_provider
             if isinstance(selected_config, ProviderConfig) and route_model:
                 # Keep flat consumers in lockstep with the route after a
                 # legacy provider/model edit. Without this, a stale nested
                 # route can overwrite the selected provider's audio model
                 # while synchronization updates only the typed route.
                 provider_updates[
-                    legacy_config.selection.transcription_provider
+                    compatibility_provider
                 ] = replace(selected_config, audio_model=route_model)
         if {"refinement_provider", "refinement_model"} & changed_keys:
-            previous_shared = workflows.refinement
+            current_refinement = workflows.refinement
             legacy_route = legacy_config.workflow(WorkflowScope.REFINEMENT)
+            previous_shared = current_refinement
+            if current_refinement.independent:
+                # Keep primary scoped edits authoritative and mirror them
+                # into the flat compatibility selection on serialization.
+                selection = replace(
+                    selection,
+                    refinement_provider=current_refinement.provider_id,
+                    refinement_model=current_refinement.model_id,
+                )
+            else:
+                endpoint = current_refinement.custom_endpoint
+                if (current_refinement.provider_id != legacy_route.provider_id
+                        and WorkflowScope.REFINEMENT.value
+                        not in preserve_endpoint_scopes):
+                    endpoint = ""
+                workflows = workflows.with_route(
+                    WorkflowScope.REFINEMENT,
+                    replace(
+                        current_refinement,
+                        provider_id=legacy_route.provider_id,
+                        model_id=legacy_route.model_id,
+                        custom_endpoint=endpoint,
+                    ),
+                )
+                selection = replace(
+                    selection,
+                    refinement_provider=legacy_config.selection.refinement_provider,
+                    refinement_model=legacy_config.selection.refinement_model,
+                )
             for scope in (
-                    WorkflowScope.REFINEMENT.value,
                     WorkflowScope.REWRITE.value,
                     WorkflowScope.TRANSLATION.value,
                     WorkflowScope.LOCAL_ASR_REFINEMENT.value):
@@ -518,11 +559,6 @@ class AppConfig:
                         custom_endpoint=endpoint,
                     ),
                 )
-            selection = replace(
-                selection,
-                refinement_provider=legacy_config.selection.refinement_provider,
-                refinement_model=legacy_config.selection.refinement_model,
-            )
         if "local_asr_cloud_refinement" in changed_keys:
             workflows = workflows.with_route(
                 WorkflowScope.LOCAL_ASR_REFINEMENT,
@@ -691,6 +727,7 @@ def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.TRANSCRIPTION.value],
             "custom_endpoint": "",
             "enabled": True,
+            "independent": False,
         },
         WorkflowScope.REFINEMENT.value: {
             "provider_id": refinement_provider,
@@ -698,6 +735,7 @@ def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.REFINEMENT.value],
             "custom_endpoint": "",
             "enabled": True,
+            "independent": False,
         },
         WorkflowScope.REWRITE.value: {
             "provider_id": refinement_provider,
@@ -723,6 +761,7 @@ def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
             ],
             "custom_endpoint": "",
             "enabled": local_enabled,
+            "independent": False,
         },
     }
     for scope, default in defaults_for_scope.items():
@@ -743,11 +782,13 @@ def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
             # fields receive deterministic defaults and the migration remains
             # idempotent when called again.
             route = dict(workflows[scope])
+            # Rewrite/translation entries may be authored scoped routes from
+            # before the provenance marker existed.  Primary routes and the
+            # local refinement route historically inherit the flat selectors
+            # unless the scoped settings controller records an explicit edit.
             if scope in (
                     WorkflowScope.REWRITE.value,
                     WorkflowScope.TRANSLATION.value):
-                # Existing authored route entries are explicit, even when
-                # their values happen to match the shared legacy route.
                 route.setdefault("independent", True)
             # A v1 route may override the shared legacy provider while
             # omitting its model.  Canonicalize route aliases before filling
@@ -1075,9 +1116,10 @@ class LocalConfigRepository(ConfigRepository):
                             WorkflowScope.REWRITE.value,
                             WorkflowScope.TRANSLATION.value)
                             and "independent" not in route):
-                        # A partial scoped save is an explicit authoring
-                        # action.  Preserve the full route merge, but record
-                        # that legacy picker changes must no longer reach it.
+                        # Rewrite/translation routes can be authored by
+                        # pre-marker scoped mappings.  Primary routes must
+                        # carry an explicit marker from the new controller so
+                        # legacy Models-only saves remain synchronized.
                         merged_route["independent"] = True
                     workflow_values[scope] = merged_route
                 else:

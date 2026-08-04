@@ -155,10 +155,9 @@ class WorkflowRoute:
     prompt: str = ""
     custom_endpoint: str = ""
     enabled: bool = True
-    # ``False`` identifies routes generated from the pre-scoped legacy
-    # refinement setting.  An explicitly authored rewrite/translation route
-    # remains authoritative even when all its values happen to equal the
-    # shared refinement route.
+    # ``False`` identifies routes that still inherit compatibility behavior
+    # from a legacy flat selector.  An explicitly authored scoped route
+    # remains authoritative even when its values equal another route.
     independent: bool = False
 
     @property
@@ -302,10 +301,10 @@ class WorkflowConfig(Mapping[str, WorkflowRoute]):
                 raw_route,
                 default=fallback[scope],
             )
-            # A route mapping authored after the migration is explicit even
-            # when provider/model/endpoint/enabled equal refinement.  Legacy
-            # migration output carries ``independent: false`` explicitly, so
-            # this fallback never relies on value equality to infer origin.
+            # Rewrite/translation mappings predate the marker and may already
+            # represent authored scoped routes.  Primary routes historically
+            # came from the flat selectors, so their marker remains false
+            # unless the scoped settings controller writes it explicitly.
             if (scope in (
                     WorkflowScope.REWRITE.value,
                     WorkflowScope.TRANSLATION.value,
