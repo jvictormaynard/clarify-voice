@@ -493,6 +493,27 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertTrue(candidate.exists())
 
+    def test_malformed_record_entry_cannot_replace_valid_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="committed")
+            before = path.read_bytes()
+            candidate = root / ".history.json.malformed-entry.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [{"raw_text": 123}],
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime + 1, target_mtime + 1))
+
+            records = store.list_records()
+            self.assertEqual([item.raw_text for item in records], ["committed"])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(candidate.exists())
+
     def test_invalid_legacy_snapshot_cannot_replace_valid_primary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

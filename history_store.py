@@ -252,15 +252,32 @@ def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
     version = _version(payload.get("schema_version", payload.get("version")))
     if version > HISTORY_SCHEMA_VERSION:
         return False
-    if (version < HISTORY_SCHEMA_VERSION
-            and not _legacy_containers_are_valid(payload)):
+    if version == HISTORY_SCHEMA_VERSION:
+        raw_records = payload.get("records")
+    else:
+        if not _legacy_containers_are_valid(payload):
+            return False
+        # Reject malformed legacy entries too; promoting a snapshot that the
+        # normal load path would partially drop can erase the committed file.
+        for key in ("records", "entries", "history"):
+            source = payload.get(key)
+            if isinstance(source, list) and any(
+                    not isinstance(item, Mapping) for item in source):
+                return False
+        try:
+            raw_records = _migrate_v0(payload).get("records")
+        except HistoryStoreError:
+            return False
+    if not isinstance(raw_records, list):
         return False
-    # Current-schema records must be a list.  Otherwise recovery could move a
-    # structurally corrupt temp over a valid primary before load rejects it.
-    return (
-        version != HISTORY_SCHEMA_VERSION
-        or isinstance(payload.get("records"), list)
-    )
+    for item in raw_records:
+        if not isinstance(item, Mapping):
+            return False
+        try:
+            HistoryRecord.from_mapping(item)
+        except HistoryValidationError:
+            return False
+    return True
 
 
 def _legacy_containers_are_valid(payload: Mapping[str, Any]) -> bool:
