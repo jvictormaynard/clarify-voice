@@ -111,6 +111,31 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertNotIn("basic-secret", persisted)
             self.assertNotIn("another-secret", persisted)
 
+    def test_generic_token_and_credential_fields_are_redacted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            store.add(
+                status="error",
+                error=(
+                    '{"token": "token-secret"} '
+                    "credential=credential-secret"
+                ),
+            )
+
+            error = store.list_records()[0].error
+            self.assertEqual(
+                error,
+                '{"token": "<redacted>"} credential=<redacted>',
+            )
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            self.assertNotIn("token-secret", persisted)
+            self.assertNotIn("credential-secret", persisted)
+
     def test_quoted_multiword_credentials_are_redacted_as_one_value(self):
         with tempfile.TemporaryDirectory() as directory:
             store = HistoryStore(
@@ -377,6 +402,23 @@ class HistoryStoreTests(unittest.TestCase):
                 store.add(raw_text="must not replace corruption")
             self.assertEqual(path.read_bytes(), before)
 
+    def test_v0_invalid_records_container_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.json"
+            path.write_text(json.dumps({
+                "version": 0,
+                "records": {"text": "must-not-become-empty"},
+            }), encoding="utf-8")
+            before = path.read_bytes()
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+
+            with self.assertRaises(HistoryStoreError):
+                store.list_records()
+            with self.assertRaises(HistoryStoreError):
+                store.add(raw_text="must not erase legacy corruption")
+            self.assertEqual(path.read_bytes(), before)
+
     def test_current_schema_invalid_records_container_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
@@ -406,6 +448,27 @@ class HistoryStoreTests(unittest.TestCase):
             candidate.write_text(json.dumps({
                 "schema_version": HISTORY_SCHEMA_VERSION,
                 "records": {"raw_text": "must-not-replace"},
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime + 1, target_mtime + 1))
+
+            records = store.list_records()
+            self.assertEqual([item.raw_text for item in records], ["committed"])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(candidate.exists())
+
+    def test_invalid_legacy_snapshot_cannot_replace_valid_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="committed")
+            before = path.read_bytes()
+            candidate = root / ".history.json.invalid-legacy.tmp"
+            candidate.write_text(json.dumps({
+                "version": 0,
+                "records": {"text": "must-not-replace"},
             }), encoding="utf-8")
             target_mtime = path.stat().st_mtime
             os.utime(candidate, (target_mtime + 1, target_mtime + 1))

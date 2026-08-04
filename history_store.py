@@ -97,7 +97,7 @@ _SENSITIVE_AUTH_PATTERN = re.compile(
     r"([^,;&}\n]+))")
 _SENSITIVE_FIELD_PATTERN = re.compile(
     r"(?is)(['\"]?(?:api[_ -]?key|access[_ -]?token|"
-    r"client[_ -]?secret|password|secret)['\"]?\s*[:=]\s*)"
+    r"client[_ -]?secret|credential|password|secret|token)['\"]?\s*[:=]\s*)"
     r"(?:(['\"])((?:\\.|(?!\2).)*?)\2|([^,;&}\n]+))")
 _SENSITIVE_BEARER_PATTERN = re.compile(r"(?i)(bearer)\s+([^\s,;&]+)")
 _SENSITIVE_QUERY_PATTERN = re.compile(
@@ -252,13 +252,30 @@ def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
     version = _version(payload.get("schema_version", payload.get("version")))
     if version > HISTORY_SCHEMA_VERSION:
         return False
+    if (version < HISTORY_SCHEMA_VERSION
+            and not _legacy_containers_are_valid(payload)):
+        return False
     # Current-schema records must be a list.  Otherwise recovery could move a
     # structurally corrupt temp over a valid primary before load rejects it.
-    return version != HISTORY_SCHEMA_VERSION or isinstance(payload.get("records"), list)
+    return (
+        version != HISTORY_SCHEMA_VERSION
+        or isinstance(payload.get("records"), list)
+    )
+
+
+def _legacy_containers_are_valid(payload: Mapping[str, Any]) -> bool:
+    return all(
+        key not in payload or isinstance(payload[key], list)
+        for key in ("records", "entries", "history")
+    )
 
 
 def _migrate_v0(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Migrate the pre-versioned prototype shape to schema version 1."""
+
+    if not _legacy_containers_are_valid(payload):
+        raise HistoryStoreError(
+            "The legacy history file has an invalid records container")
 
     source = payload.get("records")
     if not isinstance(source, list):
