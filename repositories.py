@@ -320,15 +320,32 @@ class AppConfig:
             # before a provider request is attempted.
             voice_translation = VoiceTranslationConfig()
 
-        microphone_values = source.get(
-            "microphone", source.get("microphone_settings"))
-        if microphone_values is None:
+        supplied_values = values if isinstance(values, Mapping) else {}
+        if "microphone" in supplied_values:
+            microphone_values = supplied_values["microphone"]
+        elif "microphone_settings" in supplied_values:
+            microphone_values = supplied_values["microphone_settings"]
+        elif (
+            "selected_microphone_id" in supplied_values
+            or "microphone_id" in supplied_values
+        ):
             # Accept the short-lived flat spelling used by the initial
             # microphone foundation while writing only the typed nested form.
+            # Inspect the supplied payload before merging defaults: the
+            # default nested mapping must not mask a persisted legacy ID.
             microphone_values = {
-                "selected_id": source.get(
-                    "selected_microphone_id", source.get("microphone_id")),
+                "selected_id": supplied_values.get(
+                    "selected_microphone_id",
+                    supplied_values.get("microphone_id")),
             }
+        else:
+            microphone_values = source.get(
+                "microphone", source.get("microphone_settings"))
+            if microphone_values is None:
+                microphone_values = {
+                    "selected_id": source.get(
+                        "selected_microphone_id", source.get("microphone_id")),
+                }
         try:
             microphone = MicrophoneSettings.from_mapping(microphone_values)
         except (TypeError, ValueError):

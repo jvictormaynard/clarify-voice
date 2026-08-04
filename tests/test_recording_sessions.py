@@ -697,25 +697,9 @@ class RecordingSessionTests(unittest.TestCase):
                 cleanup_calls.append(path_to_remove)
                 path_to_remove.unlink(missing_ok=True)
 
-            original_cleanup_once = app.RecordingSession._cleanup_once
-
-            def traced_cleanup_once(candidate):
-                print(
-                    "cleanup_once:", candidate.audio_path,
-                    "id=", id(candidate),
-                    "thread=", threading.current_thread().name,
-                    "state=", candidate.state,
-                    "workers=", [worker.name for worker in candidate._active_workers()],
-                    "stack=", "".join(__import__("traceback").format_stack(limit=4)),
-                    flush=True,
-                )
-                return original_cleanup_once(candidate)
-
             with patch.object(app, "SESSION_WORKER_JOIN_SECONDS", 0.01), \
                     patch.object(app, "SESSION_WORKER_GRACE_SECONDS", 0.2), \
-                    patch.object(app.Recorder, "_safe_delete", side_effect=delete), \
-                    patch.object(app.RecordingSession, "_cleanup_once",
-                                 traced_cleanup_once):
+                    patch.object(app.Recorder, "_safe_delete", side_effect=delete):
                 session.finalize("completed")
                 time.sleep(0.05)
                 self.assertTrue(session._shutdown_watcher.is_alive())

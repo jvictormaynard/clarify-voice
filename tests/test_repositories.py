@@ -117,6 +117,33 @@ class ConfigurationRepositoryTests(unittest.TestCase):
         self.assertEqual(config.microphone.selected_id, "mic-v1-legacy")
         self.assertNotIn("microphone_id", config.to_mapping())
 
+    def test_local_repository_defaults_do_not_mask_legacy_microphone_ids(self):
+        for legacy_key in ("microphone_id", "selected_microphone_id"):
+            with self.subTest(legacy_key=legacy_key):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "config.json"
+                    path.write_text(
+                        json.dumps({legacy_key: "mic-v1-legacy"}),
+                        encoding="utf-8",
+                    )
+                    repository = LocalConfigRepository(
+                        path, defaults=repositories.environment_defaults({}))
+
+                    loaded = repository.load()
+                    self.assertEqual(
+                        loaded.microphone.selected_id, "mic-v1-legacy")
+
+                    repository.save({"ui_language": "pt"})
+                    persisted = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        persisted["microphone"]["selected_id"],
+                        "mic-v1-legacy",
+                    )
+                    self.assertNotIn(legacy_key, persisted)
+                    saved = repository.load()
+                    self.assertEqual(
+                        saved.microphone.selected_id, "mic-v1-legacy")
+
     def test_local_asr_selection_and_cloud_refinement_opt_in_round_trip(self):
         config = AppConfig.from_mapping({
             "transcription_provider": "local_asr",
