@@ -467,14 +467,16 @@ class AppConfig:
                     # route.  Do not move that route to a different provider
                     # while retaining a provider-specific proxy URL.  The
                     # primary legacy refinement route remains synchronized,
-                    # but its endpoint is cleared when the provider/model
-                    # changes so the route cannot combine incompatible
-                    # settings.
+                    # but its endpoint is cleared when the provider changes
+                    # so the route cannot combine incompatible settings. A
+                    # model-only edit keeps the same provider-specific proxy.
                     if (current.custom_endpoint
                             and scope != WorkflowScope.REFINEMENT.value):
                         continue
                     endpoint = current.custom_endpoint
                     if (scope == WorkflowScope.REFINEMENT.value
+                            and current.provider_id
+                            != legacy_route.provider_id
                             and scope not in preserve_endpoint_scopes):
                         endpoint = ""
                     workflows = workflows.with_route(
@@ -971,24 +973,61 @@ class LocalConfigRepository(ConfigRepository):
         current_workflows = current_payload.get("workflows")
         incoming_workflows = incoming.get("workflows")
         merged.update(incoming)
-        if isinstance(incoming_workflows, Mapping):
-            workflow_values: dict[str, Any] = {}
-            if isinstance(current_workflows, Mapping):
-                for raw_scope, route in current_workflows.items():
-                    workflow_values[normalize_workflow_scope(raw_scope)] = route
-            for raw_scope, route in incoming_workflows.items():
+
+        def split_workflow_values(values: Any):
+            """Split aliases so canonical scope names have deterministic precedence."""
+            unknown: dict[str, Any] = {}
+            aliases: dict[str, Any] = {}
+            canonical: dict[str, Any] = {}
+            if not isinstance(values, Mapping):
+                return unknown, aliases, canonical
+            for raw_scope, route in values.items():
                 scope = normalize_workflow_scope(raw_scope)
-                if isinstance(route, Mapping):
-                    route = dict(route)
-                    for canonical, aliases in (
-                            ("provider_id", ("provider",)),
-                            ("model_id", ("model",)),
-                            ("custom_endpoint", ("endpoint", "base_url"))):
-                        if canonical not in route:
-                            for alias in aliases:
-                                if alias in route:
-                                    route[canonical] = route[alias]
-                                    break
+                if scope not in WORKFLOW_SCOPES:
+                    unknown[scope] = route
+                    continue
+                raw_value = (
+                    raw_scope.value
+                    if isinstance(raw_scope, WorkflowScope)
+                    else str(raw_scope or "")
+                ).strip().lower()
+                target = canonical if raw_value == scope else aliases
+                target[scope] = route
+            return unknown, aliases, canonical
+
+        def canonicalize_route(route: Any):
+            if not isinstance(route, Mapping):
+                return route
+            route = dict(route)
+            for canonical, aliases in (
+                    ("provider_id", ("provider",)),
+                    ("model_id", ("model",)),
+                    ("custom_endpoint", ("endpoint", "base_url"))):
+                if canonical not in route:
+                    for alias in aliases:
+                        if alias in route:
+                            route[canonical] = route[alias]
+                            break
+            return route
+
+        current_unknown, current_aliases, current_canonical = (
+            split_workflow_values(current_workflows))
+        incoming_unknown, incoming_aliases, incoming_canonical = (
+            split_workflow_values(incoming_workflows))
+        current_route_values = dict(current_unknown)
+        current_route_values.update(current_aliases)
+        current_route_values.update(current_canonical)
+        if isinstance(incoming_workflows, Mapping):
+            workflow_values: dict[str, Any] = dict(current_route_values)
+            # If a payload contains both spellings, the canonical route is
+            # authoritative, matching WorkflowConfig.from_mapping() and
+            # migrations. Each selected route still deep-merges with the
+            # persisted route so partial updates retain omitted fields.
+            incoming_route_values = dict(incoming_unknown)
+            incoming_route_values.update(incoming_aliases)
+            incoming_route_values.update(incoming_canonical)
+            for scope, route in incoming_route_values.items():
+                route = canonicalize_route(route)
                 previous_route = workflow_values.get(scope)
                 if isinstance(previous_route, Mapping) and isinstance(route, Mapping):
                     merged_route = dict(previous_route)
@@ -1014,15 +1053,17 @@ class LocalConfigRepository(ConfigRepository):
         explicit_endpoint_scopes: frozenset[str] = frozenset()
         if preserve_explicit_endpoints and isinstance(incoming_workflows, Mapping):
             explicit_endpoint_scopes = frozenset(
-                normalize_workflow_scope(scope)
-                for scope, route in incoming_workflows.items()
+                scope
+                for scope, route in {
+                    **incoming_aliases, **incoming_canonical
+                }.items()
                 if isinstance(route, Mapping)
                 and any(
                     key in route
                     for key in ("custom_endpoint", "endpoint", "base_url")
                 )
                 and self._mapping_route_explicitly_changed(
-                    scope, route, current_workflows)
+                    scope, route, current_route_values)
             )
         if changed_keys and synchronize_legacy:
             legacy_values = dict(current_payload)

@@ -293,6 +293,31 @@ class WorkflowConfigurationTests(unittest.TestCase):
                 "",
             )
 
+    def test_refinement_model_change_keeps_custom_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            repository.save({
+                "refinement_provider": "openai",
+                "refinement_model": "gpt-4o-mini",
+                "workflows": {
+                    "refinement": {
+                        "provider_id": "openai",
+                        "model_id": "gpt-4o-mini",
+                        "custom_endpoint": "https://proxy.example/v1",
+                    },
+                },
+            })
+
+            changed = repository.load().to_legacy_mapping()
+            changed["refinement_model"] = "gpt-4o"
+            repository.save(changed)
+
+            route = repository.load().workflow(WorkflowScope.REFINEMENT)
+            self.assertEqual(route.model_id, "gpt-4o")
+            self.assertEqual(route.custom_endpoint, "https://proxy.example/v1")
+
     def test_registry_applies_endpoint_override_before_adapter_work(self):
         connection = ProviderConnection("test-key", "https://api.example/v1")
         routed = PROVIDER_REGISTRY.connection_for_route(
@@ -409,6 +434,9 @@ class WorkflowConfigurationTests(unittest.TestCase):
             candidate = repository.load().to_mapping()
             candidate["refinement_provider"] = "groq"
             candidate["refinement_model"] = "llama-3.3-70b-versatile"
+            # The alias is the sole refinement route in this partial payload;
+            # canonical and alias spellings are intentionally not mixed.
+            candidate["workflows"].pop("refinement")
             candidate["workflows"]["cleanup"] = {
                 "provider_id": "groq",
                 "model_id": "llama-3.3-70b-versatile",
@@ -423,6 +451,34 @@ class WorkflowConfigurationTests(unittest.TestCase):
             )
             persisted = json.loads(path.read_text(encoding="utf-8"))
             self.assertNotIn("cleanup", persisted["workflows"])
+
+    def test_mapping_merge_prefers_canonical_scope_over_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            candidate = repository.load().to_mapping()
+            candidate["workflows"]["cleanup"] = {
+                "provider_id": "groq",
+                "model_id": "llama-3.3-70b-versatile",
+                "prompt": "alias route",
+            }
+            candidate["workflows"]["refinement"] = {
+                "provider_id": "openai",
+                "model_id": "gpt-4o-mini",
+                "prompt": "canonical route",
+            }
+
+            applied = repository.apply(candidate)
+
+            self.assertEqual(
+                applied.workflow(WorkflowScope.REFINEMENT).provider_id,
+                "openai",
+            )
+            self.assertEqual(
+                applied.workflow(WorkflowScope.REFINEMENT).prompt,
+                "canonical route",
+            )
 
     def test_partial_save_normalizes_scope_aliases(self):
         with tempfile.TemporaryDirectory() as directory:
