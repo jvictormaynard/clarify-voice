@@ -107,6 +107,7 @@ class HotkeySettingsIntegrationTests(unittest.TestCase):
                 "_apply_settings_with_hotkeys_transaction(",
                 "restore_after_failed_apply",
                 "restore_hotkeys_after_failed_apply",
+                "_recording_hotkey_hint",
                 "self.apply_hotkey_settings(hotkey_settings_controller.settings)"):
             with self.subTest(expected=expected):
                 self.assertIn(expected, source)
@@ -238,6 +239,29 @@ class HotkeySettingsIntegrationTests(unittest.TestCase):
         self.assertEqual(config["transcription_provider"], "openai")
         self.assertEqual(config["hotkeys"], selected.to_mapping())
         self.assertEqual(tray.applied, [selected])
+
+    def test_recording_hint_uses_effective_binding_in_every_locale(self):
+        selected = HotkeySettings.defaults().with_hotkey(
+            HotkeyAction.RECORDING, "Ctrl+L")
+        harness = object.__new__(app.App)
+        expected_stop = {
+            "en": "Ctrl+L stop",
+            "pt": "Ctrl+L parar",
+            "es": "Ctrl+L detener",
+            "de": "Ctrl+L stoppen",
+            "ru": "Ctrl+L — остановить",
+        }
+
+        with patch.object(app, "APP_CONFIG", {
+                "hotkeys": selected.to_mapping()}):
+            for language, stop_hint in expected_stop.items():
+                with self.subTest(language=language):
+                    harness.lang = language
+                    self.assertEqual(
+                        app.App._recording_hotkey_hint(harness), "Ctrl+L")
+                    self.assertEqual(
+                        app.App._recording_hotkey_hint(harness, stopping=True),
+                        stop_hint)
 
     def test_apply_rejects_push_to_talk_without_native_key_release(self):
         selected = HotkeySettings.defaults().with_activation_mode(

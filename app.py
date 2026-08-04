@@ -5998,8 +5998,8 @@ class App(ctk.CTk):
         self.lbl.pack(side="left", padx=(0, 6))
         self._make_draggable(self.lbl)
 
-        self.sub = ctk.CTkLabel(left, text="Alt+L", text_color=DIM,
-            font=ctk.CTkFont(size=10), anchor="w")
+        self.sub = ctk.CTkLabel(left, text=self._recording_hotkey_hint(),
+            text_color=DIM, font=ctk.CTkFont(size=10), anchor="w")
         self.sub.pack(side="left")
         self._make_draggable(self.sub)
 
@@ -6223,7 +6223,10 @@ class App(ctk.CTk):
                 fill="both", expand=True, padx=self._idle_card_pad,
                 pady=self._idle_card_pad)
             self.lbl.configure(text=t or self._t("ready"), text_color=TEXT)
-            self.sub.configure(text=self._t("hint"))
+            hint_renderer = getattr(self, "_recording_hotkey_hint", None)
+            hint = (hint_renderer() if callable(hint_renderer)
+                    else self._t("hint"))
+            self.sub.configure(text=hint)
             # Restore position
             if self._saved_pos:
                 x, y = self._saved_pos
@@ -6551,6 +6554,13 @@ class App(ctk.CTk):
         language_strings = STRINGS.get(self.lang, STRINGS["en"])
         return language_strings.get(key, STRINGS["en"].get(key, key))
 
+    def _recording_hotkey_hint(self, stopping=False):
+        """Render the live recording binding inside the localized hint."""
+        binding = self.hotkey_settings.definition(
+            HotkeyAction.RECORDING).display
+        template = self._t("hint_stop" if stopping else "hint")
+        return template.replace("Alt+L", binding, 1)
+
     def _toggle_lang(self):
         self.lang = _next_language(self.lang)
         self.lang_btn.configure(image=self._language_flags[self.lang])
@@ -6578,11 +6588,11 @@ class App(ctk.CTk):
         if self.app_state == "ready":
             if self.lbl.cget("text") not in ("", ):
                 self.lbl.configure(text=self._t("ready"))
-            self.sub.configure(text=self._t("hint"))
+            self.sub.configure(text=self._recording_hotkey_hint())
         elif self.app_state in ("processing", "rewriting", "translating"):
             self.lbl.configure(text=self._t(self.app_state))
         elif self.app_state == "recording":
-            self.sub.configure(text=self._t("hint_stop"))
+            self.sub.configure(text=self._recording_hotkey_hint(stopping=True))
 
     def _cancel(self, e=None):
         service = getattr(self, "_workflow_service", None)
@@ -11015,6 +11025,8 @@ class App(ctk.CTk):
             saved_settings.clear()
             saved_settings.update(current_settings())
             hotkey_feedback("")
+            self.sub.configure(text=self._recording_hotkey_hint(
+                stopping=self.app_state == "recording"))
             refresh_dirty_state()
             animate_apply_confirmation()
         apply_button.configure(command=apply_settings)
