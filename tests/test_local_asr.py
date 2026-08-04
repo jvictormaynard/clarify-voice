@@ -2107,7 +2107,7 @@ class LocalASRHarnessTests(unittest.TestCase):
             self.assertEqual(payload["engine"], "v1.9.1")
             self.assertEqual(payload["model"], "ggml-small")
             self.assertFalse(payload["offline_network_disabled"])
-            manager.transcribe.assert_called_once_with(audio, "en")
+            manager.transcribe.assert_called_once_with(audio.resolve(), "en")
             manager.shutdown.assert_called_once_with()
 
 
