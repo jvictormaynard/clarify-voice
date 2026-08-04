@@ -17,7 +17,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 
 HOTKEY_SCHEMA_VERSION = 1
@@ -70,11 +70,12 @@ class HotkeyConflictError(HotkeyValidationError):
 
 def _normalise_modifiers(value: Any) -> frozenset[str]:
     if isinstance(value, str):
-        values = (part.strip().lower() for part in value.split("+"))
+        parts: Iterable[Any] = value.split("+")
     elif isinstance(value, (list, tuple, set, frozenset)):
-        values = (str(part).strip().lower() for part in value)
+        parts = value
     else:
-        values = ()
+        parts = ()
+    values = (str(part).strip().lower() for part in parts)
     modifiers = frozenset(values)
     aliases = {"control": "ctrl", "windows": "win", "meta": "win"}
     modifiers = frozenset(aliases.get(item, item) for item in modifiers)
@@ -145,7 +146,7 @@ class HotkeyDefinition:
         if state & 0x0040:
             modifiers.add("win")
         keysym = getattr(event, "keysym", getattr(event, "key", ""))
-        return cls(modifiers, keysym)
+        return cls(frozenset(modifiers), keysym)
 
     @property
     def combination(self) -> tuple[frozenset[str], str]:
@@ -189,7 +190,7 @@ def _action(value: Any) -> HotkeyAction | None:
 
 
 def validate_hotkeys(
-    values: Mapping[HotkeyAction | str, HotkeyDefinition | Mapping[str, Any] | str],
+    values: Mapping[Any, Any],
 ) -> dict[HotkeyAction, HotkeyDefinition]:
     """Normalise all four actions and reject duplicate combinations."""
     normalised = dict(DEFAULT_HOTKEYS)

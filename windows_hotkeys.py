@@ -154,12 +154,11 @@ def register_global_hotkeys(user32, hwnd, settings=None, *, strict=False) -> set
     if failed and strict:
         unregister_global_hotkeys(user32, hwnd, registered)
         reason = "the combination is already registered by another application"
-        try:
-            last_error = ctypes.get_last_error()
+        get_last_error = getattr(ctypes, "get_last_error", None)
+        if callable(get_last_error):
+            last_error = get_last_error()
             if last_error:
                 reason = f"Windows error {last_error}"
-        except (AttributeError, OSError):
-            pass
         raise HotkeyRegistrationError(failed, registered=registered, reason=reason)
     return registered
 
