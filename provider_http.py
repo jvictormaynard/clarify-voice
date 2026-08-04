@@ -40,7 +40,8 @@ BACKOFF_CAP_SECONDS = 4.0
 _SENSITIVE_KEY = re.compile(
     r"(?:authorization|api[_-]?key|credential|secret|token|source[_-]?text|"
     r"transcript|recorded[_-]?text|rewritten[_-]?text|audio(?:[_-]?path)?|"
-    r"request[_-]?body|body|messages|contents|inline[_-]?data|data)",
+    r"dictionary(?:[_-]?context)?|vocabulary|snippet|request[_-]?body|"
+    r"body|messages|contents|inline[_-]?data|data)",
     re.IGNORECASE,
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[^\s,;]+")

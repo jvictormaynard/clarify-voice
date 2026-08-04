@@ -251,7 +251,7 @@ class GeminiAdapter(ProviderAdapter):
                     "mimeType": audio_mime_type(request.audio_path),
                     "data": audio_b64,
                 }},
-                {"text": request.prompt},
+                {"text": request.effective_prompt()},
             ]}],
             "systemInstruction": {"parts": [{"text": request.instruction}]},
             "generationConfig": {"temperature": request.temperature},
@@ -420,6 +420,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     "model": model,
                     "response_format": "json",
                     "language": request.language,
+                    "prompt": request.effective_prompt(),
                 },
             )
         finally:

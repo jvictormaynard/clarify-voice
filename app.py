@@ -43,6 +43,10 @@ from provider_types import (
     TranslationRequest,
     TranslationResult,
 )
+from dictionary_snippets import (
+    DictionarySnippetService,
+    LocalDictionarySnippetsRepository,
+)
 from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
 from local_asr_product import (
     LocalASRProductController,
@@ -166,6 +170,7 @@ DATA_DIR = (Path(os.environ.get("APPDATA", Path.home())) / "ClarifyVoice") if IS
 AUDIO_PATH = DATA_DIR / "temp_recording.wav"
 CONFIG_PATH = DATA_DIR / "config.json"
 STATS_PATH = DATA_DIR / "usage_stats.json"
+DICTIONARY_PATH = DATA_DIR / "dictionary.json"
 HTTP_LOG_DIR = DATA_DIR / "logs"
 _STATS_LOCK = threading.Lock()
 PILL_FADE_IN_SECONDS = 0.12
@@ -204,6 +209,9 @@ DEFAULT_CONFIG = {
 APP_REPOSITORIES = ApplicationRepositories(
     config=LocalConfigRepository(CONFIG_PATH, defaults=DEFAULT_CONFIG),
     usage_stats=LocalUsageStatsRepository(STATS_PATH),
+)
+DICTIONARY_SERVICE = DictionarySnippetService(
+    LocalDictionarySnippetsRepository(DICTIONARY_PATH)
 )
 
 SUPPORTED_LANGUAGES = ("en", "pt", "es", "de", "ru")
@@ -2262,14 +2270,15 @@ def _call_provider_audio(
             temperature=0.0 if mode == "transcription" else 0.1,
             audio_bytes=audio_bytes,
         )
+        request = DICTIONARY_SERVICE.apply_context(request)
         transcript = PROVIDER_REGISTRY.transcribe(
             provider, request, connection, cancel_token).text
         if (mode == "prompt" and not metadata.supports(
                 ProviderCapability.MULTIMODAL_AUDIO)
                 and (provider != LOCAL_ASR_PROVIDER_ID
                      or bool(APP_CONFIG.get("local_asr_cloud_refinement", False)))):
-            return _refine_transcript(transcript, lang, cancel_token)
-        return transcript
+            transcript = _refine_transcript(transcript, lang, cancel_token)
+        return DICTIONARY_SERVICE.expand(transcript)
     except Exception as error:
         try:
             metadata = PROVIDER_REGISTRY.describe(provider)

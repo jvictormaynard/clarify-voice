@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 
+MAX_TRANSCRIPTION_CONTEXT_CHARS = 4096
+
+
 class ProviderCapability(str, Enum):
     """Operations that a provider adapter can explicitly advertise."""
 
@@ -83,6 +86,23 @@ class TranscriptionRequest:
     temperature: float
     # Optional in-memory snapshot used to decouple cleanup from long uploads.
     audio_bytes: bytes | None = None
+    # Optional provider-neutral vocabulary context.  Adapters that support
+    # transcription prompts may forward it; local/offline adapters can ignore
+    # it without adding a provider-specific workflow branch.
+    dictionary_context: str = ""
+
+    def effective_prompt(self) -> str:
+        """Return the prompt with optional local vocabulary context appended."""
+        prompt = str(self.prompt or "").strip()
+        context = str(self.dictionary_context or "").strip()
+        if len(context) > MAX_TRANSCRIPTION_CONTEXT_CHARS:
+            raise ValueError(
+                "dictionary transcription context exceeds the 4096-character limit")
+        if not context:
+            return prompt
+        if not prompt:
+            return context
+        return f"{prompt}\n\n{context}"
 
 
 @dataclass(frozen=True)

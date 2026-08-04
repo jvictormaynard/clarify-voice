@@ -254,6 +254,19 @@ startup settings such as `autostart` during round-trips. Supported provider
 choices and model canonicalization come from the provider registry while the
 on-disk keys remain unchanged.
 
+### `dictionary_snippets.py`
+
+The local dictionary and snippets are a separate, versioned non-secret profile
+artifact. `LocalDictionarySnippetsRepository` owns its JSON schema, migration,
+validation, and atomic replacement; it does not read or write provider keys
+and therefore does not duplicate the `SecretStore` boundary. The
+`DictionarySnippetService` keeps a validated in-memory snapshot for matching
+and context construction. Snippet expansion is provider-neutral and bounded;
+cloud adapters receive optional vocabulary through the typed
+`TranscriptionRequest`, while offline adapters can ignore it. Usage statistics
+never receive dictionary or snippet content. The settings UI and complete
+Windows manual acceptance matrix remain staged in issue #50.
+
 ### `secret_store.py`
 
 `SecretStore` is the provider-keyed `get`/`set`/`delete` boundary. Packaged and
@@ -274,6 +287,7 @@ fallback is intentionally explicit; it does not claim OS-backed protection.
 | Settings | `%APPDATA%\ClarifyVoice\config.json` | Provider endpoints, models, selections, and UI preferences; no API keys |
 | Provider secrets | `%APPDATA%\ClarifyVoice\secrets.dpapi.json` | Current-user DPAPI ciphertext keyed by provider |
 | Usage stats | `%APPDATA%\ClarifyVoice\usage_stats.json` | Counts, durations, model identifiers, and estimates; no transcript text |
+| Dictionary and snippets | `%APPDATA%\ClarifyVoice\dictionary.json` | Versioned local terms, aliases, and bounded replacement rules; no credentials or usage events |
 | Working audio | `%APPDATA%\ClarifyVoice\clarifyvoice-recording-*.wav` | One unique session-owned file, deleted after the provider no longer needs it |
 
 On non-Windows source runs, the equivalent data directory is
