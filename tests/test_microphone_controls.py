@@ -230,6 +230,28 @@ class MicrophoneControlsTests(unittest.TestCase):
         self.assertEqual(
             explicit.state, MicrophoneSelectionState.FALLBACK_DEFAULT)
 
+    def test_duplicate_fallback_default_id_without_marker_stays_usable(self):
+        records = [
+            {
+                "name": "Unmarked fallback input",
+                "host_api": "WASAPI",
+                "max_input_channels": 1,
+            },
+            {
+                "name": "Unmarked fallback input",
+                "host_api": "WASAPI",
+                "max_input_channels": 1,
+            },
+        ]
+        stable_id = stable_microphone_id("Unmarked fallback input", "WASAPI")
+        inventory = MicrophoneInventory.from_records(
+            records, default_id=stable_id)
+
+        selection = inventory.resolve()
+        self.assertEqual(selection.state, MicrophoneSelectionState.DEFAULT)
+        self.assertTrue(selection.can_record)
+        self.assertEqual(selection.device.stable_id, stable_id)
+
     def test_missing_default_is_explicitly_unavailable_not_arbitrary(self):
         inventory = MicrophoneInventory.from_records([
             {"name": "Unmarked input", "max_input_channels": 1},
