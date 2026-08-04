@@ -1056,6 +1056,21 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(app.STRINGS["en"]["settings_section"], "Settings")
         self.assertEqual(app.STRINGS["pt"]["settings_section"], "Configurações")
 
+    def test_dictionary_editor_preserves_commas_and_localizes_disabled_rows(self):
+        self.assertEqual(
+            app._dictionary_aliases_from_text("Acme, Inc\nOW"),
+            ("Acme, Inc", "OW"))
+        self.assertEqual(app.STRINGS["en"]["dictionary_disabled"], "Disabled")
+        self.assertEqual(app.STRINGS["pt"]["dictionary_disabled"], "Desativado")
+        self.assertEqual(app.STRINGS["es"]["dictionary_disabled"], "Desactivado")
+        self.assertEqual(app.STRINGS["de"]["dictionary_disabled"], "Deaktiviert")
+        self.assertEqual(app.STRINGS["ru"]["dictionary_disabled"], "Отключён")
+
+        source = inspect.getsource(app.App._open_settings)
+        self.assertIn('"dictionary": ctk.CTkScrollableFrame(', source)
+        self.assertIn('dictionary_rows.pack(fill="x", expand=False', source)
+        self.assertIn('fields["aliases"].get("1.0", "end-1c")', source)
+
     def test_every_locale_translates_the_complete_interface_catalog(self):
         english_keys = set(app.STRINGS["en"])
 

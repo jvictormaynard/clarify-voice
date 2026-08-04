@@ -241,6 +241,18 @@ def _next_language(language):
     return SUPPORTED_LANGUAGES[(current + 1) % len(SUPPORTED_LANGUAGES)]
 
 
+def _dictionary_aliases_from_text(value: str) -> tuple[str, ...]:
+    """Parse the Settings alias editor without treating commas as delimiters.
+
+    Aliases are persisted as independent strings and may legitimately contain
+    punctuation such as commas.  The editor therefore uses one alias per line
+    and only trims/filters the line boundary here; the controller remains the
+    validation boundary for duplicate or otherwise invalid aliases.
+    """
+    return tuple(alias.strip() for alias in str(value or "").splitlines()
+                 if alias.strip())
+
+
 def _run_update_check(current_version, cache_directory, publish):
     """Run a typed update check and deliver exactly one UI result."""
     try:
@@ -1879,10 +1891,11 @@ STRINGS = {
         "dictionary_empty": "No entries match your search.",
         "dictionary_term": "Term",
         "dictionary_pronunciation": "Pronunciation (optional)",
-        "dictionary_aliases": "Aliases (comma separated)",
+        "dictionary_aliases": "Aliases (one per line)",
         "dictionary_trigger": "Trigger",
         "dictionary_replacement": "Replacement",
         "dictionary_enabled": "Enabled",
+        "dictionary_disabled": "Disabled",
         "dictionary_case_sensitive": "Case sensitive",
         "dictionary_edit": "Edit",
         "dictionary_delete": "Delete",
@@ -2200,8 +2213,9 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_add_term": "+ Termo do dicionário", "dictionary_add_snippet": "+ Snippet",
         "dictionary_empty": "Nenhum item corresponde à busca.", "dictionary_term": "Termo",
         "dictionary_pronunciation": "Pronúncia (opcional)",
-        "dictionary_aliases": "Aliases (separados por vírgula)", "dictionary_trigger": "Gatilho",
+        "dictionary_aliases": "Aliases (um por linha)", "dictionary_trigger": "Gatilho",
         "dictionary_replacement": "Substituição", "dictionary_enabled": "Ativo",
+        "dictionary_disabled": "Desativado",
         "dictionary_case_sensitive": "Diferenciar maiúsculas", "dictionary_edit": "Editar",
         "dictionary_delete": "Excluir", "dictionary_reset": "Redefinir tudo",
         "dictionary_reset_confirm": "Redefinir todos os termos e snippets?",
@@ -2220,8 +2234,9 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_add_term": "+ Término del diccionario", "dictionary_add_snippet": "+ Snippet",
         "dictionary_empty": "Ningún elemento coincide con la búsqueda.", "dictionary_term": "Término",
         "dictionary_pronunciation": "Pronunciación (opcional)",
-        "dictionary_aliases": "Alias (separados por comas)", "dictionary_trigger": "Activador",
+        "dictionary_aliases": "Alias (uno por línea)", "dictionary_trigger": "Activador",
         "dictionary_replacement": "Reemplazo", "dictionary_enabled": "Activado",
+        "dictionary_disabled": "Desactivado",
         "dictionary_case_sensitive": "Distinguir mayúsculas", "dictionary_edit": "Editar",
         "dictionary_delete": "Eliminar", "dictionary_reset": "Restablecer todo",
         "dictionary_reset_confirm": "¿Restablecer todos los términos y snippets?",
@@ -2240,8 +2255,9 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_add_term": "+ Wörterbuchbegriff", "dictionary_add_snippet": "+ Snippet",
         "dictionary_empty": "Keine Einträge entsprechen der Suche.", "dictionary_term": "Begriff",
         "dictionary_pronunciation": "Aussprache (optional)",
-        "dictionary_aliases": "Aliase (durch Kommas getrennt)", "dictionary_trigger": "Auslöser",
+        "dictionary_aliases": "Aliase (einer pro Zeile)", "dictionary_trigger": "Auslöser",
         "dictionary_replacement": "Ersetzung", "dictionary_enabled": "Aktiviert",
+        "dictionary_disabled": "Deaktiviert",
         "dictionary_case_sensitive": "Groß-/Kleinschreibung beachten", "dictionary_edit": "Bearbeiten",
         "dictionary_delete": "Löschen", "dictionary_reset": "Alles zurücksetzen",
         "dictionary_reset_confirm": "Alle Wörterbuchbegriffe und Snippets zurücksetzen?",
@@ -2260,8 +2276,9 @@ _DICTIONARY_TRANSLATIONS = {
         "dictionary_add_term": "+ Термин словаря", "dictionary_add_snippet": "+ Сниппет",
         "dictionary_empty": "Нет элементов, соответствующих поиску.", "dictionary_term": "Термин",
         "dictionary_pronunciation": "Произношение (необязательно)",
-        "dictionary_aliases": "Псевдонимы (через запятую)", "dictionary_trigger": "Триггер",
+        "dictionary_aliases": "Псевдонимы (по одному в строке)", "dictionary_trigger": "Триггер",
         "dictionary_replacement": "Замена", "dictionary_enabled": "Включён",
+        "dictionary_disabled": "Отключён",
         "dictionary_case_sensitive": "Учитывать регистр", "dictionary_edit": "Изменить",
         "dictionary_delete": "Удалить", "dictionary_reset": "Сбросить всё",
         "dictionary_reset_confirm": "Сбросить все термины словаря и сниппеты?",
@@ -7828,7 +7845,14 @@ class App(ctk.CTk):
             "models": ctk.CTkFrame(content, fg_color="transparent"),
             "statistics": ctk.CTkFrame(content, fg_color="transparent"),
             "settings": ctk.CTkFrame(content, fg_color="transparent"),
-            "dictionary": ctk.CTkFrame(content, fg_color="transparent"),
+            # Dictionary content is intentionally scrollable as a whole.  The
+            # rows list has its own bounded viewport below, so preview and
+            # import/export/reset controls remain reachable in the fixed
+            # 720x540 Settings window even with a populated profile.
+            "dictionary": ctk.CTkScrollableFrame(
+                content, fg_color="transparent",
+                scrollbar_button_color="#303030",
+                scrollbar_button_hover_color="#444444"),
             "providers": ctk.CTkFrame(content, fg_color="transparent"),
         }
         detail_pages = {
@@ -8199,7 +8223,7 @@ class App(ctk.CTk):
         dictionary_controller = DICTIONARY_SETTINGS
         dictionary_inner = ctk.CTkFrame(
             pages["dictionary"], fg_color="transparent")
-        dictionary_inner.pack(fill="both", expand=True, padx=22, pady=18)
+        dictionary_inner.pack(fill="x", padx=22, pady=18)
         ctk.CTkLabel(dictionary_inner, text=self._t("dictionary_title"),
             text_color=TEXT, font=font_title, anchor="w").pack(fill="x")
         ctk.CTkLabel(dictionary_inner, text=self._t("dictionary_subtitle"),
@@ -8229,11 +8253,11 @@ class App(ctk.CTk):
                 side="left", padx=2)
 
         dictionary_rows = ctk.CTkScrollableFrame(
-            dictionary_inner, fg_color="#111111", corner_radius=11,
+            dictionary_inner, height=150, fg_color="#111111", corner_radius=11,
             border_width=1, border_color="#252525",
             scrollbar_button_color="#303030",
             scrollbar_button_hover_color="#444444")
-        dictionary_rows.pack(fill="both", expand=True, pady=(9, 7))
+        dictionary_rows.pack(fill="x", expand=False, pady=(9, 7))
 
         dictionary_status = ctk.CTkLabel(
             dictionary_inner, text="", text_color=DIM, font=font_caption,
@@ -8344,7 +8368,7 @@ class App(ctk.CTk):
                         text_color="#777777", font=font_caption, anchor="w",
                         wraplength=255).pack(fill="x")
                 state_text = (self._t("dictionary_enabled")
-                              if item.enabled else "Disabled")
+                              if item.enabled else self._t("dictionary_disabled"))
                 ctk.CTkLabel(row, text=state_text, text_color="#69c58a"
                     if item.enabled else "#777777", font=font_caption,
                     width=54).pack(side="left", padx=(0, 3))
@@ -8374,7 +8398,7 @@ class App(ctk.CTk):
                          else (self._t("dictionary_add_term")
                                if kind == "dictionary"
                                else self._t("dictionary_add_snippet")))
-            editor.geometry("455x410" if kind == "snippet" else "455x330")
+            editor.geometry("455x410" if kind == "snippet" else "455x370")
             editor.configure(fg_color=CARD)
             editor.transient(win)
             editor.grab_set()
@@ -8397,13 +8421,26 @@ class App(ctk.CTk):
                 fields[name] = entry
                 return entry
 
+            def add_textbox(name, label, value="", height=58):
+                ctk.CTkLabel(form, text=label, text_color=DIM,
+                    font=font_label, anchor="w").pack(fill="x", pady=(0, 3))
+                textbox = ctk.CTkTextbox(
+                    form, height=height, fg_color="#050505", text_color=TEXT,
+                    border_width=1, border_color=BORDER, font=font_body,
+                    wrap="word")
+                textbox.pack(fill="x", pady=(0, 8))
+                if value:
+                    textbox.insert("1.0", value)
+                fields[name] = textbox
+                return textbox
+
             if kind == "dictionary":
                 add_entry("term", self._t("dictionary_term"),
                     current.term if current else "")
                 add_entry("pronunciation", self._t("dictionary_pronunciation"),
                     current.pronunciation if current else "")
-                add_entry("aliases", self._t("dictionary_aliases"),
-                    ", ".join(current.aliases) if current else "")
+                add_textbox("aliases", self._t("dictionary_aliases"),
+                    "\n".join(current.aliases) if current else "")
             else:
                 add_entry("trigger", self._t("dictionary_trigger"),
                     current.trigger if current else "")
@@ -8453,8 +8490,8 @@ class App(ctk.CTk):
             def save_dictionary_item():
                 try:
                     if kind == "dictionary":
-                        aliases = tuple(alias.strip() for alias in fields["aliases"].get().split(",")
-                                        if alias.strip())
+                        aliases = _dictionary_aliases_from_text(
+                            fields["aliases"].get("1.0", "end-1c"))
                         values = {
                             "term": fields["term"].get(),
                             "pronunciation": fields["pronunciation"].get(),

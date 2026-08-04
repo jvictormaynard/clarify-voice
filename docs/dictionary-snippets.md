@@ -41,6 +41,8 @@ memory to version 1 when loaded.  Unknown future versions are rejected for
 import and are never overwritten by a save.  Entries are bounded to 512
 dictionary entries and 512 snippets.  Terms, aliases, pronunciation, and
 triggers are single-line Unicode strings with a 256-character limit;
+aliases are stored as separate strings and may contain commas.  The Settings
+editor shows one alias per line so punctuation round-trips without ambiguity;
 replacements may contain Unicode and newlines up to 4096 characters.  Empty
 replacements are allowed when a trigger should be removed.
 
