@@ -9,6 +9,8 @@ import unittest
 from audio_file_batch import (
     AudioBatchConfigurationError,
     AudioBatchCancelledError,
+    AudioBatchJob,
+    AudioFileResult,
     AudioFileBatchService,
     AudioFileStatus,
     AudioFileValidationError,
@@ -271,6 +273,31 @@ class AudioFileBatchTests(unittest.TestCase):
             result = AudioFileBatchService(RaceGateway()).run([path], _selection())
             self.assertEqual(result.files[0].status, AudioFileStatus.CANCELLED)
             self.assertFalse(result.files[0].text)
+
+    def test_terminal_publication_converts_success_when_cancel_wins_race(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"fixture")
+            service = AudioFileBatchService(_FakeGateway())
+            job = AudioBatchJob(service, (path,), _selection(), None)
+            token = CancellationToken()
+            with job._lock:
+                job._active_tokens[0] = token
+            job.cancel()
+            job._publish(
+                0,
+                AudioFileResult(
+                    path=path,
+                    status=AudioFileStatus.SUCCEEDED,
+                    text="late",
+                    provider_id="local_asr",
+                    model="ggml-small",
+                    attempts=1,
+                ),
+                active_token=token,
+            )
+            self.assertEqual(job._results[0].status, AudioFileStatus.CANCELLED)
+            self.assertFalse(job._results[0].text)
 
 
 class RegistryGatewayTests(unittest.TestCase):

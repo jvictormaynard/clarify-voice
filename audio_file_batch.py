@@ -466,6 +466,10 @@ class AudioBatchJob:
     def cancel(self) -> None:
         """Stop new submissions and cooperatively cancel active operations."""
 
+        # Publish the cancellation intent before waiting for the scheduler's
+        # lock.  If a provider future has returned but is waiting to publish,
+        # the terminal publication below will observe this token and convert a
+        # would-be success into ``cancelled``.
         self._cancel_token.cancel()
         with self._lock:
             tokens = tuple(self._active_tokens.values())
@@ -495,9 +499,28 @@ class AudioBatchJob:
         assert self._result is not None
         return self._result
 
-    def _publish(self, index: int, item: AudioFileResult) -> None:
+    def _publish(
+        self,
+        index: int,
+        item: AudioFileResult,
+        *,
+        active_token: CancellationToken | None = None,
+    ) -> None:
         with self._lock:
+            if (active_token is not None
+                    and item.status is AudioFileStatus.SUCCEEDED
+                    and (active_token.cancelled or self._cancel_token.cancelled)):
+                item = replace(
+                    item,
+                    status=AudioFileStatus.CANCELLED,
+                    text="",
+                    provider_id="",
+                    model="",
+                    error="File processing was cancelled",
+                )
             self._results[index] = item
+            if active_token is not None:
+                self._active_tokens.pop(index, None)
             callback = self._callback
         if callback is not None:
             try:
@@ -539,14 +562,13 @@ class AudioBatchJob:
                     break
                 completed, _ = wait(active, return_when=FIRST_COMPLETED)
                 for future in completed:
-                    index, token = active.pop(future)
-                    with self._lock:
-                        self._active_tokens.pop(index, None)
+                    index, token = active[future]
                     try:
                         item = future.result()
                     except BaseException as error:
                         item = self._failure_result(index, error, token)
-                    self._publish(index, item)
+                    self._publish(index, item, active_token=token)
+                    active.pop(future, None)
             # A cancellation can be observed between the final submission and
             # this loop.  Mark any never-submitted records explicitly.
             if self._cancel_token.cancelled:
