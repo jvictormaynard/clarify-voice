@@ -692,13 +692,11 @@ class RecordingSessionTests(unittest.TestCase):
             self.assertTrue(provider_started.wait(1))
 
             def delete(path_to_remove, *, strict=False):
-                cleanup_calls.append((path_to_remove, threading.current_thread().name))
                 path_to_remove.unlink(missing_ok=True)
 
-            cleanup_calls = []
             with patch.object(app, "SESSION_WORKER_JOIN_SECONDS", 0.01), \
                     patch.object(app, "SESSION_WORKER_GRACE_SECONDS", 0.2), \
-                    patch.object(app.Recorder, "_safe_delete", side_effect=delete):
+                    patch.object(app.Recorder, "_safe_delete", side_effect=delete) as cleanup:
                 session.finalize("completed")
                 time.sleep(0.05)
                 self.assertTrue(session._shutdown_watcher.is_alive())
@@ -711,9 +709,7 @@ class RecordingSessionTests(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
                 self.assertTrue(session.wait_for_shutdown(1))
 
-            target_calls = [path_to_remove for path_to_remove, _thread in cleanup_calls
-                            if path_to_remove == path]
-            self.assertEqual(target_calls, [path], cleanup_calls)
+            self.assertEqual(cleanup.call_count, 1)
             self.assertFalse(path.exists())
 
     def test_snapshot_releases_wav_before_unbounded_provider_returns(self):
