@@ -2164,6 +2164,7 @@ def find_sox():
     return "sox"
 
 SOX_EXE = find_sox()
+SOX_WAVE_AUDIO_NAME_MAX_CHARS = 31
 
 def get_primary_monitor():
     """Return (width, height) of the primary monitor work area."""
@@ -3808,6 +3809,16 @@ def _selected_microphone_stream_device(
     )
 
 
+def _sox_supports_explicit_microphone_selection() -> bool:
+    """Return whether the active SoX driver honors an input name.
+
+    WaveAudio and CoreAudio accept a named input.  SoX's PulseAudio driver
+    ignores its filename argument, so passing a selected display name on
+    Linux would claim one device while recording from the default source.
+    """
+    return IS_WIN or IS_MAC
+
+
 def _has_active_microphone():
     """Return whether the selected/current-default input is usable.
 
@@ -3856,6 +3867,10 @@ class Recorder:
         if audio_path is None:
             audio_path = AUDIO_PATH
         audio_path = Path(audio_path)
+        supports_explicit_microphone = _sox_supports_explicit_microphone_selection()
+        if microphone is not None and not supports_explicit_microphone:
+            raise MicrophoneUnavailableError(
+                "Explicit microphone selection is unavailable for the SoX backend")
         source = self.microphone_source
         inventory = (
             source.snapshot() if source is not None
@@ -3891,6 +3906,15 @@ class Recorder:
                 # inventory.  Do not silently replace it with SoX's default.
                 raise MicrophoneUnavailableError(
                     "No safe microphone input is available")
+        selected_input_name = None
+        if (
+            selection is not None
+            and selection.state is MicrophoneSelectionState.SELECTED
+        ):
+            # Validate the selected route before boundary/process startup so
+            # an unsupported or ambiguous endpoint cannot leave partial
+            # recorder state behind.
+            selected_input_name = self._selected_input_name(selection)
         if not self._controls_override:
             self.controls = _recording_controls()
         with self._lifecycle_lock:
@@ -3917,13 +3941,13 @@ class Recorder:
         if IS_WIN:
             args += ["-t", "waveaudio"]
             if selection is not None and selection.state is MicrophoneSelectionState.SELECTED:
-                args += [self._selected_input_name(selection)]
+                args += [selected_input_name]
             else:
                 args += ["-d"]
         elif IS_MAC:
             args += ["-t", "coreaudio"]
             args += [
-                self._selected_input_name(selection)
+                selected_input_name
                 if selection is not None
                 and selection.state is MicrophoneSelectionState.SELECTED
                 else "default"
@@ -3931,7 +3955,7 @@ class Recorder:
         else:
             args += ["-t", "pulseaudio"]
             args += [
-                self._selected_input_name(selection)
+                selected_input_name
                 if selection is not None
                 and selection.state is MicrophoneSelectionState.SELECTED
                 else "default"
@@ -4017,10 +4041,32 @@ class Recorder:
             return "default"
         name = selection.device.name
         inventory = self.microphone_inventory
+        if not IS_WIN and not IS_MAC:
+            is_system_default = selection.device.is_default or (
+                inventory is not None
+                and selection.device.stable_id == inventory.default_id
+            )
+            if not is_system_default:
+                raise MicrophoneUnavailableError(
+                    "Explicit microphone selection is unavailable for SoX PulseAudio")
+            # PulseAudio ignores the filename, so only its default source is
+            # safe to request through this SoX route.
+            return "default"
         if inventory is not None:
+            def sox_name_key(value):
+                normalized = value.casefold()
+                if IS_WIN and not normalized.isdigit():
+                    # SoX WaveAudio matches non-numeric names using only the
+                    # first 31 characters. Treat prefix collisions as
+                    # ambiguous before launching a process that could capture
+                    # the wrong endpoint.
+                    return normalized[:SOX_WAVE_AUDIO_NAME_MAX_CHARS]
+                return normalized
+
+            name_key = sox_name_key(name)
             same_name = tuple(
                 device for device in inventory.available_devices
-                if device.name.casefold() == name.casefold())
+                if sox_name_key(device.name) == name_key)
             if len(same_name) != 1:
                 raise MicrophoneUnavailableError(
                     "Selected microphone has no unambiguous backend name")
@@ -11041,8 +11087,15 @@ class App(ctk.CTk):
         controls_to_widgets(microphone_state["controls"])
 
         def refresh_microphone_inventory():
+            supports_explicit_microphone = _sox_supports_explicit_microphone_selection()
+            if not supports_explicit_microphone:
+                # Do not retain a saved endpoint that PulseAudio/SoX cannot
+                # honor; System default is the only selectable route here.
+                microphone_state["selection"] = None
             inventory, selection = _resolve_microphone_selection(
-                settings=MicrophoneSettings(microphone_state["selection"]))
+                settings=MicrophoneSettings(
+                    microphone_state["selection"]
+                    if supports_explicit_microphone else None))
             microphone_state["inventory"] = inventory
             labels = {"System default": None}
             if inventory is None:
@@ -11053,13 +11106,14 @@ class App(ctk.CTk):
                     text="Input inventory unavailable; SoX default remains active.",
                     text_color=DIM)
                 return
-            for device in inventory.available_devices:
-                label = device.name
-                if device.host_api:
-                    label = f"{label} · {device.host_api}"
-                if label in labels:
-                    label = f"{label} · {device.stable_id[-6:]}"
-                labels[label] = device.stable_id
+            if supports_explicit_microphone:
+                for device in inventory.available_devices:
+                    label = device.name
+                    if device.host_api:
+                        label = f"{label} · {device.host_api}"
+                    if label in labels:
+                        label = f"{label} · {device.stable_id[-6:]}"
+                    labels[label] = device.stable_id
             microphone_state["labels"] = labels
             microphone_menu.configure(values=list(labels))
             selected_label = next(
@@ -11067,6 +11121,12 @@ class App(ctk.CTk):
                  if stable_id == microphone_state["selection"]),
                 "System default")
             microphone_menu.set(selected_label)
+            if not supports_explicit_microphone:
+                microphone_status.configure(
+                    text=("Explicit input selection is unavailable with SoX "
+                          "PulseAudio; System default remains active."),
+                    text_color=DIM)
+                return
             if selection is None or not selection.can_record:
                 microphone_status.configure(
                     text=(f"No safe input device ({inventory.error_code or 'unavailable'})."),
@@ -11092,7 +11152,9 @@ class App(ctk.CTk):
                 microphone_status.configure(
                     text="Input test unavailable without PortAudio.", text_color=DIM)
                 return
-            selection = inventory.resolve(microphone_state["selection"])
+            selection = inventory.resolve(
+                microphone_state["selection"]
+                if _sox_supports_explicit_microphone_selection() else None)
             if not selection.can_record:
                 microphone_status.configure(
                     text="No safe microphone to test.", text_color="#d17878")

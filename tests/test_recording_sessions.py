@@ -186,6 +186,7 @@ class RecordingSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(
                 app, "sd", fake_sounddevice), patch.object(
                 app, "IS_WIN", False), patch.object(
+                app, "IS_MAC", True), patch.object(
                 app.subprocess, "Popen", return_value=process), patch.object(
                 app.Recorder, "_stop_stale_windows_recorders"), patch.object(
                 app.time, "sleep", return_value=None):
@@ -230,6 +231,8 @@ class RecordingSessionTests(unittest.TestCase):
         source = SimpleNamespace(snapshot=lambda: inventory)
 
         with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "IS_WIN", True), patch.object(
+                app, "IS_MAC", False), patch.object(
                 app.Recorder, "_stop_stale_windows_recorders"), patch.object(
                 app.subprocess, "Popen") as popen:
             recorder = app.Recorder(
@@ -382,6 +385,166 @@ class RecordingSessionTests(unittest.TestCase):
             popen.assert_not_called()
             self.assertIsNone(recorder.microphone_inventory)
             self.assertIsNone(recorder.microphone_selection)
+
+    def test_linux_explicit_microphone_is_rejected_for_pulseaudio(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "System default",
+                "host_api": "PulseAudio",
+                "index": 1,
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "USB headset",
+                "host_api": "PulseAudio",
+                "index": 7,
+                "max_input_channels": 1,
+            },
+        ])
+        selected_id = inventory.devices[1].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app, "IS_MAC", False), patch.object(
+                app, "_microphone_settings",
+                return_value=app.MicrophoneSettings(selected_id)), patch.object(
+                app.subprocess, "Popen", return_value=process) as popen, patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            with self.assertRaises(app.MicrophoneUnavailableError):
+                recorder.start(Path(directory) / "recording.wav")
+
+            popen.assert_not_called()
+            self.assertEqual(
+                recorder.microphone_selection.state,
+                app.MicrophoneSelectionState.SELECTED,
+            )
+
+    def test_linux_explicit_microphone_argument_is_rejected(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "System default",
+                "host_api": "PulseAudio",
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "USB headset",
+                "host_api": "PulseAudio",
+                "max_input_channels": 1,
+            },
+        ])
+        selected_id = inventory.devices[1].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "IS_WIN", False), patch.object(
+                app, "IS_MAC", False), patch.object(
+                app.subprocess, "Popen") as popen, patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"):
+            recorder = app.Recorder(controls=app.RecordingControls())
+            recorder.microphone_source = source
+
+            with self.assertRaises(app.MicrophoneUnavailableError):
+                recorder.start(
+                    Path(directory) / "recording.wav",
+                    microphone=selected_id,
+                )
+
+            popen.assert_not_called()
+            self.assertIsNone(recorder.microphone_selection)
+
+    def test_linux_system_default_route_remains_usable(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "System default",
+                "host_api": "PulseAudio",
+                "index": 1,
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "USB headset",
+                "host_api": "PulseAudio",
+                "index": 7,
+                "max_input_channels": 1,
+            },
+        ])
+        source = SimpleNamespace(snapshot=lambda: inventory)
+        process = Mock()
+        process.poll.return_value = None
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "sd", None), patch.object(
+                app, "IS_WIN", False), patch.object(
+                app, "IS_MAC", False), patch.object(
+                app, "_microphone_settings",
+                return_value=app.MicrophoneSettings.defaults()), patch.object(
+                app.subprocess, "Popen", return_value=process), patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.time, "sleep", return_value=None):
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            recorder.start(Path(directory) / "recording.wav")
+
+            args = app.subprocess.Popen.call_args.args[0]
+            self.assertEqual(
+                args[0:4], [app.SOX_EXE, "-t", "pulseaudio", "default"])
+            self.assertEqual(
+                recorder.microphone_selection.state,
+                app.MicrophoneSelectionState.DEFAULT,
+            )
+            recorder.stop()
+
+    def test_waveaudio_prefix_collision_is_rejected(self):
+        prefix = "x" * 31
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": prefix + "-a",
+                "host_api": "WASAPI",
+                "native_id": "endpoint-a",
+                "index": 3,
+                "max_input_channels": 1,
+            },
+            {
+                "name": prefix + "-b",
+                "host_api": "WASAPI",
+                "native_id": "endpoint-b",
+                "index": 7,
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+        ])
+        selected_id = inventory.devices[0].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app, "IS_WIN", True), patch.object(
+                app, "IS_MAC", False), patch.object(
+                app.subprocess, "Popen") as popen, patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"):
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            with self.assertRaises(app.MicrophoneUnavailableError):
+                recorder.start(
+                    Path(directory) / "recording.wav",
+                    microphone=selected_id,
+                )
+
+            popen.assert_not_called()
 
     def test_raw_input_stream_failure_still_enforces_max_duration(self):
         controls = app.RecordingControls(max_duration_seconds=5, warning_seconds=1)
