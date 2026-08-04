@@ -303,8 +303,8 @@ def _terminate_process(process: Any) -> None:
             # ``kill`` is asynchronous on Windows.  The temporary directory
             # must not be removed until the child has actually detached from
             # the normalized WAV.
-            process.wait(timeout=2)
-        except (OSError, subprocess.TimeoutExpired):
+            process.wait()
+        except OSError:
             pass
 
 
@@ -578,12 +578,11 @@ class AudioBatchJob:
                        and cursor < len(pending)):
                     index = pending[cursor]
                     cursor += 1
-                    token = CancellationToken()
-                    with self._lock:
-                        self._active_tokens[index] = token
-                    self._publish(index, replace(
-                        self._results[index], status=AudioFileStatus.PROCESSING,
-                        error=""))
+                    claimed = self._claim_processing(index)
+                    if claimed is None:
+                        continue
+                    token, processing = claimed
+                    self._notify(processing)
                     active[executor.submit(
                         self._process_one, index, token)] = (index, token)
                 if not active:
@@ -611,6 +610,25 @@ class AudioBatchJob:
                 self._result = AudioBatchResult(
                     tuple(self._results), self._cancel_token.cancelled)
                 self._done.set()
+
+    def _claim_processing(
+        self, index: int
+    ) -> tuple[CancellationToken, AudioFileResult] | None:
+        """Atomically claim a pending entry for a worker submission."""
+
+        with self._lock:
+            if (self._cancel_token.cancelled
+                    or self._results[index].status is not AudioFileStatus.PENDING):
+                return None
+            token = CancellationToken()
+            processing = replace(
+                self._results[index],
+                status=AudioFileStatus.PROCESSING,
+                error="",
+            )
+            self._active_tokens[index] = token
+            self._results[index] = processing
+            return token, processing
 
     def _failure_result(
         self, index: int, error: BaseException, token: CancellationToken
@@ -743,7 +761,7 @@ class AudioFileBatchService:
                 # files in the same batch continue independently.
                 try:
                     path = Path(os.fspath(raw)).expanduser()
-                except (TypeError, ValueError):
+                except (TypeError, OSError, RuntimeError, ValueError):
                     path = Path("<invalid>")
                 validated.append(path)
                 initial.append(AudioFileResult(

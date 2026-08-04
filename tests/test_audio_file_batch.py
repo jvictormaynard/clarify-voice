@@ -281,6 +281,18 @@ class AudioFileBatchTests(unittest.TestCase):
             self.assertEqual(result.files[0].status, AudioFileStatus.FAILED)
             self.assertEqual(result.files[1].status, AudioFileStatus.SUCCEEDED)
 
+    def test_unknown_home_user_does_not_abort_other_batch_files(self):
+        gateway = _FakeGateway()
+        with TemporaryDirectory() as directory:
+            valid = Path(directory) / "valid.wav"
+            valid.write_bytes(b"fixture")
+            result = AudioFileBatchService(gateway).run(
+                ["~codex-user-that-does-not-exist-9f5b/input.wav", valid],
+                _selection(),
+            )
+            self.assertEqual(result.files[0].status, AudioFileStatus.FAILED)
+            self.assertEqual(result.files[1].status, AudioFileStatus.SUCCEEDED)
+
     def test_permanent_quota_failure_is_not_retried(self):
         attempts = 0
 
@@ -337,6 +349,20 @@ class AudioFileBatchTests(unittest.TestCase):
             self.assertEqual(job._results[0].status, AudioFileStatus.CANCELLED)
             self.assertFalse(job._results[0].text)
 
+    def test_cancelled_pending_entry_cannot_be_claimed_for_processing(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"fixture")
+            job = AudioBatchJob(
+                AudioFileBatchService(_FakeGateway()),
+                (path,),
+                _selection(),
+                None,
+            )
+            job.cancel()
+            self.assertIsNone(job._claim_processing(0))
+            self.assertEqual(job._results[0].status, AudioFileStatus.CANCELLED)
+
 
 class AudioConverterTests(unittest.TestCase):
     def test_kill_fallback_waits_for_process_before_cleanup(self):
@@ -376,6 +402,7 @@ class AudioConverterTests(unittest.TestCase):
         self.assertTrue(process.terminated)
         self.assertTrue(process.killed)
         self.assertEqual(len(process.wait_calls), 2)
+        self.assertIsNone(process.wait_calls[1])
 
 
 class RegistryGatewayTests(unittest.TestCase):
