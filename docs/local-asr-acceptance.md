@@ -8,25 +8,25 @@ do not prove the packaged Settings flow, offline inference, or process cleanup.
 
 ## Current evidence
 
-The latest source baseline is merge commit `794444e131fdff3bbb7bb99404ef171e8c786bc7`
-(2026-08-04, UTC). From the isolated Linux worktree:
+The current source baseline is commit `1f3c85579750e2cd31d3ba645e1317355f393904`
+(2026-08-04). From the isolated Linux worktree:
 
 | Gate | Command/evidence | Result |
 | --- | --- | --- |
-| Full contract suite | `python3 -m unittest discover -s tests -p 'test_*.py'` | 526 passed, 3 skipped |
+| Full contract suite | `python3 -m unittest discover -s tests -p 'test_*.py'` | 711 passed, 4 skipped |
 | Dependency locks | Included in the full suite (`test_dependency_lock`, `test_runtime_lock`) | Current |
-| Python compilation | `python3 -m compileall -q app.py workflows.py repositories.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests` | Pass |
+| Python compilation | `python3 -m compileall -q app.py workflows.py repositories.py workflow_config.py voice_translation.py dictionary_snippets.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py history_store.py local_asr_product.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests` | Pass |
 | Whitespace | `git diff --check` | Pass |
 | Read-only harness status | `python3 scripts/local_asr_harness.py --root <empty-temp-root> status` | `not_installed`; no network operation |
-| Unsupported-host install guard | Same harness with `install --yes` on Linux | Refused before confirmation/download: Windows x64 is required |
+| Unsupported-host install guard | `test_unsupported_platform_rejects_install_before_download` in the source suite | Pass; no install command or download was invoked in this documentation-only update |
 | Cloud refinement regression | `test_local_asr_opted_out_refinement_is_not_accounted`, configuration fallback tests, and provider registry tests | Pass; local ASR cannot be selected as a text-refinement provider |
-| CI package shape | PR #45 Windows test/package checks | Pass; build evidence only, not a GUI acceptance result |
+| CI package shape | Existing Windows test/package checks | Historical build evidence only; not rerun here and not a GUI acceptance result |
 
 The empty-root harness run is intentionally not an installation attempt. It
-proves that status is read-only and that a non-Windows host cannot authorize a
-495 MB Windows download. The output is expected to contain
-`"state": "not_installed"` for `status` and a structured Windows x64 error for
-`install --yes`.
+proves that status is read-only and that no asset root is created by the status
+check. The output is expected to contain `"state": "not_installed"` for
+`status`. This documentation-only update did not invoke `install`,
+`transcribe`, or `benchmark`, and did not download or install any asset.
 
 ## Windows evidence procedure
 
@@ -81,16 +81,16 @@ build alone is not a substitute.
 
 | ID | Action | Expected observation/evidence | Current status |
 | --- | --- | --- | --- |
-| W1 | Open Settings → Providers → Local Whisper before clicking Download | Requirements show Windows/CPU/AVX, VC++ runtime, RAM, disk, and download; `$assetRoot` does not exist and no sidecar process is running | Blocked: needs packaged Windows UI |
-| W2 | Click **Download local ASR** once and capture progress | Network starts only after the click; progress advances through runtime/model stages; final state is installed; `status` verifies every manifest digest | Blocked: needs packaged Windows UI/network |
-| W3 | Repeat `status` and inspect `$assetRoot` | `whisper-server.exe`, model, receipt, and license notices exist only below the owned root; no files are in the executable directory | Blocked: needs Windows install |
-| W4 | With a versioned WAV fixture, run `transcribe` once | Transcript is produced locally; harness JSON includes audio duration, engine/model version, and no cloud request | Blocked: needs Windows sidecar + fixture |
-| W5 | Disable networking after W2, then run the same transcription again | Second transcription succeeds with network disabled; attach the offline transcript and network-isolation evidence | Blocked: requires disposable offline Windows run |
-| W6 | Start a fresh download and click **Cancel** during a transfer | UI becomes cancelled; no executable/model is published; no `.install-*` staging directory remains after the worker exits | Blocked: needs Windows UI/download |
-| W7 | Start inference, then exercise Cancel and close/quit while the sidecar is active | No `whisper-server.exe`, owned process record, or temporary WAV remains after bounded shutdown; attach `Get-Process`/filesystem snapshots | Blocked: needs packaged process lifecycle |
-| W8 | While assets are installed, use **Remove assets** and cancel once during removal | Removal never traverses outside the owned root; a cancelled partial removal keeps the marker for retry; a second removal leaves `$assetRoot` absent | Blocked: needs Windows UI/removal |
-| W9 | Run the benchmark harness with a fixed audio/reference pair | Capture startup, inference, real-time factor, peak working set, transcript, WER, engine/model, and hardware JSON | Blocked: no approved Windows host/fixture |
-| W10 | With local ASR selected and cloud refinement switch off, run Prompt mode; then explicitly enable it and repeat | Opt-out run records no refinement provider/model and sends no transcript to cloud; opt-in run records the selected cloud refinement only after the switch is enabled | Source regression covered; live packaged proof blocked |
+| W1 | Open Settings → Providers → Local Whisper before clicking Download | Requirements show Windows/CPU/AVX, VC++ runtime, RAM, disk, and download; `$assetRoot` does not exist and no sidecar process is running | Source wiring covered; manual/blocked: packaged Windows UI |
+| W2 | Click **Download local ASR** once and capture progress | Network starts only after the click; progress advances through runtime/model stages; final state is installed; `status` verifies every manifest digest | Source contract covered; manual/blocked: packaged Windows UI/network |
+| W3 | Repeat `status` and inspect `$assetRoot` | `whisper-server.exe`, model, receipt, and license notices exist only below the owned root; no files are in the executable directory | Source contract covered; manual/blocked: Windows install |
+| W4 | With a versioned WAV fixture, run `transcribe` once | Transcript is produced locally; harness JSON includes audio duration, engine/model version, and no cloud request | Harness contract covered; manual/blocked: Windows sidecar + fixture |
+| W5 | Disable networking after W2, then run the same transcription again | Second transcription succeeds with network disabled; attach the offline transcript and network-isolation evidence | Code routing covered; manual/blocked: disposable offline Windows run |
+| W6 | Start a fresh download and click **Cancel** during a transfer | UI becomes cancelled; no executable/model is published; no `.install-*` staging directory remains after the worker exits | Cancellation seams covered; manual/blocked: Windows UI/download |
+| W7 | Start inference, then exercise Cancel and close/quit while the sidecar is active | No `whisper-server.exe`, owned process record, or temporary WAV remains after bounded shutdown; attach `Get-Process`/filesystem snapshots | Lifecycle seams covered; manual/blocked: packaged process lifecycle |
+| W8 | While assets are installed, use **Remove assets** and cancel once during removal | Removal never traverses outside the owned root; a cancelled partial removal keeps the marker for retry; a second removal leaves `$assetRoot` absent | Removal safety covered by tests; manual/blocked: Windows UI/removal |
+| W9 | Run the benchmark harness with a fixed audio/reference pair | Capture startup, inference, real-time factor, peak working set, transcript, WER, engine/model, and hardware JSON | Harness validation covered; manual/blocked: approved Windows host/fixture |
+| W10 | With local ASR selected and cloud refinement switch off, run Prompt mode; then explicitly enable it and repeat | Opt-out run records no refinement provider/model and sends no transcript to cloud; opt-in run records the selected cloud refinement only after the switch is enabled | Source regression covered; manual/blocked: packaged UI/cloud evidence |
 
 The harness commands for W4 and W9 are:
 
@@ -115,12 +115,12 @@ must not be replaced by a synthetic unit-test audio buffer.
 
 ## Blocker and close rule
 
-The current Linux/CI environment has no authorized Windows x64 product run,
-no packaged Settings session, no versioned audio fixture/reference transcript,
-and no approved offline-network or process-profiler setup. Provisioning a
-Windows machine, changing host networking, or using production credentials is
-outside this acceptance task. Therefore W1–W9 remain **blocked/manual-only**;
-W10 is only partially covered by the source contract suite.
+This documentation update has no authorized Windows x64 product run, no
+packaged Settings session, no versioned audio fixture/reference transcript, and
+no approved offline-network or process-profiler setup. Provisioning a Windows
+machine, changing host networking, or using production credentials is outside
+this task. Therefore W1–W9 remain **manual-only and blocked**; W10 is
+source-covered but still **blocked for packaged/manual proof**.
 
 Keep issue #23 open until the attached Windows artifacts make W1–W9 green.
 When a row fails, preserve the exact executable SHA, manifest version, OS/CPU,

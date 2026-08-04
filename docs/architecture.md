@@ -277,21 +277,24 @@ Provides the Windows-only clipboard adapter. It snapshots and restores the
 supported global-memory formats (text, HTML, RTF, and DIB images) without
 attempting to read arbitrary clipboard formats.
 
-### `local_asr.py` (typed groundwork, not user-facing)
+### `local_asr.py` (optional Local Whisper provider and asset lifecycle)
 
 Defines an isolated installer and lifecycle manager for a separately downloaded,
 checksummed `whisper.cpp` Windows sidecar and model. `LocalASRProviderAdapter`
 implements the typed provider-registry contract over the narrow
-`LocalTranscriptionBackend` lifecycle seam. It is registered as an explicit
-local capability, while installation/progress remains an explicit product
-action and no cloud fallback is implicit. The #32 signed MSI/update contract is for packaged ClarifyVoice
-artifacts; this source-only sidecar harness does not claim signed-release
-coverage or silently join that updater. It consumes the #18
+`LocalTranscriptionBackend` lifecycle seam. The application registers it as an
+explicit provider and exposes its install/progress/cancel/remove flow in
+Settings → Providers; installation remains an explicit product action and no
+cloud fallback is implicit. The #32 signed MSI/update contract is for packaged
+ClarifyVoice artifacts; this source-only sidecar harness does not claim
+signed-release coverage or silently join that updater. It consumes the #18
 `TranscriptionRequest.audio_bytes` snapshot;
 `RecordingSession` remains the sole owner of the temporary WAV, while the local
 adapter owns only inference cancellation and sidecar shutdown. Importing the
 module never downloads assets; the application starts the sidecar only after an
-explicit installed local route is selected.
+explicit installed local route is selected. This product wiring does not by
+itself prove the packaged Windows, offline, quality, performance, or cleanup
+acceptance gates tracked in issue #23.
 
 The workflow capture path requires a sequence-bearing snapshot; it retries
 transient snapshot contention and otherwise fails closed rather than falling
@@ -449,8 +452,11 @@ publisher, emits checksums, and creates GitHub provenance attestations. Public
 enablement remains gated as documented in
 [Windows distribution security](windows-distribution.md). The local-ASR
 runtime and model are deliberately excluded from this one-file application.
-Their groundwork manifest and maintainer harness remain source-only until the
-remaining lifecycle, download, and #22 acceptance conventions land.
+The current PyInstaller command includes the pinned Local ASR manifest and
+license notices in the executable payload; the maintainer harness remains
+source-only. This bundled definition does not claim that the runtime/model are
+installed, that a Windows sidecar has run, or that the offline/manual #23 gates
+are green.
 
 The GitHub release workflow builds on a Windows runner and publishes the
 executable plus a SHA-256 checksum. `scripts/deploy.ps1` is a maintainer tool for

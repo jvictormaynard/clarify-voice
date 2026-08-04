@@ -23,22 +23,27 @@
 </p>
 
 ClarifyVoice records from a global shortcut, transcribes with Gemini, OpenAI,
-or Groq, optionally improves the text, and pastes the result back into the app
-you were using. It can also rewrite or translate selected text without opening
-a separate editor.
+Groq, or the optional Local Whisper provider, optionally improves the text, and
+pastes the result back into the app you were using. It can also rewrite or
+translate selected text without opening a separate editor.
 
 > [!IMPORTANT]
-> ClarifyVoice is bring-your-own-key software. You need an API key for at least
-> one supported AI provider. Keys and local usage statistics stay on your
-> computer; audio and selected text are sent directly to the provider you
-> configure.
+> ClarifyVoice supports bring-your-own-key cloud providers. Cloud transcription
+> or text refinement requires an API key. The optional Local Whisper provider
+> does not require an API key for local transcription; it downloads its
+> runtime/model only after an explicit action, and its packaged Windows/offline
+> acceptance is still pending. Keys and local usage statistics stay on your
+> computer. Cloud audio/text goes directly to the provider you configure; Local
+> Whisper keeps transcription local unless you explicitly enable cloud
+> refinement.
 
 ## Features
 
 - Voice transcription and prompt-quality rewriting from any Windows app
+- Optional Local Whisper transcription after an explicit, verified asset download
 - Safe selected-text rewriting that checks focus before replacing content
 - Translation picker for selected text
-- Gemini, OpenAI, Groq, and compatible custom endpoints
+- Gemini, OpenAI, Groq, Local Whisper, and compatible custom endpoints
 - Native Windows hotkeys and system tray integration
 - English, Portuguese, Spanish, German, and Russian interface languages
 - Local-only usage statistics without storing transcripts
@@ -131,8 +136,10 @@ result remains available for manual paste and the newer clipboard contents win.
 
 ## Providers
 
-Open **Models** to configure a provider, base URL, API key, and models. Ordinary
-settings are stored in `%APPDATA%\ClarifyVoice\config.json`; API keys are kept
+Open **Models** to configure a provider, base URL, API key, and models. Local
+Whisper does not require an API key or cloud endpoint: choose **Download local
+ASR** explicitly to install its verified optional assets. Ordinary settings are
+stored in `%APPDATA%\ClarifyVoice\config.json`; cloud API keys are kept
 separately with Windows Data Protection API (DPAPI).
 
 | Provider | Transcription | Text refinement | Default endpoint |
@@ -140,21 +147,32 @@ separately with Windows Data Protection API (DPAPI).
 | Gemini | Multimodal audio | Same Gemini model | `generativelanguage.googleapis.com/v1beta` |
 | OpenAI | Audio transcription API | OpenAI-compatible text model | `api.openai.com/v1` |
 | Groq | Whisper-compatible audio API | OpenAI-compatible text model | `api.groq.com/openai/v1` |
+| Local Whisper | Local CPU sidecar (optional download) | None by default; cloud refinement requires explicit opt-in | Local loopback only |
 
 Custom endpoints must implement the corresponding provider-compatible routes.
 Unknown custom models work, but their cost is intentionally shown as unpriced
 instead of using an unreliable estimate.
 
+Local Whisper is transcription-only and is not bundled with the executable. Its
+`whisper.cpp` runtime and model are downloaded only after the user authorizes the
+action and are verified against the pinned manifest. Prompt mode returns the
+local transcript without refinement by default; the **Allow cloud refinement for
+Prompt mode** setting is the only route that sends that transcript to the
+selected cloud model. The Windows/offline product acceptance remains pending.
+
 ## Privacy and local data
 
-ClarifyVoice has no project-owned server. Provider requests go from your
-computer to the endpoint you select. The app stores:
+ClarifyVoice has no project-owned server. Cloud provider requests go from your
+computer to the endpoint you select; Local Whisper sends audio only to its own
+randomized loopback sidecar. The app stores:
 
 - provider settings in `%APPDATA%\ClarifyVoice\config.json`;
 - DPAPI-encrypted provider keys in
   `%APPDATA%\ClarifyVoice\secrets.dpapi.json`, decryptable only by the same
   Windows user on the same machine;
 - anonymous usage counters in `%APPDATA%\ClarifyVoice\usage_stats.json`;
+- optional Local ASR assets below `%LOCALAPPDATA%\ClarifyVoice\local-asr` after
+  an explicit download; the runtime and model are not bundled in the executable;
 - a unique temporary WAV file while processing a recording. It is deleted after
   the provider no longer needs it, including cancellation, failure, and app
   exit; it is not retained as a recording history.
@@ -225,10 +243,11 @@ The current application is Python. The Electron prototype is kept only for
 historical context and is excluded from builds. See
 [Architecture](docs/architecture.md) before making structural changes.
 
-Optional local-transcription groundwork is being developed separately from the
-current product runtime. It does not add a user-facing provider or bundle a
-model. Maintainers can review the checksummed sidecar design, privacy trade-offs,
-and pending Windows acceptance work in [Local ASR](docs/local-asr.md).
+Local Whisper is an explicit provider in the current product runtime. The
+portable executable includes the pinned Local ASR manifest and license notices,
+but not the runtime or model; installation remains an explicit user action.
+Maintainers can review the checksummed sidecar design, privacy trade-offs, and
+pending Windows/offline acceptance work in [Local ASR](docs/local-asr.md).
 
 ## Contributing
 
