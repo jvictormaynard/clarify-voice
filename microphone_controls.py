@@ -375,7 +375,19 @@ class MicrophoneInventory:
             if len(marked) == 1:
                 resolved_default = marked[0]
         if not resolved_default and isinstance(default_index, int) and not isinstance(default_index, bool):
-            if 0 <= default_index < len(devices):
+            indexed = tuple(
+                device for device in devices if device.backend_index == default_index)
+            if len(indexed) == 1:
+                resolved_default = indexed[0].stable_id
+            elif (
+                not indexed
+                and all(device.backend_index is None for device in devices)
+                and 0 <= default_index < len(devices)
+            ):
+                # Injected/fake inventories may omit backend handles and use
+                # the query order as their only index. Never use this fallback
+                # when any real backend index is present, because PortAudio
+                # handles may be sparse after filtering.
                 resolved_default = devices[default_index].stable_id
         return cls(devices, resolved_default or None)
 
@@ -413,7 +425,7 @@ class MicrophoneInventory:
 
         fallback = self._default_device()
         if fallback is not None:
-            if requested and (not matches or not matches[0].usable):
+            if requested and (len(matches) != 1 or not matches[0].usable):
                 return MicrophoneSelection(
                     MicrophoneSelectionState.FALLBACK_DEFAULT,
                     fallback,

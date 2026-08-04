@@ -85,6 +85,53 @@ class MicrophoneControlsTests(unittest.TestCase):
         self.assertEqual(selection.reason, "saved_device_unavailable")
         self.assertTrue(selection.can_record)
 
+    def test_sparse_backend_default_handle_is_not_used_as_tuple_offset(self):
+        inventory = MicrophoneInventory.from_records(
+            [
+                {
+                    "name": "Input seven",
+                    "index": 7,
+                    "max_input_channels": 1,
+                },
+                {
+                    "name": "Input three",
+                    "index": 3,
+                    "max_input_channels": 1,
+                },
+            ],
+            default_index=7,
+        )
+        self.assertEqual(inventory.default_id, inventory.devices[0].stable_id)
+
+    def test_ambiguous_saved_identity_is_reported_as_fallback(self):
+        inventory = MicrophoneInventory.from_records(
+            [
+                {
+                    "name": "Same name",
+                    "host_api": "WASAPI",
+                    "index": 7,
+                    "max_input_channels": 1,
+                },
+                {
+                    "name": "Same name",
+                    "host_api": "WASAPI",
+                    "index": 3,
+                    "max_input_channels": 1,
+                },
+                {
+                    "name": "Current default",
+                    "native_id": "default",
+                    "is_default": True,
+                    "max_input_channels": 1,
+                },
+            ]
+        )
+        ambiguous_id = inventory.devices[0].stable_id
+        selection = inventory.resolve(ambiguous_id)
+        self.assertEqual(selection.state, MicrophoneSelectionState.FALLBACK_DEFAULT)
+        self.assertEqual(selection.reason, "saved_device_unavailable")
+        self.assertEqual(selection.device.name, "Current default")
+
     def test_missing_default_is_explicitly_unavailable_not_arbitrary(self):
         inventory = MicrophoneInventory.from_records([
             {"name": "Unmarked input", "max_input_channels": 1},
