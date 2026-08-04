@@ -72,6 +72,12 @@ MAX_MAX_AUDIO_BYTES = 1024 * 1024 * 1024
 _SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 
 
+def _audio_extension(path: Path) -> str:
+    """Read an allowlisted extension without changing the I/O path."""
+
+    return Path(path.name.rstrip()).suffix.casefold()
+
+
 class AudioBatchError(RuntimeError):
     """Base class for deterministic, user-facing batch failures."""
 
@@ -386,7 +392,7 @@ def validate_audio_path(
             f"Could not resolve audio file: {value}") from error
     if not exists or not is_file:
         raise AudioFileValidationError(f"Audio file does not exist: {value}")
-    extension = resolved.suffix.casefold()
+    extension = _audio_extension(resolved)
     if extension not in SUPPORTED_AUDIO_EXTENSIONS:
         supported = ", ".join(sorted(SUPPORTED_AUDIO_EXTENSIONS))
         raise UnsupportedAudioFormatError(
@@ -828,7 +834,7 @@ class AudioFileBatchService:
             raise AudioBatchCancelledError("File processing was cancelled")
         # A private directory is used only when conversion is necessary.  No
         # cleanup path ever points at the imported source.
-        if path.suffix.casefold() == CANONICAL_AUDIO_EXTENSION:
+        if _audio_extension(path) == CANONICAL_AUDIO_EXTENSION:
             yield _PreparedAudio(
                 request_path=path,
                 audio_bytes=_snapshot_audio(
@@ -851,7 +857,8 @@ class AudioFileBatchService:
                     "Audio conversion did not produce a readable temporary WAV") from error
             if (normalized_resolved == temporary_resolved
                     or temporary_resolved not in normalized_resolved.parents
-                    or normalized_resolved.suffix.casefold() != CANONICAL_AUDIO_EXTENSION):
+                    or _audio_extension(normalized_resolved)
+                    != CANONICAL_AUDIO_EXTENSION):
                 raise AudioConversionError(
                     "Audio converter returned a path outside its temporary directory")
             audio_bytes = _snapshot_audio(

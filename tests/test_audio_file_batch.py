@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import threading
@@ -82,6 +83,13 @@ class AudioFileValidationTests(unittest.TestCase):
     def test_local_path_whitespace_is_preserved(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / " recording.wav"
+            path.write_bytes(b"fixture")
+            self.assertEqual(validate_audio_path(str(path)), path.resolve())
+
+    @unittest.skipIf(os.name == "nt", "Windows trims trailing filename spaces")
+    def test_trailing_filename_whitespace_keeps_allowlisted_extension(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "recording.wav "
             path.write_bytes(b"fixture")
             self.assertEqual(validate_audio_path(str(path)), path.resolve())
 
