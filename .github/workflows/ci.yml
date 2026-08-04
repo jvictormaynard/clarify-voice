@@ -168,6 +168,18 @@ jobs:
           if ($providers.Count -ne 3 -or ($providers -join ",") -cne "gemini,openai,groq") {
             throw "Packaged secret-store self-test did not cover all providers."
           }
+          if ($result.config_contains_provider_keys -ne $false) {
+            throw "Packaged secret-store self-test found provider keys in config.json."
+          }
+          if ($result.restart_read -ne $true) {
+            throw "Packaged secret-store self-test did not verify restart reads."
+          }
+          if ($result.provider_connections_ready -ne $true) {
+            throw "Packaged secret-store self-test did not verify provider use."
+          }
+          if ($result.delete_verified -ne $true) {
+            throw "Packaged secret-store self-test did not verify credential deletion."
+          }
           Remove-Item $resultFile -Force
 
       - name: Test install, upgrade, repair, rollback, and uninstall

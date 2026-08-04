@@ -53,6 +53,7 @@ from repositories import (
     ApplicationRepositories,
     LocalConfigRepository,
     LocalUsageStatsRepository,
+    PROVIDER_SECRET_KEYS,
 )
 from secret_store import (
     SUPPORTED_SECRET_PROVIDERS,
@@ -8663,7 +8664,10 @@ def _run_secret_store_self_test(result_file: str | None = None) -> int:
 
     The executable's CI smoke test uses this command on a disposable Windows
     runner. A temporary directory ensures that no real profile credential
-    store is opened, and the JSON result intentionally contains no secrets.
+    store is opened. The repository boundary is exercised as well as the
+    backend so the test proves that provider keys stay out of ``config.json``
+    while remaining available to provider connections. The JSON result
+    intentionally contains no secrets.
     """
 
     expected = {
@@ -8673,21 +8677,58 @@ def _run_secret_store_self_test(result_file: str | None = None) -> int:
     try:
         with tempfile.TemporaryDirectory(
                 prefix="clarifyvoice-secret-store-test-") as directory:
-            first = create_secret_store(directory)
+            config_path = Path(directory) / "config.json"
+            first = LocalConfigRepository(
+                config_path, defaults={}, environment={},
+                secret_store=create_secret_store(directory))
+            first.save({
+                PROVIDER_SECRET_KEYS[provider]: value
+                for provider, value in expected.items()
+            })
+            config_text = config_path.read_text(encoding="utf-8")
+            if any(
+                    key in config_text or value in config_text
+                    for provider, value in expected.items()
+                    for key in (PROVIDER_SECRET_KEYS[provider],)):
+                raise SecretStoreError(
+                    "Provider credentials were written to config.json")
+
+            restarted = LocalConfigRepository(
+                config_path, defaults={}, environment={},
+                secret_store=create_secret_store(directory))
+            loaded = restarted.load().to_mapping()
             for provider, value in expected.items():
-                first.set(provider, value)
-                if first.get(provider) != value:
+                if loaded.get(PROVIDER_SECRET_KEYS[provider]) != value:
                     raise SecretStoreError("Credential read-back failed")
 
-            restarted = create_secret_store(directory)
+            # Build the same connection objects used by provider workflows.
+            # This is a local construction check; no provider request is made.
+            connections = {
+                provider: PROVIDER_REGISTRY.connection_from_legacy(
+                    provider, loaded)
+                for provider in expected
+            }
             for provider, value in expected.items():
-                if restarted.get(provider) != value:
-                    raise SecretStoreError("Credential restart read failed")
+                if connections[provider].api_key != value:
+                    raise SecretStoreError("Credential use read failed")
 
-            for provider in expected:
-                restarted.delete(provider)
-                if restarted.get(provider) is not None:
-                    raise SecretStoreError("Credential delete failed")
+            restarted.save({
+                PROVIDER_SECRET_KEYS[provider]: ""
+                for provider in expected
+            })
+            config_text = config_path.read_text(encoding="utf-8")
+            if any(
+                    key in config_text or value in config_text
+                    for provider, value in expected.items()
+                    for key in (PROVIDER_SECRET_KEYS[provider],)):
+                raise SecretStoreError(
+                    "Provider credentials remained in config.json")
+            cleared = LocalConfigRepository(
+                config_path, defaults={}, environment={},
+                secret_store=create_secret_store(directory)).load().to_mapping()
+            if any(cleared.get(PROVIDER_SECRET_KEYS[provider], "")
+                   for provider in expected):
+                raise SecretStoreError("Credential delete failed")
     except SecretStoreUnavailableError:
         _emit_secret_store_self_test_result({
             "ok": False,
@@ -8716,6 +8757,10 @@ def _run_secret_store_self_test(result_file: str | None = None) -> int:
     if not _emit_secret_store_self_test_result({
         "ok": True,
         "providers": list(SUPPORTED_SECRET_PROVIDERS),
+        "config_contains_provider_keys": False,
+        "restart_read": True,
+        "provider_connections_ready": True,
+        "delete_verified": True,
     }, result_file):
         return 1
     return 0
