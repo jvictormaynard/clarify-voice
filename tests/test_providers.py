@@ -1687,6 +1687,47 @@ class WorkflowAppBridgeTests(unittest.TestCase):
             [call("translated text"), call("raw transcript")],
         )
 
+    def test_voice_translation_success_callback_ignores_superseded_operation(self):
+        deferred = []
+        states = []
+        results = []
+        runtime = SimpleNamespace(operation_id=2)
+        service = SimpleNamespace(
+            state=SimpleNamespace(phase=app.WorkflowPhase.READY))
+        harness = SimpleNamespace(
+            _closing=False,
+            _voice_translation_runtime=runtime,
+            _workflow_service=service,
+            _show_success_then=lambda callback: deferred.append(callback),
+            _set_state=lambda *args, **kwargs: states.append((args, kwargs)),
+            _show_result=results.append,
+            _t=lambda key: key,
+            after=lambda _delay, callback: callback(),
+            app_state="success",
+        )
+        result = SimpleNamespace(
+            published_text="old translation",
+            publication=app.VoiceTranslationPublication.PASTED,
+        )
+
+        app.App._on_voice_translation_state(
+            harness,
+            app.VoiceTranslationRuntimeState(
+                app.VoiceTranslationPhase.COMPLETED,
+                2,
+                workflow_state=result,
+            ),
+        )
+        self.assertEqual(len(deferred), 1)
+
+        runtime.operation_id = 3
+        service.state.phase = app.WorkflowPhase.RECORDING
+        harness.app_state = "recording"
+        deferred[0]()
+
+        self.assertEqual(states, [])
+        self.assertEqual(results, [])
+
     def test_dictation_uses_platform_copy_and_paste_on_non_windows(self):
         target = app.SelectionTarget(77, "editor.exe")
         with patch.object(app, "IS_WIN", False), \
