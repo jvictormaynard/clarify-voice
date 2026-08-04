@@ -99,6 +99,16 @@ _SENSITIVE_FIELD_PATTERN = re.compile(
     r"(?is)(['\"]?(?:api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|credential|password|secret|token)['\"]?\s*[:=]\s*)"
     r"(?:(['\"])((?:\\.|(?!\2).)*?)\2|([^,;&}\n]+))")
+# Some providers serialize an error body inside another string and escape the
+# mapping's quotes (for example, ``body="{\"password\":\"secret\"}"``).
+# The ordinary field matcher cannot see the key/value delimiters in that form.
+# Keep the escapes intact while replacing the value so the resulting error
+# remains readable and, more importantly, never persists the credential.
+_SENSITIVE_ESCAPED_FIELD_PATTERN = re.compile(
+    r"(?is)(\\?['\"]?(?:api[_ -]?key|access[_ -]?token|"
+    r"client[_ -]?secret|credential|password|secret|token)"
+    r"\\?['\"]?\s*[:=]\s*)"
+    r"((?:\\)?['\"])((?:\\.|(?!\2).)*?)\2")
 _SENSITIVE_BEARER_PATTERN = re.compile(r"(?i)(bearer)\s+([^\s,;&]+)")
 _SENSITIVE_QUERY_PATTERN = re.compile(
     r"(?i)([?&](?:api[_-]?key|access[_-]?token|token)=)[^&#\s]+")
@@ -122,6 +132,8 @@ def _safe_error(value: str | None) -> str | None:
     if not value:
         return None
     sanitized = value
+    sanitized = _SENSITIVE_ESCAPED_FIELD_PATTERN.sub(
+        _redact_field_match, sanitized)
     sanitized = _SENSITIVE_AUTH_PATTERN.sub(_redact_field_match, sanitized)
     sanitized = _SENSITIVE_FIELD_PATTERN.sub(_redact_field_match, sanitized)
     sanitized = _SENSITIVE_BEARER_PATTERN.sub(r"\1 <redacted>", sanitized)
