@@ -881,6 +881,33 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertFalse(candidate.exists())
 
+    def test_older_valid_snapshot_does_not_replace_corrupt_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            path.write_text('{"schema_version": 1,', encoding="utf-8")
+            candidate = root / ".history.json.older.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [HistoryRecord(
+                    raw_text="stale", timestamp=NOW,
+                    provider="openai", model="gpt-test").to_mapping()],
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime - 1, target_mtime - 1))
+            before = path.read_bytes()
+
+            with self.assertRaises(HistoryStoreError):
+                HistoryStore(
+                    path,
+                    enabled=True,
+                    retention_days=None,
+                    clock=fixed_clock,
+                ).list_records()
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(candidate.exists())
+
     def test_corrupt_primary_fails_closed_and_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"

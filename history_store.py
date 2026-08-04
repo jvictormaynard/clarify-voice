@@ -782,6 +782,22 @@ class HistoryStore:
             if item not in supported_temporary
         ]
 
+        if current is None and primary_state == "malformed" and supported_temporary:
+            try:
+                primary_mtime = self.path.stat().st_mtime
+            except OSError as error:
+                raise HistoryStoreError(
+                    "The primary history mtime could not be read"
+                ) from error
+            newest_supported_mtime = max(
+                item[0] for item in supported_temporary
+            )
+            if newest_supported_mtime <= primary_mtime:
+                raise HistoryStoreError(
+                    "The interrupted history snapshot is not newer than "
+                    "the corrupt primary"
+                )
+
         if current is not None:
             current_version = _payload_version(current)
             if current_version is None:
