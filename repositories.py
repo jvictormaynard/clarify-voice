@@ -667,6 +667,37 @@ def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
             # fields receive deterministic defaults and the migration remains
             # idempotent when called again.
             route = dict(workflows[scope])
+            # A v1 route may override the shared legacy provider while
+            # omitting its model.  Canonicalize route aliases before filling
+            # missing fields, then derive that model from the route provider;
+            # otherwise a Groq route could inherit OpenAI's text model and
+            # fail only when the workflow is first used.
+            for canonical, aliases in (
+                    ("provider_id", ("provider",)),
+                    ("model_id", ("model",)),
+                    ("custom_endpoint", ("endpoint", "base_url"))):
+                if canonical not in route:
+                    for alias in aliases:
+                        if alias in route:
+                            route[canonical] = route[alias]
+                            break
+            route_provider = route.get("provider_id", default["provider_id"])
+            if not isinstance(route_provider, str) or not route_provider.strip():
+                route_provider = default["provider_id"]
+            route_provider = route_provider.strip().lower()
+            route_model = str(route.get("model_id", "") or "").strip()
+            if not route_model:
+                try:
+                    metadata = PROVIDER_REGISTRY.describe(route_provider)
+                    route["model_id"] = (
+                        metadata.default_audio_model
+                        if scope == WorkflowScope.TRANSCRIPTION.value
+                        else metadata.default_text_model
+                    )
+                except (ProviderError, KeyError, ValueError):
+                    # Preserve the legacy fallback for unknown providers; the
+                    # normal validation boundary will report that bad route.
+                    pass
             for key, value in default.items():
                 route.setdefault(key, value)
             workflows[scope] = route

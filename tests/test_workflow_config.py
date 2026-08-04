@@ -20,6 +20,7 @@ from repositories import (
     CONFIG_SCHEMA_VERSION,
     AppConfig,
     LocalConfigRepository,
+    WorkflowConfig,
     WorkflowConfigurationError,
     WorkflowRoute,
     WorkflowScope,
@@ -31,6 +32,47 @@ from secret_store import MemorySecretStore
 
 
 class WorkflowConfigurationTests(unittest.TestCase):
+    def test_migration_route_model_default_uses_route_provider(self):
+        migrated = migrate_config_payload({
+            "schema_version": 1,
+            "refinement_provider": "openai",
+            "refinement_model": "gpt-4o-mini",
+            "workflows": {
+                "translation": {"provider_id": "groq"},
+            },
+        })
+
+        route = migrated["workflows"]["translation"]
+        self.assertEqual(route["provider_id"], "groq")
+        self.assertEqual(route["model_id"], "llama-3.3-70b-versatile")
+
+    def test_workflow_config_from_mapping_normalizes_all_scope_aliases(self):
+        workflows = WorkflowConfig.from_mapping({
+            "dictation": {
+                "provider_id": "groq",
+                "model_id": "whisper-large-v3",
+            },
+            "text_refinement": {
+                "provider_id": "groq",
+                "model_id": "llama-3.3-70b-versatile",
+            },
+            "local-refinement": {
+                "provider_id": "openai",
+                "model_id": "gpt-4o-mini",
+            },
+        })
+
+        self.assertEqual(workflows.transcription.provider_id, "groq")
+        self.assertEqual(workflows.refinement.provider_id, "groq")
+        self.assertEqual(workflows.local_asr_refinement.provider_id, "openai")
+
+        invalid = WorkflowConfig.from_mapping({
+            "dictation": {"provider_id": "not-registered"},
+        })
+        self.assertEqual(invalid.transcription.provider_id, "not-registered")
+        with self.assertRaises(WorkflowConfigurationError):
+            validate_workflow_config(invalid)
+
     def test_migration_splits_legacy_refinement_into_idempotent_scopes(self):
         legacy = {
             "transcription_provider": "groq",

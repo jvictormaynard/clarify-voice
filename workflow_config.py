@@ -264,16 +264,33 @@ class WorkflowConfig(Mapping[str, WorkflowRoute]):
         fallback = defaults or cls()
         if not isinstance(values, Mapping):
             return fallback
+        # Accept every documented legacy scope alias at this public parsing
+        # boundary, not only in the repository's merge path.  Keep an
+        # explicitly canonical scope authoritative when both spellings are
+        # present so callers cannot accidentally have a requested route
+        # replaced by a fallback or an alias encountered later in the map.
+        canonical_values: dict[str, Any] = {}
+        alias_values: dict[str, Any] = {}
+        for raw_scope, route in values.items():
+            normalized = normalize_workflow_scope(raw_scope)
+            if normalized not in WORKFLOW_SCOPES:
+                continue
+            raw_value = (
+                raw_scope.value
+                if isinstance(raw_scope, WorkflowScope)
+                else str(raw_scope or "")
+            ).strip().lower()
+            if raw_value == normalized:
+                canonical_values[normalized] = route
+            else:
+                alias_values[normalized] = route
         routes = {
             scope: WorkflowRoute.from_mapping(
-                values.get(scope), default=fallback[scope]
+                canonical_values.get(scope, alias_values.get(scope)),
+                default=fallback[scope],
             )
             for scope in WORKFLOW_SCOPES
         }
-        if "refinement" not in values and "cleanup" in values:
-            routes[WorkflowScope.REFINEMENT.value] = WorkflowRoute.from_mapping(
-                values.get("cleanup"), default=fallback.refinement
-            )
         return cls(**routes)
 
     def __getitem__(self, scope: str) -> WorkflowRoute:
