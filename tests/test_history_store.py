@@ -146,6 +146,29 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertNotIn("digest-secret", persisted)
             self.assertNotIn("aws-secret", persisted)
 
+    def test_quoted_authorization_boundaries_do_not_end_redaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            store.add(
+                status="error",
+                error=(
+                    'Authorization: Digest uri="/callback?a=1&b=2", '
+                    'response="quoted-secret"; qop=auth'
+                ),
+            )
+
+            error = store.list_records()[0].error
+            self.assertEqual(
+                error,
+                "Authorization: Digest <redacted>; qop=auth",
+            )
+            self.assertNotIn("quoted-secret", error)
+
     def test_generic_token_and_credential_fields_are_redacted(self):
         with tempfile.TemporaryDirectory() as directory:
             store = HistoryStore(
@@ -913,6 +936,31 @@ class HistoryStoreTests(unittest.TestCase):
 
             self.assertEqual([item.raw_text for item in records], ["recovered"])
             self.assertTrue(path.exists())
+            self.assertFalse(candidate.exists())
+
+    def test_newer_valid_snapshot_recovers_non_mapping_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "history.json"
+            path.write_text("[]", encoding="utf-8")
+            candidate = root / ".history.json.newer.tmp"
+            candidate.write_text(json.dumps({
+                "schema_version": HISTORY_SCHEMA_VERSION,
+                "records": [HistoryRecord(
+                    raw_text="recovered", timestamp=NOW,
+                    provider="openai", model="gpt-test").to_mapping()],
+            }), encoding="utf-8")
+            target_mtime = path.stat().st_mtime
+            os.utime(candidate, (target_mtime + 1, target_mtime + 1))
+
+            records = HistoryStore(
+                path,
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            ).list_records()
+
+            self.assertEqual([item.raw_text for item in records], ["recovered"])
             self.assertFalse(candidate.exists())
 
     def test_older_valid_snapshot_does_not_replace_corrupt_primary(self):

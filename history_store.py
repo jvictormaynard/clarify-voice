@@ -94,8 +94,7 @@ def _format_timestamp(value: datetime) -> str:
 
 _SENSITIVE_AUTH_PATTERN = re.compile(
     r"(?is)(['\"]?(?:authorization|bearer)['\"]?\s*[:=]\s*"
-    r"(?:[a-z0-9_-]+\s+)?)(?:(['\"])((?:\\.|(?!\2).)*?)\2|"
-    r"([^;&}\n]+))")
+    r"(?:[a-z0-9_-]+\s+)?)")
 _SENSITIVE_FIELD_PATTERN = re.compile(
     r"(?is)(['\"]?(?:api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|credential|password|secret|token)['\"]?\s*[:=]\s*)"
@@ -124,6 +123,44 @@ def _redact_field_match(match: re.Match[str]) -> str:
     if quote is not None:
         return f"{prefix}{quote}<redacted>{quote}"
     return f"{prefix}<redacted>"
+
+
+def _auth_value_end(value: str, start: int = 0) -> int:
+    """Find a safe auth boundary while respecting quoted parameters."""
+
+    quote: str | None = None
+    escaped = False
+    for index in range(start, len(value)):
+        character = value[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in "'\"":
+            quote = character
+        elif character in ";&}":
+            return index
+    return len(value)
+
+
+def _redact_auth_headers(value: str) -> str:
+    pieces: list[str] = []
+    cursor = 0
+    search_at = 0
+    while True:
+        match = _SENSITIVE_AUTH_PATTERN.search(value, search_at)
+        if match is None:
+            pieces.append(value[cursor:])
+            return "".join(pieces)
+        end = _auth_value_end(value, match.end())
+        pieces.append(value[cursor:match.start()])
+        pieces.append(f"{match.group(1)}<redacted>")
+        cursor = end
+        search_at = end
 
 
 def _escaped_field_value_end(
@@ -247,7 +284,7 @@ def _safe_error(value: str | None) -> str | None:
         return None
     sanitized = value
     sanitized = _redact_escaped_fields(sanitized)
-    sanitized = _SENSITIVE_AUTH_PATTERN.sub(_redact_field_match, sanitized)
+    sanitized = _redact_auth_headers(sanitized)
     sanitized = _SENSITIVE_FIELD_PATTERN.sub(_redact_field_match, sanitized)
     sanitized = _SENSITIVE_BEARER_PATTERN.sub(r"\1 <redacted>", sanitized)
     sanitized = _SENSITIVE_QUERY_PATTERN.sub(r"\1<redacted>", sanitized)
@@ -731,7 +768,12 @@ class HistoryStore:
     def _recover_interrupted_write_locked(self) -> dict[str, Any] | None:
         primary_exists = self._primary_exists_for_recovery()
         current, primary_state, primary_error = _read_json_mapping_state(self.path)
-        if current is None and primary_exists and primary_state != "malformed":
+        corrupt_primary_states = {"malformed", "non_mapping"}
+        if (
+            current is None
+            and primary_exists
+            and primary_state not in corrupt_primary_states
+        ):
             # A readable primary must never be replaced merely because a
             # transient read failed; strict mode keeps this invocation closed.
             if primary_state == "io":
@@ -782,7 +824,11 @@ class HistoryStore:
             if item not in supported_temporary
         ]
 
-        if current is None and primary_state == "malformed" and supported_temporary:
+        if (
+            current is None
+            and primary_state in corrupt_primary_states
+            and supported_temporary
+        ):
             try:
                 primary_mtime = self.path.stat().st_mtime
             except OSError as error:
