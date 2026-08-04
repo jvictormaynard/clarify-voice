@@ -70,6 +70,8 @@ MAX_MAX_ATTEMPTS = 3
 DEFAULT_MAX_AUDIO_BYTES = 256 * 1024 * 1024
 MAX_MAX_AUDIO_BYTES = 1024 * 1024 * 1024
 _SNAPSHOT_CHUNK_BYTES = 1024 * 1024
+DEFAULT_RETRY_DELAY_SECONDS = 0.25
+MAX_RETRY_DELAY_SECONDS = 4.0
 
 
 def _audio_extension(path: Path) -> str:
@@ -360,6 +362,24 @@ def _retryable_error(error: BaseException) -> bool:
         ServiceUnavailableError,
         RateLimitError,
     ))
+
+
+def _retry_delay_seconds(
+        error: BaseException,
+        attempt: int,
+        base_seconds: float,
+        ) -> float:
+    """Return a bounded delay, preferring provider-announced retry timing."""
+
+    announced = getattr(error, "retry_after_seconds", None)
+    if announced is None:
+        announced = getattr(error, "retry_delay_seconds", None)
+    try:
+        delay = float(announced) if announced is not None else float(
+            base_seconds * (2 ** max(0, attempt - 1)))
+    except (TypeError, ValueError, OverflowError):
+        delay = float(base_seconds * (2 ** max(0, attempt - 1)))
+    return min(MAX_RETRY_DELAY_SECONDS, max(0.0, delay))
 
 
 def _selection_request(
@@ -722,6 +742,16 @@ class AudioBatchJob:
                         if (attempts >= self._service.max_attempts
                                 or not _retryable_error(error)):
                             break
+                        delay = _retry_delay_seconds(
+                            error,
+                            attempts,
+                            self._service.retry_delay_seconds,
+                        )
+                        if token.wait(delay):
+                            return replace(
+                                current, status=AudioFileStatus.CANCELLED,
+                                attempts=attempts,
+                                error="File processing was cancelled")
         except BaseException as error:
             last_error = error
             if (token.cancelled or self._cancel_token.cancelled
@@ -745,6 +775,7 @@ class AudioFileBatchService:
         max_files: int = DEFAULT_MAX_FILES,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         max_audio_bytes: int = DEFAULT_MAX_AUDIO_BYTES,
+        retry_delay_seconds: float = DEFAULT_RETRY_DELAY_SECONDS,
         temp_root: Path | None = None,
     ):
         if not 1 <= int(max_workers) <= MAX_MAX_WORKERS:
@@ -759,12 +790,21 @@ class AudioFileBatchService:
         if not 1 <= int(max_audio_bytes) <= MAX_MAX_AUDIO_BYTES:
             raise AudioBatchConfigurationError(
                 "max_audio_bytes must be between 1 byte and 1 GiB")
+        try:
+            retry_delay = float(retry_delay_seconds)
+        except (TypeError, ValueError):
+            raise AudioBatchConfigurationError(
+                "retry_delay_seconds must be a finite value between 0 and 4 seconds")
+        if not 0.0 <= retry_delay <= MAX_RETRY_DELAY_SECONDS:
+            raise AudioBatchConfigurationError(
+                "retry_delay_seconds must be between 0 and 4 seconds")
         self.gateway = gateway
         self.converter = converter or SoxAudioConverter()
         self.max_workers = int(max_workers)
         self.max_files = int(max_files)
         self.max_attempts = int(max_attempts)
         self.max_audio_bytes = int(max_audio_bytes)
+        self.retry_delay_seconds = retry_delay
         self.temp_root = Path(temp_root) if temp_root is not None else None
 
     def start(

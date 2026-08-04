@@ -75,10 +75,13 @@ removed by the `TemporaryDirectory` context even on cancellation or provider
 failure.
 
 Automatic attempts default to one. Callers may set `max_attempts` to at most
-three; only explicitly retryable/transient typed errors are retried. The
-provider HTTP layer remains responsible for its own safe request retry policy;
-permanent quota exhaustion is never retried, and callers should keep one
-attempt when a provider operation could be charged again.
+three; only explicitly retryable/transient typed errors are retried. Retries
+use bounded exponential backoff and wait cooperatively for cancellation,
+preferring a provider-announced `retry_after_seconds`/`retry_delay_seconds`
+when an adapter exposes one. The provider HTTP layer remains responsible for
+its own safe request retry policy; permanent quota exhaustion is never retried,
+and callers should keep one attempt when a provider operation could be charged
+again.
 
 The service accepts `Path`-like local values only. URL-looking values are
 rejected before any network-capable code is reached. There is no URL download,

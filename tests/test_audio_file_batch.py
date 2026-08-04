@@ -264,6 +264,59 @@ class AudioFileBatchTests(unittest.TestCase):
             self.assertEqual(result.files[0].attempts, 2)
             self.assertEqual(attempts, 2)
 
+    def test_retry_backoff_prefers_announced_delay(self):
+        attempts = 0
+        call_times = []
+
+        class AnnouncedRetryGateway:
+            def transcribe(self, request, selection, cancel_token):
+                nonlocal attempts
+                attempts += 1
+                call_times.append(time.monotonic())
+                if attempts == 1:
+                    error = RetryableAudioBatchError("try again")
+                    error.retry_after_seconds = 0.03
+                    raise error
+                return TranscriptionResult("ok", selection.provider_id, selection.model)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"fixture")
+            result = AudioFileBatchService(
+                AnnouncedRetryGateway(),
+                max_attempts=2,
+                retry_delay_seconds=0.001,
+            ).run([path], _selection())
+            self.assertEqual(result.files[0].status, AudioFileStatus.SUCCEEDED)
+        self.assertEqual(attempts, 2)
+        self.assertGreaterEqual(call_times[1] - call_times[0], 0.02)
+
+    def test_retry_backoff_is_cancelled_before_next_attempt(self):
+        first_attempt = threading.Event()
+        attempts = 0
+
+        class BlockingRetryGateway:
+            def transcribe(self, request, selection, cancel_token):
+                nonlocal attempts
+                attempts += 1
+                first_attempt.set()
+                raise RetryableAudioBatchError("try again")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"fixture")
+            job = AudioFileBatchService(
+                BlockingRetryGateway(),
+                max_attempts=3,
+                retry_delay_seconds=1.0,
+            ).start([path], _selection())
+            self.assertTrue(first_attempt.wait(2))
+            job.cancel()
+            result = job.wait(3)
+            self.assertTrue(result.cancelled)
+            self.assertEqual(attempts, 1)
+            self.assertEqual(result.files[0].status, AudioFileStatus.CANCELLED)
+
     def test_retries_reuse_one_immutable_audio_snapshot(self):
         requests = []
 
