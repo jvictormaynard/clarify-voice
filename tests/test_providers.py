@@ -1525,9 +1525,9 @@ class WorkflowClipboardAdapterTests(unittest.TestCase):
 class WorkflowAppBridgeTests(unittest.TestCase):
     def test_voice_translation_hotkey_preserves_hidden_origin(self):
         target = app.SelectionTarget(77, "editor.exe")
+        observed_hidden_state = []
         runtime = SimpleNamespace(
             active=False,
-            start=Mock(return_value=True),
         )
         harness = SimpleNamespace(
             _voice_translation_runtime=runtime,
@@ -1543,10 +1543,17 @@ class WorkflowAppBridgeTests(unittest.TestCase):
             _closing=False,
         )
 
+        def start(_target):
+            observed_hidden_state.append(harness._was_hidden_before_recording)
+            return True
+
+        runtime.start = Mock(side_effect=start)
+
         with patch.object(app, "IS_WIN", True):
             app.App._voice_translation_hotkey(harness)
 
         self.assertTrue(harness._was_hidden_before_recording)
+        self.assertEqual(observed_hidden_state, [True])
         runtime.start.assert_called_once_with(target)
 
     def test_voice_translation_ignores_stale_intermediate_events(self):
@@ -1558,11 +1565,19 @@ class WorkflowAppBridgeTests(unittest.TestCase):
             after=lambda _delay, callback: callback(),
         )
 
-        app.App._on_voice_translation_state(
-            harness,
-            app.VoiceTranslationRuntimeState(
-                app.VoiceTranslationPhase.TRANSCRIBING, 1),
-        )
+        for phase in (
+            app.VoiceTranslationPhase.RECORDING,
+            app.VoiceTranslationPhase.TRANSCRIBING,
+            app.VoiceTranslationPhase.TRANSLATING,
+            app.VoiceTranslationPhase.COMPLETED,
+            app.VoiceTranslationPhase.FAILED,
+            app.VoiceTranslationPhase.CANCELLED,
+        ):
+            with self.subTest(phase=phase):
+                app.App._on_voice_translation_state(
+                    harness,
+                    app.VoiceTranslationRuntimeState(phase, 1),
+                )
 
         set_state.assert_not_called()
 

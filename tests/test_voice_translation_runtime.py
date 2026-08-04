@@ -33,6 +33,7 @@ class _Recording:
         self.started = False
         self.stopped = False
         self.completed = False
+        self.failed = None
         self.cancelled = False
 
     def start(self):
@@ -50,7 +51,8 @@ class _Recording:
         self.completed = True
         return True
 
-    def fail(self, _error):
+    def fail(self, error):
+        self.failed = error
         return True
 
     def request_cancel(self):
@@ -200,8 +202,11 @@ class VoiceTranslationRuntimeTests(unittest.TestCase):
 
         self.assertFalse(runtime.active)
         self.assertEqual(self.events[-1].phase, VoiceTranslationPhase.FAILED)
+        self.assertIsNone(self.events[-1].workflow_state)
         self.assertEqual(
             self.events[-1].error_code, "MicrophoneUnavailableError")
+        self.assertIsInstance(recording.failed, MicrophoneUnavailableError)
+        self.assertEqual(self.provider.requests, [])
 
 
 if __name__ == "__main__":
