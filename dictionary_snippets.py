@@ -11,7 +11,9 @@ bounded snippet expander after a result is received.
 from __future__ import annotations
 
 import copy
+from array import array
 from dataclasses import dataclass, field, replace
+import io
 import json
 import os
 from pathlib import Path
@@ -419,10 +421,12 @@ class _CanonicalText:
     """Canonical text plus an index map back to the original string."""
 
     value: str
-    original_to_normalized: tuple[int, ...]
-    normalized_ends: tuple[int, ...]
-    cluster_starts: frozenset[int]
-    cluster_boundaries: frozenset[int]
+    original_to_normalized: array
+    normalized_ends: array
+    # Byte arrays keep the one-million-character bound compact.  A Python set
+    # of one million integer objects would otherwise dominate the process.
+    cluster_starts: bytearray
+    cluster_boundaries: bytearray
 
 
 def _canonical_cluster_end(text: str, start: int) -> int:
@@ -461,11 +465,11 @@ def _canonical_text(text: str, *, casefold: bool) -> _CanonicalText:
     leave a combining accent behind.  Case folding is applied after NFC and
     receives the same map; this covers expansions such as ``ß`` -> ``ss``.
     """
-    normalized_parts: list[str] = []
-    original_to_normalized = [0] * (len(text) + 1)
-    normalized_ends: list[int] = []
-    cluster_starts: set[int] = set()
-    cluster_boundaries: set[int] = set()
+    normalized_parts = io.StringIO()
+    original_to_normalized = array("I")
+    normalized_ends = array("I")
+    cluster_starts = bytearray(len(text) + 1)
+    cluster_boundaries = bytearray(1)
     original_index = 0
     normalized_index = 0
 
@@ -476,21 +480,22 @@ def _canonical_text(text: str, *, casefold: bool) -> _CanonicalText:
             "NFC", text[cluster_start:original_index])
         if casefold:
             cluster = cluster.casefold()
-        cluster_starts.add(cluster_start)
-        for index in range(cluster_start, original_index):
-            original_to_normalized[index] = normalized_index
-        normalized_parts.append(cluster)
+        cluster_starts[cluster_start] = 1
+        original_to_normalized.extend(array("I", [normalized_index]) * (
+            original_index - cluster_start))
+        normalized_parts.write(cluster)
         normalized_index += len(cluster)
-        cluster_boundaries.add(normalized_index)
-        normalized_ends.extend([original_index] * len(cluster))
+        cluster_boundaries.extend(b"\0" * len(cluster))
+        cluster_boundaries[normalized_index] = 1
+        normalized_ends.extend(array("I", [original_index]) * len(cluster))
 
-    original_to_normalized[len(text)] = normalized_index
+    original_to_normalized.append(normalized_index)
     return _CanonicalText(
-        value="".join(normalized_parts),
-        original_to_normalized=tuple(original_to_normalized),
-        normalized_ends=tuple(normalized_ends),
-        cluster_starts=frozenset(cluster_starts),
-        cluster_boundaries=frozenset(cluster_boundaries),
+        value=normalized_parts.getvalue(),
+        original_to_normalized=original_to_normalized,
+        normalized_ends=normalized_ends,
+        cluster_starts=cluster_starts,
+        cluster_boundaries=cluster_boundaries,
     )
 
 
@@ -569,13 +574,14 @@ class DictionarySnippetService:
             )
         if not candidates or not text:
             return text
+        required_modes = {snippet.case_sensitive for _index, snippet in candidates}
         canonical = {
-            True: _canonical_text(text, casefold=False),
-            False: _canonical_text(text, casefold=True),
+            mode: _canonical_text(text, casefold=not mode)
+            for mode in required_modes
         }
         tries = {
-            True: _build_snippet_trie(candidates, case_sensitive=True),
-            False: _build_snippet_trie(candidates, case_sensitive=False),
+            mode: _build_snippet_trie(candidates, case_sensitive=mode)
+            for mode in required_modes
         }
 
         output: list[str] = []
@@ -585,9 +591,9 @@ class DictionarySnippetService:
             replacement: str | None = None
             consumed = 0
             matches: list[tuple[int, int, Snippet]] = []
-            for case_sensitive in (True, False):
+            for case_sensitive in required_modes:
                 normalized = canonical[case_sensitive]
-                if index not in normalized.cluster_starts:
+                if not normalized.cluster_starts[index]:
                     continue
                 normalized_start = normalized.original_to_normalized[index]
                 node = tries[case_sensitive]
@@ -599,8 +605,7 @@ class DictionarySnippetService:
                     cursor += 1
                     # Do not match only part of an NFC/casefold expansion. The
                     # complete original cluster must be consumed.
-                    if (node.rules
-                            and cursor in normalized.cluster_boundaries):
+                    if (node.rules and normalized.cluster_boundaries[cursor]):
                         end = normalized.normalized_ends[cursor - 1]
                         if _has_word_boundaries(text, index, end):
                             for rule_index, snippet in node.rules:
