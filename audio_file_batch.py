@@ -78,6 +78,30 @@ def _audio_extension(path: Path) -> str:
     return Path(path.name.rstrip()).suffix.casefold()
 
 
+_SOX_INPUT_TYPES = {
+    ".aif": "aiff",
+    ".aiff": "aiff",
+    ".au": "au",
+    ".flac": "flac",
+    ".oga": "ogg",
+    ".ogg": "ogg",
+    ".wav": "wav",
+    ".wv": "wavpack",
+}
+
+
+def _sox_input_type(path: Path) -> str:
+    """Return SoX's explicit type for an allowlisted source path."""
+
+    extension = _audio_extension(path)
+    try:
+        return _SOX_INPUT_TYPES[extension]
+    except KeyError as error:
+        label = extension or "[none]"
+        raise UnsupportedAudioFormatError(
+            f"Unsupported audio format '{label}'") from error
+
+
 class AudioBatchError(RuntimeError):
     """Base class for deterministic, user-facing batch failures."""
 
@@ -239,6 +263,7 @@ class SoxAudioConverter:
             raise AudioBatchCancelledError("Audio conversion was cancelled")
         args = [
             self.executable,
+            "-t", _sox_input_type(source),
             str(source),
             "-r", "16000",
             "-c", "1",

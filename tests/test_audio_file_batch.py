@@ -379,6 +379,35 @@ class AudioFileBatchTests(unittest.TestCase):
 
 
 class AudioConverterTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "Windows trims trailing filename spaces")
+    def test_converter_passes_normalized_source_type_to_sox(self):
+        captured = {}
+
+        class CompletedProcess:
+            returncode = 0
+
+            def poll(self):
+                return 0
+
+            def communicate(self):
+                return b"", b""
+
+        def popen(args, **kwargs):
+            captured["args"] = args
+            Path(args[-1]).write_bytes(b"wav")
+            return CompletedProcess()
+
+        converter = SoxAudioConverter(popen=popen)
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "recording.flac "
+            destination = Path(directory) / "output.wav"
+            source.write_bytes(b"fixture")
+            self.assertEqual(
+                converter.convert(source, destination, CancellationToken()),
+                destination,
+            )
+        self.assertEqual(captured["args"][1:4], ["-t", "flac", str(source)])
+
     def test_kill_fallback_waits_for_process_before_cleanup(self):
         class KilledProcess:
             def __init__(self):
