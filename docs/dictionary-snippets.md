@@ -54,13 +54,16 @@ entry ordering.
 ## Matching behavior
 
 `DictionarySnippetService.expand()` scans left-to-right and only considers
-enabled snippets.  A trigger must be separated from adjacent Unicode
-letters/numbers and `_`; punctuation at either side is allowed.  Matching is
-case-insensitive by default, or exact when `case_sensitive` is true.  When
-triggers overlap, the longest trigger wins and equal-length triggers retain
-the order in the file.  The input is bounded to one million characters by
-default and the result is produced without executing replacement text as
-code; expanded output is subject to the same configured character bound.
+enabled snippets.  Input and triggers use canonical Unicode NFC matching, so
+precomposed and decomposed forms (for example `café` and `cafe\u0301`) behave
+the same while the original combining sequence is consumed as one unit.  A
+trigger must be separated from adjacent Unicode letters/numbers and `_`;
+punctuation at either side is allowed.  Matching is case-insensitive by
+default, or exact when `case_sensitive` is true.  When triggers overlap, the
+longest trigger wins and equal-length triggers retain the order in the file.
+The input is bounded to one million characters by default and the result is
+produced without executing replacement text as code; expanded output is
+subject to the same configured character bound.
 
 Enabled dictionary entries produce an optional, provider-neutral transcription
 context.  It is bounded to 4096 characters and keeps the stored order.  Cloud

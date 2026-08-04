@@ -385,25 +385,60 @@ def _snippet_sort_key(item: tuple[int, Snippet]) -> tuple[int, int]:
     return (-len(snippet.trigger.casefold()), index)
 
 
-def _casefold_match_end(text: str, start: int, trigger: str) -> int | None:
-    """Find the original-text end for a casefolded trigger.
+@dataclass(frozen=True)
+class _CanonicalText:
+    """Canonical text plus an index map back to the original string."""
 
-    Unicode case folding is not one code point in, one code point out:
-    ``"ß".casefold() == "ss"``.  Building the folded prefix incrementally
-    keeps the consumed span correct without using a lossy regex transform.
+    value: str
+    original_to_normalized: tuple[int, ...]
+    normalized_ends: tuple[int, ...]
+    cluster_starts: frozenset[int]
+    cluster_boundaries: frozenset[int]
+
+
+def _canonical_text(text: str, *, casefold: bool) -> _CanonicalText:
+    """Build NFC text while preserving original cluster consumption.
+
+    Normalizing each base-plus-combining-mark cluster lets a trigger such as
+    ``café`` match decomposed provider output (``cafe\\u0301``).  Every
+    normalized code point maps to the full original cluster, so a match cannot
+    leave a combining accent behind.  Case folding is applied after NFC and
+    receives the same map; this covers expansions such as ``ß`` -> ``ss``.
     """
-    target = trigger.casefold()
-    folded = ""
-    end = start
-    while end < len(text) and len(folded) <= len(target):
-        piece = text[end].casefold()
-        folded += piece
-        end += 1
-        if folded == target:
-            return end
-        if not target.startswith(folded):
-            return None
-    return None
+    normalized_parts: list[str] = []
+    original_to_normalized = [0] * (len(text) + 1)
+    normalized_ends: list[int] = []
+    cluster_starts: set[int] = set()
+    cluster_boundaries: set[int] = set()
+    original_index = 0
+    normalized_index = 0
+
+    while original_index < len(text):
+        cluster_start = original_index
+        original_index += 1
+        while (original_index < len(text)
+               and unicodedata.category(text[original_index]).startswith("M")):
+            original_index += 1
+        cluster = unicodedata.normalize(
+            "NFC", text[cluster_start:original_index])
+        if casefold:
+            cluster = cluster.casefold()
+        cluster_starts.add(cluster_start)
+        for index in range(cluster_start, original_index):
+            original_to_normalized[index] = normalized_index
+        normalized_parts.append(cluster)
+        normalized_index += len(cluster)
+        cluster_boundaries.add(normalized_index)
+        normalized_ends.extend([original_index] * len(cluster))
+
+    original_to_normalized[len(text)] = normalized_index
+    return _CanonicalText(
+        value="".join(normalized_parts),
+        original_to_normalized=tuple(original_to_normalized),
+        normalized_ends=tuple(normalized_ends),
+        cluster_starts=frozenset(cluster_starts),
+        cluster_boundaries=frozenset(cluster_boundaries),
+    )
 
 
 class DictionarySnippetService:
@@ -481,6 +516,10 @@ class DictionarySnippetService:
             )
         if not candidates or not text:
             return text
+        canonical = {
+            True: _canonical_text(text, casefold=False),
+            False: _canonical_text(text, casefold=True),
+        }
 
         output: list[str] = []
         output_length = 0
@@ -489,19 +528,21 @@ class DictionarySnippetService:
             replacement: str | None = None
             consumed = 0
             for _rule_index, snippet in candidates:
-                if snippet.case_sensitive:
-                    end = index + len(snippet.trigger)
-                    matches = (
-                        end <= len(text)
-                        and _has_word_boundaries(text, index, end)
-                        and text[index:end] == snippet.trigger
-                    )
-                else:
-                    end = _casefold_match_end(text, index, snippet.trigger)
-                    matches = (
-                        end is not None
-                        and _has_word_boundaries(text, index, end)
-                    )
+                if index not in canonical[snippet.case_sensitive].cluster_starts:
+                    continue
+                normalized = canonical[snippet.case_sensitive]
+                normalized_start = normalized.original_to_normalized[index]
+                trigger = (snippet.trigger if snippet.case_sensitive
+                           else snippet.trigger.casefold())
+                if not normalized.value.startswith(trigger, normalized_start):
+                    continue
+                normalized_end = normalized_start + len(trigger)
+                # Do not match only the first code point of a casefold/NFC
+                # expansion.  The complete original cluster must be consumed.
+                if normalized_end not in normalized.cluster_boundaries:
+                    continue
+                end = normalized.normalized_ends[normalized_end - 1]
+                matches = _has_word_boundaries(text, index, end)
                 if matches:
                     replacement = snippet.replacement
                     consumed = end - index

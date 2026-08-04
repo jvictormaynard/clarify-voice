@@ -128,12 +128,32 @@ class DictionarySnippetTests(unittest.TestCase):
             Snippet("meet me", "long"),
             Snippet("café", "coffee", case_sensitive=False),
             Snippet("straße", "street", case_sensitive=False),
+            Snippet("cafe", "base-only", case_sensitive=False),
         )))
 
         self.assertEqual(
-            service.expand("meet me, meet meeting café CAFÉ xmeet café-bar STRASSE"),
-            "long, short meeting coffee coffee xmeet coffee-bar street",
+            service.expand(
+                "meet me, meet meeting café CAFÉ xmeet café-bar STRASSE "
+                "cafe\u0301"),
+            "long, short meeting coffee coffee xmeet coffee-bar street coffee",
         )
+
+        base_only = DictionarySnippetService(self.repository)
+        base_only.replace(DictionarySnippets(snippets=(Snippet("cafe", "base"),)))
+        self.assertEqual(base_only.expand("cafe\u0301"), "cafe\u0301")
+
+    def test_casefold_expansions_do_not_match_only_part_of_a_cluster(self):
+        service = DictionarySnippetService(self.repository)
+        service.replace(DictionarySnippets(snippets=(Snippet("s", "letter"),)))
+
+        self.assertEqual(service.expand("ß"), "ß")
+
+        service.replace(DictionarySnippets(snippets=(
+            Snippet("s", "letter"),
+            Snippet("ß", "sharp-s"),
+        )))
+
+        self.assertEqual(service.expand("ß"), "sharp-s")
 
     def test_case_sensitive_and_disabled_rules_are_explicit(self):
         service = DictionarySnippetService(self.repository)
