@@ -6,6 +6,7 @@ from dataclasses import replace
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import app
@@ -774,6 +775,70 @@ class WorkflowOperationRoutingTests(unittest.TestCase):
         self.assertEqual(transcription.model_id, "whisper-large-v3")
         self.assertEqual(refinement.provider_id, "groq")
         self.assertEqual(refinement.model_id, "llama-3.3-70b-versatile")
+
+    def test_scoped_transcription_provider_passes_route_to_facade(self):
+        app.APP_CONFIG.update({
+            "transcription_provider": "gemini",
+            "workflows": {
+                "transcription": {
+                    "provider_id": "groq",
+                    "model_id": "whisper-large-v3",
+                    "prompt": "scoped transcription",
+                    "independent": True,
+                },
+            },
+        })
+        source = SimpleNamespace(
+            audio_path=Path("recording.wav"),
+            audio_bytes=b"audio",
+            cancel_token=None,
+        )
+        with patch.object(
+                app, "call_transcription_provider",
+                return_value="scoped transcript") as transcribe:
+            result = app.AppWorkflowProvider.transcribe(
+                source, "transcription", "en")
+
+        self.assertEqual(result.text, "scoped transcript")
+        self.assertEqual(result.provider_id, "groq")
+        self.assertEqual(result.model, "whisper-large-v3")
+        route = transcribe.call_args.kwargs["route"]
+        self.assertTrue(route.independent)
+        self.assertEqual(route.provider_id, "groq")
+        self.assertEqual(route.model_id, "whisper-large-v3")
+
+    def test_scoped_transcription_route_reaches_audio_adapter(self):
+        app.APP_CONFIG.update({
+            "transcription_provider": "gemini",
+            "gemini_api_key": "gemini-key",
+            "workflows": {
+                "transcription": {
+                    "provider_id": "groq",
+                    "model_id": "whisper-large-v3",
+                    "prompt": "scoped transcription",
+                    "independent": True,
+                },
+            },
+        })
+        route = app._workflow_route(WorkflowScope.TRANSCRIPTION)
+        captured = {}
+
+        def transcribe(provider, request, _connection, _cancel_token):
+            captured["provider"] = provider
+            captured["model"] = request.model
+            return SimpleNamespace(text="scoped transcript")
+
+        with patch.object(app.PROVIDER_REGISTRY, "transcribe", side_effect=transcribe), \
+                patch.object(app.DICTIONARY_SERVICE, "apply_context",
+                              side_effect=lambda request: request):
+            result = app.call_transcription_provider(
+                Path("recording.wav"), "transcription", "en", route=route)
+
+        self.assertEqual(result, "scoped transcript")
+        self.assertEqual(captured, {
+            "provider": "groq",
+            "model": "whisper-large-v3",
+        })
 
     def test_effective_route_summaries_omit_prompts_and_mark_execution(self):
         app.APP_CONFIG["workflows"] = {

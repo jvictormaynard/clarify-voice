@@ -3046,11 +3046,22 @@ def call_groq(
 def call_transcription_provider(
         audio_path: Path, mode: str, lang: str = "en",
         audio_bytes: bytes | None = None,
-        cancel_token: CancellationToken | None = None) -> str:
-    provider = str(APP_CONFIG.get("transcription_provider", "gemini"))
-    return _call_provider_audio(
-        provider, audio_path, mode, lang, audio_bytes=audio_bytes,
-        cancel_token=cancel_token)
+        cancel_token: CancellationToken | None = None,
+        route: WorkflowRoute | None = None) -> str:
+    # Recording/CLI callers retain the legacy selector behavior when no
+    # route is supplied.  Typed workflow callers pass their resolved route so
+    # the effective provider and model cannot be replaced by stale flat keys
+    # inside the lower-level adapter helper.
+    provider = (
+        route.provider_id if route is not None
+        else str(APP_CONFIG.get("transcription_provider", "gemini")))
+    call_kwargs = {
+        "audio_bytes": audio_bytes,
+        "cancel_token": cancel_token,
+    }
+    if route is not None:
+        call_kwargs["route"] = route
+    return _call_provider_audio(provider, audio_path, mode, lang, **call_kwargs)
 
 # ---------------------------------------------------------------------------
 # Recorder
@@ -4101,6 +4112,7 @@ class AppWorkflowProvider:
             language,
             audio_bytes=audio_source.audio_bytes,
             cancel_token=audio_source.cancel_token,
+            route=route,
         )
         if not text or text.startswith("[Error"):
             raise RuntimeError(text or "Transcription returned no text")
