@@ -20,6 +20,7 @@ from repositories import (
     CONFIG_SCHEMA_VERSION,
     AppConfig,
     LocalConfigRepository,
+    UnsupportedSchemaVersionError,
     WorkflowConfig,
     WorkflowConfigurationError,
     WorkflowRoute,
@@ -45,6 +46,21 @@ class WorkflowConfigurationTests(unittest.TestCase):
         route = migrated["workflows"]["translation"]
         self.assertEqual(route["provider_id"], "groq")
         self.assertEqual(route["model_id"], "llama-3.3-70b-versatile")
+
+    def test_migration_canonicalizes_scope_aliases_before_defaults(self):
+        migrated = migrate_config_payload({
+            "schema_version": 1,
+            "transcription_provider": "gemini",
+            "gemini_model": "gemini-2.5-flash",
+            "workflows": {
+                "dictation": {"provider_id": "groq"},
+            },
+        })
+
+        route = migrated["workflows"]["transcription"]
+        self.assertEqual(route["provider_id"], "groq")
+        self.assertEqual(route["model_id"], "whisper-large-v3-turbo")
+        self.assertNotIn("dictation", migrated["workflows"])
 
     def test_workflow_config_from_mapping_normalizes_all_scope_aliases(self):
         workflows = WorkflowConfig.from_mapping({
@@ -427,6 +443,40 @@ class WorkflowConfigurationTests(unittest.TestCase):
             )
             persisted = json.loads(path.read_text(encoding="utf-8"))
             self.assertNotIn("cleanup", persisted["workflows"])
+
+    def test_partial_save_migrates_v1_routes_before_merging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({
+                "schema_version": 1,
+                "refinement_provider": "openai",
+                "refinement_model": "gpt-4o-mini",
+                "workflows": {
+                    "translation": {"provider_id": "groq"},
+                },
+            }), encoding="utf-8")
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+
+            repository.save({"ui_language": "pt"})
+
+            route = repository.load().workflow(WorkflowScope.TRANSLATION)
+            self.assertEqual(route.provider_id, "groq")
+            self.assertEqual(route.model_id, "llama-3.3-70b-versatile")
+
+    def test_apply_rejects_future_schema_mapping_before_normalization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+
+            with self.assertRaises(UnsupportedSchemaVersionError):
+                repository.apply({
+                    "schema_version": CONFIG_SCHEMA_VERSION + 1,
+                    "future_setting": "must remain untouched",
+                })
+
+            self.assertFalse(path.exists())
 
     def test_mapping_apply_blank_model_uses_new_provider_default(self):
         with tempfile.TemporaryDirectory() as directory:

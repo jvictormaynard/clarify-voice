@@ -577,7 +577,29 @@ def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
     """Split the shared legacy refinement route into workflow scopes."""
     migrated = dict(payload)
     existing = migrated.get("workflows")
-    workflows = dict(existing) if isinstance(existing, Mapping) else {}
+    workflows: dict[str, Any] = {}
+    if isinstance(existing, Mapping):
+        # Canonical scope names must win over aliases when both are present;
+        # otherwise a generated canonical default below can hide an authored
+        # route such as ``dictation`` or ``text_refinement``.
+        canonical_values: dict[str, Any] = {}
+        alias_values: dict[str, Any] = {}
+        for raw_scope, route in existing.items():
+            normalized = normalize_workflow_scope(raw_scope)
+            if normalized not in WORKFLOW_SCOPES:
+                workflows[str(raw_scope)] = route
+                continue
+            raw_value = (
+                raw_scope.value
+                if isinstance(raw_scope, WorkflowScope)
+                else str(raw_scope or "")
+            ).strip().lower()
+            if raw_value == normalized:
+                canonical_values[normalized] = route
+            else:
+                alias_values[normalized] = route
+        workflows.update(alias_values)
+        workflows.update(canonical_values)
 
     def string(key: str, fallback: str = "") -> str:
         value = migrated.get(key, fallback)
@@ -1052,7 +1074,9 @@ class LocalConfigRepository(ConfigRepository):
     ) -> None:
         with self._lock:
             _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
-            current_payload = _read_json_mapping(self.path) or {}
+            current_payload = migrate_config_payload(
+                _read_json_mapping(self.path) or {}
+            )
             if isinstance(config, AppConfig):
                 if config.schema_version > CONFIG_SCHEMA_VERSION:
                     raise UnsupportedSchemaVersionError(
@@ -1157,7 +1181,14 @@ class LocalConfigRepository(ConfigRepository):
                 supplied_keys = None
             else:
                 _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
-                current_payload = _read_json_mapping(self.path) or {}
+                supplied_version = _version(config.get("schema_version"))
+                if supplied_version > CONFIG_SCHEMA_VERSION:
+                    raise UnsupportedSchemaVersionError(
+                        f"Cannot save schema version {supplied_version} "
+                        f"with supported version {CONFIG_SCHEMA_VERSION}")
+                current_payload = migrate_config_payload(
+                    _read_json_mapping(self.path) or {}
+                )
                 model = self._model_from_mapping(
                     config,
                     current_payload,
