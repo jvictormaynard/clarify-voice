@@ -22,7 +22,7 @@ backend, Tk, or secret-storage imports.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
 import math
@@ -348,9 +348,29 @@ class MicrophoneInventory:
         ids = [device.stable_id for device in devices]
         if len(set(ids)) != len(ids):
             # Two endpoints with the same fallback name/host identity cannot
-            # be selected safely without a backend-native ID.  Keep the
-            # inventory visible, but resolution will report it unavailable.
+            # be selected safely without a backend-native ID.
             object.__setattr__(self, "error_code", self.error_code or "ambiguous_identity")
+        name_counts: dict[str, int] = {}
+        for device in devices:
+            if device.usable:
+                name = device.name.casefold()
+                name_counts[name] = name_counts.get(name, 0) + 1
+        ambiguous_names = {
+            name for name, count in name_counts.items() if count > 1
+        }
+        if ambiguous_names:
+            # SoX receives only the display name for the selected input. Do
+            # not expose endpoints that would resolve to one another when
+            # host APIs share that name; they remain visible in the snapshot
+            # but are explicitly non-selectable for Settings and Recorder.
+            devices = tuple(
+                replace(device, available=False)
+                if device.usable and device.name.casefold() in ambiguous_names
+                else device
+                for device in devices
+            )
+            object.__setattr__(
+                self, "error_code", self.error_code or "ambiguous_name")
         default_id = self.default_id
         if default_id is not None:
             default_id = str(default_id).strip() or None

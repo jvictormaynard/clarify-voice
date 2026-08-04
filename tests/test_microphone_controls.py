@@ -132,6 +132,35 @@ class MicrophoneControlsTests(unittest.TestCase):
         self.assertEqual(selection.reason, "saved_device_unavailable")
         self.assertEqual(selection.device.name, "Current default")
 
+    def test_duplicate_names_across_host_apis_are_not_selectable(self):
+        inventory = MicrophoneInventory.from_records(
+            [
+                {
+                    "name": "Shared headset",
+                    "host_api": "Windows WASAPI",
+                    "index": 1,
+                    "max_input_channels": 1,
+                },
+                {
+                    "name": "Shared headset",
+                    "host_api": "MME",
+                    "index": 7,
+                    "max_input_channels": 1,
+                },
+            ]
+        )
+        first, second = inventory.devices
+
+        self.assertNotEqual(first.stable_id, second.stable_id)
+        self.assertFalse(first.available)
+        self.assertFalse(second.available)
+        self.assertEqual(inventory.available_devices, ())
+
+        selection = inventory.resolve(first.stable_id)
+        self.assertEqual(selection.state, MicrophoneSelectionState.UNAVAILABLE)
+        self.assertFalse(selection.can_record)
+        self.assertIsNone(selection.device)
+
     def test_missing_default_is_explicitly_unavailable_not_arbitrary(self):
         inventory = MicrophoneInventory.from_records([
             {"name": "Unmarked input", "max_input_channels": 1},
