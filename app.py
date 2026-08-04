@@ -3869,7 +3869,17 @@ class Recorder:
             selection = inventory.resolve(requested)
             self.microphone_inventory = inventory
             self.microphone_selection = selection
-            if not selection.can_record:
+            # A stale saved preference may safely fall back to the current
+            # system default.  A caller that explicitly supplied an endpoint
+            # must not silently record from a different fallback device when
+            # that ID is ambiguous or unavailable.
+            if (
+                not selection.can_record
+                or (
+                    microphone is not None
+                    and selection.state is not MicrophoneSelectionState.SELECTED
+                )
+            ):
                 raise MicrophoneUnavailableError(
                     "No safe microphone input is available")
         else:

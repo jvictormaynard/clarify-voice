@@ -204,6 +204,50 @@ class RecordingSessionTests(unittest.TestCase):
             )
             recorder.stop()
 
+    def test_explicit_ambiguous_microphone_does_not_fall_back_to_system_default(self):
+        inventory = app.MicrophoneInventory.from_records([
+            {
+                "name": "Twin input",
+                "host_api": "WASAPI",
+                "index": 3,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "Twin input",
+                "host_api": "WASAPI",
+                "index": 7,
+                "max_input_channels": 1,
+            },
+            {
+                "name": "System default",
+                "host_api": "WASAPI",
+                "index": 9,
+                "is_default": True,
+                "max_input_channels": 1,
+            },
+        ])
+        ambiguous_id = inventory.devices[0].stable_id
+        source = SimpleNamespace(snapshot=lambda: inventory)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                app.Recorder, "_stop_stale_windows_recorders"), patch.object(
+                app.subprocess, "Popen") as popen:
+            recorder = app.Recorder(
+                microphone_source=source,
+                controls=app.RecordingControls(),
+            )
+            with self.assertRaises(app.MicrophoneUnavailableError):
+                recorder.start(
+                    Path(directory) / "recording.wav",
+                    microphone=ambiguous_id,
+                )
+
+            popen.assert_not_called()
+            self.assertEqual(
+                recorder.microphone_selection.state,
+                app.MicrophoneSelectionState.FALLBACK_DEFAULT,
+            )
+
     def test_production_recorder_reloads_controls_after_settings_apply(self):
         initial = app.RecordingControls(max_duration_seconds=30)
         updated = app.RecordingControls(
