@@ -254,6 +254,26 @@ class HistoryStoreTests(unittest.TestCase):
             store.delete_all()
             self.assertFalse(path.exists())
 
+    def test_delete_all_keeps_primary_when_snapshot_enumeration_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.json"
+            store = HistoryStore(path, enabled=True, retention_days=None,
+                                 clock=fixed_clock)
+            store.add(raw_text="keep when cleanup cannot inspect snapshots")
+            temporary = Path(directory) / ".history.json.unseen.tmp"
+            temporary.write_text("{}", encoding="utf-8")
+            before = path.read_bytes()
+
+            with patch.object(Path, "glob", side_effect=OSError("locked")):
+                with self.assertRaises(HistoryStoreError):
+                    store.delete_all()
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(temporary.exists())
+
+            temporary.unlink()
+            store.delete_all()
+            self.assertFalse(path.exists())
+
     def test_exports_preserve_unicode_multiline_partial_and_error_records(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

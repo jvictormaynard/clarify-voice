@@ -449,8 +449,9 @@ class HistoryStore:
         pattern = f".{self.path.name}.*.tmp"
         try:
             return list(self.path.parent.glob(pattern))
-        except OSError:
-            return []
+        except OSError as error:
+            raise HistoryStoreError(
+                "The history snapshots could not be enumerated") from error
 
     @staticmethod
     def _remove_best_effort(path: Path) -> None:
