@@ -19,6 +19,7 @@ from typing import Any, Mapping
 
 from provider_registry import PROVIDER_IDS, PROVIDER_REGISTRY
 from provider_types import ProviderCapability
+from hotkey_config import HotkeySettings
 from secret_store import (
     SecretStore,
     SecretStoreError,
@@ -39,7 +40,7 @@ SUPPORTED_UI_MODES = ("prompt", "transcription")
 SUPPORTED_LANGUAGES = ("en", "pt", "es", "de", "ru")
 
 
-def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[str, str]:
+def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Return startup defaults using the same environment contract as app.py.
 
     The precedence is persisted configuration, then environment variables,
@@ -72,6 +73,10 @@ def environment_defaults(environment: Mapping[str, str] | None = None) -> dict[s
         "ui_mode": "prompt",
         "ui_language": "en",
         "autostart": False,
+        # The nested value is intentionally present in the defaults mapping so
+        # first-run and legacy flat files both receive the same typed bindings.
+        # HotkeySettings.from_mapping() repairs malformed entries one by one.
+        "hotkeys": HotkeySettings.defaults().to_mapping(),
     }
 
 
@@ -124,6 +129,7 @@ class AppConfig:
     ui: UIPreferences = field(default_factory=UIPreferences)
     startup: StartupSettings = field(default_factory=StartupSettings)
     local_asr_cloud_refinement: bool = False
+    hotkeys: HotkeySettings = field(default_factory=HotkeySettings.defaults)
 
     @classmethod
     def from_mapping(
@@ -215,6 +221,20 @@ class AppConfig:
         if not isinstance(local_asr_cloud_refinement, bool):
             local_asr_cloud_refinement = False
 
+        supplied_hotkeys = (
+            values.get("hotkeys") if isinstance(values, Mapping) else None)
+        hotkey_payload = supplied_hotkeys if supplied_hotkeys is not None else source
+        hotkeys = HotkeySettings.from_mapping(hotkey_payload)
+        # A short-lived pre-release spelling used the activation mode at the
+        # top level. Keep accepting it while writing the versioned nested
+        # representation below.
+        if "recording_activation_mode" in source:
+            try:
+                hotkeys = HotkeySettings(
+                    hotkeys.hotkeys, source["recording_activation_mode"])
+            except ValueError:
+                pass
+
         return cls(
             schema_version=CONFIG_SCHEMA_VERSION,
             selection=ProviderSelection(provider, refinement_provider, refinement_model),
@@ -225,6 +245,7 @@ class AppConfig:
             ui=UIPreferences(mode, language),
             startup=StartupSettings(autostart),
             local_asr_cloud_refinement=local_asr_cloud_refinement,
+            hotkeys=hotkeys,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -251,6 +272,7 @@ class AppConfig:
             "ui_mode": self.ui.mode,
             "ui_language": self.ui.language,
             "autostart": self.startup.autostart,
+            "hotkeys": self.hotkeys.to_mapping(),
         }
 
     def to_legacy_mapping(self) -> dict[str, Any]:

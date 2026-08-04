@@ -69,16 +69,18 @@ from update_security import (
     launch_prepared_update,
     prepare_update,
 )
+from hotkey_config import ActivationMode, HotkeySettings, HotkeyValidationError
 from windows_hotkeys import (
+    HotkeyRegistrationError,
     WM_HOTKEY,
     action_for_hotkey_id,
     is_alt_pressed,
     paste_focused_control,
     register_escape_hotkey,
-    register_global_hotkeys,
+    WindowsHotkeyRegistration,
     send_ctrl_key,
+    supports_push_to_talk,
     unregister_escape_hotkey,
-    unregister_global_hotkeys,
 )
 from workflows import (
     CancelDictation,
@@ -778,6 +780,45 @@ def _apply_settings_transaction(
         previous_registry_state=previous_registry_state)
 
 
+def _apply_hotkey_settings_transaction(
+        settings, repositories=None, tray_icon=None) -> HotkeySettings:
+    """Register then persist hotkeys as one rollback-capable transaction.
+
+    Registration happens before the JSON write. If Windows rejects one
+    combination, the previous registration and in-memory mapping remain in
+    place and the caller receives the actionable native error. A persistence
+    failure similarly restores the previous native set before returning.
+    """
+    selected = (settings if isinstance(settings, HotkeySettings)
+                else HotkeySettings.from_mapping(settings))
+    if (selected.activation_mode is ActivationMode.PUSH_TO_TALK
+            and IS_WIN and not supports_push_to_talk()):
+        raise HotkeyValidationError(
+            "Push-to-talk requires a key-release capable native input layer",
+            code="unsupported_activation_mode")
+    previous = APP_CONFIG.get("hotkeys")
+    previous_settings = HotkeySettings.from_mapping(previous)
+    tray = tray_icon
+    if tray is None:
+        # ``App`` supplies its tray explicitly; retaining an optional global
+        # keeps this helper usable by headless settings tests.
+        tray = None
+    try:
+        if tray is not None and hasattr(tray, "reconfigure_hotkeys"):
+            tray.reconfigure_hotkeys(selected)
+        APP_CONFIG["hotkeys"] = selected.to_mapping()
+        _save_app_config(repositories)
+    except Exception:
+        APP_CONFIG["hotkeys"] = previous
+        if tray is not None and hasattr(tray, "reconfigure_hotkeys"):
+            try:
+                tray.reconfigure_hotkeys(previous_settings)
+            except Exception:
+                pass
+        raise
+    return selected
+
+
 def _enable_windows_dpi_awareness():
     """Enable sharp per-monitor rendering before Tk creates any windows."""
     if not IS_WIN:
@@ -914,6 +955,7 @@ class WindowsTrayIcon:
     WM_APP = 0x8000
     WM_TRAY = WM_APP + 1
     WM_SET_ESCAPE_HOTKEY = WM_APP + 2
+    WM_SET_HOTKEYS = WM_APP + 3
     WM_CLOSE = 0x0010
     WM_DESTROY = 0x0002
     WM_LBUTTONUP = 0x0202
@@ -926,9 +968,11 @@ class WindowsTrayIcon:
     ACTION_OPEN = 1001
     ACTION_QUIT = 1002
 
-    def __init__(self, on_action, language="en"):
+    def __init__(self, on_action, language="en", hotkeys=None):
         self.on_action = on_action
         self.language = language
+        self.hotkey_settings = (hotkeys if isinstance(hotkeys, HotkeySettings)
+                                else HotkeySettings.from_mapping(hotkeys))
         self._thread = None
         self._ready = threading.Event()
         self._running = False
@@ -941,6 +985,12 @@ class WindowsTrayIcon:
         self._class_name = None
         self._taskbar_created = None
         self._registered_hotkeys = set()
+        self._hotkey_registration = None
+        self._hotkey_update_lock = threading.RLock()
+        self._pending_hotkey_update = None
+        self._hotkey_update_error = None
+        self._hotkey_update_event = None
+        self.last_registration_error = None
         self._escape_hotkey_registered = False
         self._icon_added = False
 
@@ -979,6 +1029,41 @@ class WindowsTrayIcon:
             except Exception:
                 pass
 
+    def reconfigure_hotkeys(self, settings, timeout=2.0):
+        """Replace native bindings on the tray/message-loop thread."""
+        selected = (settings if isinstance(settings, HotkeySettings)
+                    else HotkeySettings.from_mapping(settings))
+        if not self._thread or not self._thread.is_alive() or not self._hwnd:
+            self.hotkey_settings = selected
+            return True
+        if threading.current_thread() is self._thread:
+            self._apply_hotkey_settings(selected)
+            return True
+        event = threading.Event()
+        with self._hotkey_update_lock:
+            self._pending_hotkey_update = selected
+            self._hotkey_update_error = None
+            self._hotkey_update_event = event
+        try:
+            self._user32.PostMessageW(self._hwnd, self.WM_SET_HOTKEYS, 0, 0)
+        except Exception:
+            with self._hotkey_update_lock:
+                self._pending_hotkey_update = None
+                self._hotkey_update_event = None
+            raise HotkeyRegistrationError(
+                ("hotkey_registration",),
+                reason="the tray message loop is unavailable")
+        if not event.wait(timeout):
+            raise HotkeyRegistrationError(
+                ("hotkey_registration",),
+                reason="the tray message loop did not respond")
+        with self._hotkey_update_lock:
+            error = self._hotkey_update_error
+            self._hotkey_update_event = None
+        if error is not None:
+            raise error
+        return True
+
     def _emit(self, action):
         try:
             self.on_action(action)
@@ -994,6 +1079,16 @@ class WindowsTrayIcon:
         else:
             unregister_escape_hotkey(self._user32, self._hwnd)
             self._escape_hotkey_registered = False
+
+    def _apply_hotkey_settings(self, settings):
+        if self._hotkey_registration is None:
+            self.hotkey_settings = settings
+            self._hotkey_registration = WindowsHotkeyRegistration(
+                self._user32, self._hwnd, settings)
+            self._registered_hotkeys = self._hotkey_registration.register()
+            return
+        self._registered_hotkeys = self._hotkey_registration.replace(settings)
+        self.hotkey_settings = settings
 
     @classmethod
     def _event_action(cls, event):
@@ -1236,6 +1331,23 @@ class WindowsTrayIcon:
             elif message == self.WM_SET_ESCAPE_HOTKEY:
                 self._set_escape_hotkey(bool(wparam))
                 return 0
+            elif message == self.WM_SET_HOTKEYS:
+                with self._hotkey_update_lock:
+                    pending = self._pending_hotkey_update
+                    event = self._hotkey_update_event
+                    self._pending_hotkey_update = None
+                if pending is not None:
+                    try:
+                        self._apply_hotkey_settings(pending)
+                    except HotkeyRegistrationError as error:
+                        self.last_registration_error = error
+                        with self._hotkey_update_lock:
+                            self._hotkey_update_error = error
+                        self._emit(("hotkey_registration_failed", str(error)))
+                    finally:
+                        if event is not None:
+                            event.set()
+                return 0
             elif message == self.WM_TRAY:
                 event = int(lparam) & 0xFFFF
                 action = self._event_action(event)
@@ -1278,8 +1390,16 @@ class WindowsTrayIcon:
                 self._ready.set()
                 return
             self._hwnd = hwnd
-            self._registered_hotkeys = register_global_hotkeys(
-                self._user32, hwnd)
+            self._hotkey_registration = WindowsHotkeyRegistration(
+                self._user32, hwnd, self.hotkey_settings)
+            try:
+                self._registered_hotkeys = self._hotkey_registration.register()
+            except HotkeyRegistrationError as error:
+                # Keep the tray available so Settings can offer a corrective
+                # combination, but never retain an accepted subset as active.
+                self.last_registration_error = error
+                self._registered_hotkeys = set()
+                self._emit(("hotkey_registration_failed", str(error)))
             self._icon_handle = self._create_icon(ctypes, wintypes)
             if not self._icon_handle:
                 self._user32.LoadIconW.argtypes = [wintypes.HINSTANCE, ctypes.c_void_p]
@@ -1310,9 +1430,8 @@ class WindowsTrayIcon:
             if self._hwnd and self._escape_hotkey_registered:
                 unregister_escape_hotkey(self._user32, self._hwnd)
                 self._escape_hotkey_registered = False
-            if self._hwnd and self._registered_hotkeys:
-                unregister_global_hotkeys(
-                    self._user32, self._hwnd, self._registered_hotkeys)
+            if self._hotkey_registration is not None:
+                self._hotkey_registration.unregister()
                 self._registered_hotkeys.clear()
             if self._notify_data and self._icon_added:
                 self._shell32.Shell_NotifyIconW(
@@ -4664,7 +4783,8 @@ class App(ctk.CTk):
         self.after_idle(self._prewarm_translation_picker)
         if IS_WIN:
             self._tray_icon = WindowsTrayIcon(
-                self._tray_actions.put, self.lang)
+                self._tray_actions.put, self.lang,
+                hotkeys=HotkeySettings.from_mapping(APP_CONFIG.get("hotkeys")))
             self._tray_icon.start()
             self.after(100, self._process_tray_actions)
         if start_hidden:
@@ -4771,7 +4891,9 @@ class App(ctk.CTk):
             except queue.Empty:
                 break
             try:
-                if action == "open":
+                if isinstance(action, tuple) and action and action[0] == "hotkey_registration_failed":
+                    self._last_action_error = str(action[1])
+                elif action == "open":
                     self._show_if_hidden()
                 elif action == "toggle_visibility":
                     self._toggle_visibility()
@@ -4994,6 +5116,16 @@ class App(ctk.CTk):
         self.geometry(f"+{e.x_root - self._drag_x}+{e.y_root - self._drag_y}")
 
     # -- State --
+    @property
+    def hotkey_settings(self) -> HotkeySettings:
+        """Return the current typed bindings for Settings integrations."""
+        return HotkeySettings.from_mapping(APP_CONFIG.get("hotkeys"))
+
+    def apply_hotkey_settings(self, settings) -> HotkeySettings:
+        """Apply captured bindings only after native registration succeeds."""
+        return _apply_hotkey_settings_transaction(
+            settings, self.repositories, getattr(self, "_tray_icon", None))
+
     def _sync_escape_hotkey(self, enabled):
         tray_icon = getattr(self, "_tray_icon", None)
         if tray_icon is not None:

@@ -198,6 +198,22 @@ executable on Windows:
 7. Attach before and after screenshots to visual pull requests.
 8. Confirm that the executable contains no `.env` or personal key.
 
+### Hotkey configuration acceptance
+
+The persisted `hotkeys` object keeps the original Alt+L/Alt+K/Alt+T/Alt+R
+bindings when upgrading a legacy `config.json`. Settings capture validates
+modifier/key support and rejects duplicates before applying them. The native
+Windows registration is transactional: if another application owns one
+combination, all newly accepted IDs are unregistered and the previous set is
+restored. Confirm this manually from a packaged build by reserving one test
+combination in another application, attempting Apply, and checking that the
+other three ClarifyVoice actions still use their previous bindings.
+
+Recording defaults to toggle mode. Push-to-talk remains unavailable in the
+packaged Windows layer until a key-release-capable input adapter is present;
+the settings API reports that capability instead of silently accepting a mode
+that would get stuck recording.
+
 ## Maintainer deploy from WSL
 
 ```bash
