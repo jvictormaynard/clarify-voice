@@ -134,6 +134,41 @@ class HotkeySettingsIntegrationTests(unittest.TestCase):
                 self.assertTrue(
                     app.STRINGS[language]["hotkey_voice_translation"])
 
+    def test_apply_keeps_recording_controls_for_draft_commit(self):
+        source = inspect.getsource(app.App._open_settings)
+        apply_source = source.split("def apply_settings():", 1)[1]
+
+        self.assertIn("controls = None", apply_source)
+        self.assertIn("nonlocal controls", apply_source)
+        self.assertLess(
+            apply_source.index("nonlocal controls"),
+            apply_source.index("controls = controls_from_widgets()"),
+        )
+        self.assertLess(
+            apply_source.index("controls = controls_from_widgets()"),
+            apply_source.index("_commit_settings_draft("),
+        )
+
+    def test_successful_apply_draft_commit_clears_dirty_snapshot(self):
+        microphone_state = {"controls": "startup"}
+        saved_settings = {
+            "recording_controls": "startup",
+            "microphone": "default",
+        }
+
+        def current_settings():
+            return {
+                "recording_controls": microphone_state["controls"],
+                "microphone": "default",
+            }
+
+        app._commit_settings_draft(
+            saved_settings, microphone_state, "applied", current_settings)
+
+        self.assertEqual(microphone_state["controls"], "applied")
+        self.assertEqual(saved_settings, current_settings())
+        self.assertFalse(current_settings() != saved_settings)
+
     def test_apply_transaction_persists_the_selected_draft(self):
         previous = HotkeySettings.defaults()
         selected = previous.with_hotkey(HotkeyAction.RECORDING, "Ctrl+L")

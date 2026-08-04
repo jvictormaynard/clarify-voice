@@ -1447,6 +1447,14 @@ def _apply_settings_with_hotkeys_transaction(
         raise
 
 
+def _commit_settings_draft(
+        saved_settings, microphone_state, controls, current_settings):
+    """Publish recording controls and refresh the successful Apply snapshot."""
+    microphone_state["controls"] = controls
+    saved_settings.clear()
+    saved_settings.update(current_settings())
+
+
 def _apply_hotkey_settings_transaction(
         settings, repositories=None, tray_icon=None) -> HotkeySettings:
     """Register then persist hotkeys as one rollback-capable transaction.
@@ -12721,8 +12729,10 @@ class App(ctk.CTk):
         def apply_settings():
             if apply_feedback_job["active"]:
                 return
+            controls = None
 
             def apply_general_settings():
+                nonlocal controls
                 store_workflow_form()
                 microphone = MicrophoneSettings(microphone_state["selection"])
                 controls = controls_from_widgets()
@@ -12786,9 +12796,8 @@ class App(ctk.CTk):
                         text=f"Invalid recording control: {error}",
                         text_color="#d17878")
                 return
-            microphone_state["controls"] = controls
-            saved_settings.clear()
-            saved_settings.update(current_settings())
+            _commit_settings_draft(
+                saved_settings, microphone_state, controls, current_settings)
             hotkey_feedback("")
             self.sub.configure(text=self._recording_hotkey_hint(
                 stopping=self.app_state == "recording"))
