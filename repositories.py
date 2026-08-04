@@ -488,33 +488,36 @@ class AppConfig:
                     WorkflowScope.TRANSLATION.value,
                     WorkflowScope.LOCAL_ASR_REFINEMENT.value):
                 current = workflows[scope]
-                if (current.provider_id == previous_shared.provider_id
-                        and current.model_id == previous_shared.model_id):
-                    # A custom endpoint is part of an independently selected
-                    # route.  Do not move that route to a different provider
-                    # while retaining a provider-specific proxy URL.  The
-                    # primary legacy refinement route remains synchronized,
-                    # but its endpoint is cleared when the provider changes
-                    # so the route cannot combine incompatible settings. A
-                    # model-only edit keeps the same provider-specific proxy.
-                    if (current.custom_endpoint
-                            and scope != WorkflowScope.REFINEMENT.value):
+                if scope in (
+                        WorkflowScope.REWRITE.value,
+                        WorkflowScope.TRANSLATION.value):
+                    # The migration marker is the source of truth.  Do not
+                    # infer authorship from equal provider/model/endpoint
+                    # values because an authored route may intentionally
+                    # share those values while customizing its prompt.
+                    if current.independent:
                         continue
-                    endpoint = current.custom_endpoint
-                    if (scope == WorkflowScope.REFINEMENT.value
-                            and current.provider_id
-                            != legacy_route.provider_id
-                            and scope not in preserve_endpoint_scopes):
-                        endpoint = ""
-                    workflows = workflows.with_route(
-                        scope,
-                        replace(
-                            current,
-                            provider_id=legacy_route.provider_id,
-                            model_id=legacy_route.model_id,
-                            custom_endpoint=endpoint,
-                        ),
-                    )
+                elif scope == WorkflowScope.LOCAL_ASR_REFINEMENT.value:
+                    # Local-ASR refinement retains its existing staged
+                    # compatibility behavior; it is not one of the legacy
+                    # rewrite/translation clones addressed by this marker.
+                    if (current.provider_id != previous_shared.provider_id
+                            or current.model_id != previous_shared.model_id
+                            or current.custom_endpoint):
+                        continue
+                endpoint = current.custom_endpoint
+                if (current.provider_id != legacy_route.provider_id
+                        and scope not in preserve_endpoint_scopes):
+                    endpoint = ""
+                workflows = workflows.with_route(
+                    scope,
+                    replace(
+                        current,
+                        provider_id=legacy_route.provider_id,
+                        model_id=legacy_route.model_id,
+                        custom_endpoint=endpoint,
+                    ),
+                )
             selection = replace(
                 selection,
                 refinement_provider=legacy_config.selection.refinement_provider,
@@ -702,6 +705,7 @@ def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.REWRITE.value],
             "custom_endpoint": "",
             "enabled": True,
+            "independent": False,
         },
         WorkflowScope.TRANSLATION.value: {
             "provider_id": refinement_provider,
@@ -709,6 +713,7 @@ def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
             "prompt": DEFAULT_WORKFLOW_PROMPTS[WorkflowScope.TRANSLATION.value],
             "custom_endpoint": "",
             "enabled": True,
+            "independent": False,
         },
         WorkflowScope.LOCAL_ASR_REFINEMENT.value: {
             "provider_id": refinement_provider,
@@ -738,6 +743,12 @@ def _migrate_v1_to_v2(payload: dict[str, Any]) -> dict[str, Any]:
             # fields receive deterministic defaults and the migration remains
             # idempotent when called again.
             route = dict(workflows[scope])
+            if scope in (
+                    WorkflowScope.REWRITE.value,
+                    WorkflowScope.TRANSLATION.value):
+                # Existing authored route entries are explicit, even when
+                # their values happen to match the shared legacy route.
+                route.setdefault("independent", True)
             # A v1 route may override the shared legacy provider while
             # omitting its model.  Canonicalize route aliases before filling
             # missing fields, then derive that model from the route provider;
@@ -1060,6 +1071,14 @@ class LocalConfigRepository(ConfigRepository):
                 if isinstance(previous_route, Mapping) and isinstance(route, Mapping):
                     merged_route = dict(previous_route)
                     merged_route.update(dict(route))
+                    if (scope in (
+                            WorkflowScope.REWRITE.value,
+                            WorkflowScope.TRANSLATION.value)
+                            and "independent" not in route):
+                        # A partial scoped save is an explicit authoring
+                        # action.  Preserve the full route merge, but record
+                        # that legacy picker changes must no longer reach it.
+                        merged_route["independent"] = True
                     workflow_values[scope] = merged_route
                 else:
                     workflow_values[scope] = route

@@ -66,6 +66,7 @@ class WorkflowSettingsController:
         """Update one route in the draft without touching other scopes."""
 
         current = self.route(scope)
+        normalized = normalize_workflow_scope(scope)
         changes: dict[str, Any] = {}
         for field_name, value in (
             ("provider_id", provider_id),
@@ -76,6 +77,10 @@ class WorkflowSettingsController:
         ):
             if value is not _UNSET:
                 changes[field_name] = value
+        if normalized in (
+                WorkflowScope.REWRITE.value,
+                WorkflowScope.TRANSLATION.value):
+            changes["independent"] = True
         route = replace(current, **changes)
         self._config = replace(
             self._config,

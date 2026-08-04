@@ -155,6 +155,11 @@ class WorkflowRoute:
     prompt: str = ""
     custom_endpoint: str = ""
     enabled: bool = True
+    # ``False`` identifies routes generated from the pre-scoped legacy
+    # refinement setting.  An explicitly authored rewrite/translation route
+    # remains authoritative even when all its values happen to equal the
+    # shared refinement route.
+    independent: bool = False
 
     @property
     def provider(self) -> str:
@@ -193,6 +198,9 @@ class WorkflowRoute:
         enabled = values.get("enabled", fallback.enabled)
         if not isinstance(enabled, bool):
             enabled = fallback.enabled
+        independent = values.get("independent", fallback.independent)
+        if not isinstance(independent, bool):
+            independent = fallback.independent
         return cls(
             provider_id=(text(
                 "provider_id", "provider", fallback_value=fallback.provider_id
@@ -208,6 +216,7 @@ class WorkflowRoute:
                 fallback_value=fallback.custom_endpoint,
             ),
             enabled=enabled,
+            independent=independent,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -217,12 +226,14 @@ class WorkflowRoute:
             "prompt": self.prompt,
             "custom_endpoint": self.custom_endpoint,
             "enabled": self.enabled,
+            "independent": self.independent,
         }
 
     def without_prompt(self) -> dict[str, Any]:
         """Safe route summary for diagnostics and usage metadata."""
         values = self.to_mapping()
         values.pop("prompt", None)
+        values.pop("independent", None)
         values["custom_endpoint"] = _safe_endpoint_for_diagnostics(
             self.custom_endpoint)
         return values
@@ -284,13 +295,24 @@ class WorkflowConfig(Mapping[str, WorkflowRoute]):
                 canonical_values[normalized] = route
             else:
                 alias_values[normalized] = route
-        routes = {
-            scope: WorkflowRoute.from_mapping(
-                canonical_values.get(scope, alias_values.get(scope)),
+        routes: dict[str, WorkflowRoute] = {}
+        for scope in WORKFLOW_SCOPES:
+            raw_route = canonical_values.get(scope, alias_values.get(scope))
+            route = WorkflowRoute.from_mapping(
+                raw_route,
                 default=fallback[scope],
             )
-            for scope in WORKFLOW_SCOPES
-        }
+            # A route mapping authored after the migration is explicit even
+            # when provider/model/endpoint/enabled equal refinement.  Legacy
+            # migration output carries ``independent: false`` explicitly, so
+            # this fallback never relies on value equality to infer origin.
+            if (scope in (
+                    WorkflowScope.REWRITE.value,
+                    WorkflowScope.TRANSLATION.value,
+                ) and isinstance(raw_route, Mapping)
+                    and "independent" not in raw_route):
+                route = replace(route, independent=True)
+            routes[scope] = route
         return cls(**routes)
 
     def __getitem__(self, scope: str) -> WorkflowRoute:
@@ -494,6 +516,7 @@ def validate_workflow_route(
         prompt=prompt,
         custom_endpoint=endpoint,
         enabled=bool(route.enabled),
+        independent=bool(route.independent),
     )
 
 

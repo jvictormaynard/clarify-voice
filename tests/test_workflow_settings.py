@@ -352,6 +352,36 @@ class WorkflowOperationRoutingTests(unittest.TestCase):
         self.assertEqual(connection.call_args.args[1].custom_endpoint,
                          "https://proxy.example/v1")
 
+    def test_equal_authored_rewrite_route_ignores_legacy_picker(self):
+        app.APP_CONFIG["refinement_provider"] = "groq"
+        app.APP_CONFIG["refinement_model"] = "llama-3.3-70b-versatile"
+        app.APP_CONFIG["workflows"] = {
+            "refinement": {
+                "provider_id": "openai", "model_id": "gpt-4o-mini",
+                "prompt": "refine", "custom_endpoint": "", "enabled": True,
+                "independent": False,
+            },
+            "rewrite": {
+                "provider_id": "openai", "model_id": "gpt-4o-mini",
+                "prompt": "authored rewrite policy", "custom_endpoint": "",
+                "enabled": True, "independent": True,
+            },
+        }
+        captured = {}
+
+        def rewrite(_provider, request, _connection, _cancel=None):
+            captured["request"] = request
+            return RewriteResult("rewritten", "openai", request.model)
+
+        with patch.object(app.PROVIDER_REGISTRY, "rewrite", side_effect=rewrite), \
+                patch.object(app, "_provider_connection"):
+            result = app.AppWorkflowProvider.rewrite("source")
+
+        self.assertEqual(result.text, "rewritten")
+        self.assertEqual(result.provider_id, "openai")
+        self.assertEqual(captured["request"].model, "gpt-4o-mini")
+        self.assertIn("authored rewrite policy", captured["request"].instruction)
+
     def test_effective_route_summaries_omit_prompts_and_mark_execution(self):
         app.APP_CONFIG["workflows"] = {
             "transcription": {

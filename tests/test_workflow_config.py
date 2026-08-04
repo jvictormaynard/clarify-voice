@@ -166,6 +166,68 @@ class WorkflowConfigurationTests(unittest.TestCase):
             config.workflow("rewrite").provider_id,
             config.workflow("translation").provider_id,
         )
+        self.assertFalse(migrated["workflows"]["rewrite"]["independent"])
+        self.assertFalse(migrated["workflows"]["translation"]["independent"])
+
+    def test_authored_equal_routes_survive_legacy_picker_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            repository.save({
+                "refinement_provider": "openai",
+                "refinement_model": "gpt-4o-mini",
+                "workflows": {
+                    "refinement": {
+                        "provider_id": "openai",
+                        "model_id": "gpt-4o-mini",
+                        "prompt": "refinement policy",
+                    },
+                    "rewrite": {
+                        "provider_id": "openai",
+                        "model_id": "gpt-4o-mini",
+                        "prompt": "authored rewrite policy",
+                        "custom_endpoint": "",
+                        "enabled": True,
+                        "independent": True,
+                    },
+                    "translation": {
+                        "provider_id": "openai",
+                        "model_id": "gpt-4o-mini",
+                        "prompt": "authored translation policy",
+                        "custom_endpoint": "",
+                        "enabled": True,
+                        "independent": True,
+                    },
+                },
+            })
+
+            before = repository.load()
+            self.assertTrue(before.workflow(WorkflowScope.REWRITE).independent)
+            self.assertTrue(
+                before.workflow(WorkflowScope.TRANSLATION).independent)
+
+            legacy = before.to_legacy_mapping()
+            legacy.update({
+                "refinement_provider": "groq",
+                "refinement_model": "llama-3.3-70b-versatile",
+            })
+            repository.apply(legacy)
+            after = repository.load()
+
+            for scope, prompt in (
+                    (WorkflowScope.REWRITE, "authored rewrite policy"),
+                    (WorkflowScope.TRANSLATION, "authored translation policy"),
+                ):
+                route = after.workflow(scope)
+                self.assertEqual(route.provider_id, "openai")
+                self.assertEqual(route.model_id, "gpt-4o-mini")
+                self.assertEqual(route.prompt, prompt)
+                self.assertTrue(route.independent)
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(persisted["workflows"]["rewrite"]["independent"])
+            self.assertTrue(
+                persisted["workflows"]["translation"]["independent"])
 
     def test_routes_are_independent_and_custom_endpoint_is_not_a_secret(self):
         config = AppConfig.from_mapping({

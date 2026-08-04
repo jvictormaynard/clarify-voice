@@ -383,17 +383,11 @@ def _workflow_route(scope: WorkflowScope | str) -> WorkflowRoute:
         )
     elif normalized in (
             WorkflowScope.REWRITE.value, WorkflowScope.TRANSLATION.value):
-        # A pre-#51 config contains cloned rewrite/translation routes.  Keep
-        # direct legacy flat edits working until the settings page writes a
-        # genuinely independent route; an authored route is independent as
-        # soon as its provider/model/endpoint diverges from refinement.
-        refinement = config.workflow(WorkflowScope.REFINEMENT)
-        if (
-                route.provider_id == refinement.provider_id
-                and route.model_id == refinement.model_id
-                and route.custom_endpoint == refinement.custom_endpoint
-                and route.enabled == refinement.enabled
-        ):
+        # A pre-#51 config contains cloned rewrite/translation routes.  Their
+        # explicit migration marker keeps legacy flat edits working; scoped
+        # settings routes remain authoritative even when their values happen
+        # to equal refinement.
+        if not route.independent:
             legacy = _workflow_route(WorkflowScope.REFINEMENT)
             route = replace(
                 route,
