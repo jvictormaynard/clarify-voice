@@ -104,17 +104,11 @@ _SENSITIVE_FIELD_PATTERN = re.compile(
 # The ordinary field matcher cannot see the key/value delimiters in that form.
 # Keep the escapes intact while replacing the value so the resulting error
 # remains readable and, more importantly, never persists the credential.
-_SENSITIVE_ESCAPED_FIELD_PATTERN = re.compile(
-    r"(?is)(\\?['\"]?(?:api[_ -]?key|access[_ -]?token|"
+_SENSITIVE_ESCAPED_FIELD_PREFIX_PATTERN = re.compile(
+    r"(?is)(\\?['\"]?(?:authorization|bearer|api[_ -]?key|access[_ -]?token|"
     r"client[_ -]?secret|credential|password|secret|token)"
-    r"\\?['\"]?\s*[:=]\s*)"
-    # In a doubly serialized mapping, an escaped quote inside the nested value
-    # has a backslash run congruent to 3 (mod 4).  A real delimiter has a run
-    # congruent to 1 (mod 4); a literal backslash at the end of the value adds
-    # four more escapes immediately before that delimiter.  Consume complete
-    # groups of four so neither form can terminate the match prematurely.
-    r"((?<!\\)(?:\\)?['\"])((?:\\.|(?!\2).)*?)"
-    r"(?<!\\)(?:\\{4})*\2")
+    r"\\?['\"]?\s*[:=]\s*(?:[a-z]+\s+)?)"
+    r"((?:\\)?['\"])")
 _SENSITIVE_BEARER_PATTERN = re.compile(r"(?i)(bearer)\s+([^\s,;&]+)")
 _SENSITIVE_QUERY_PATTERN = re.compile(
     r"(?i)([?&](?:api[_-]?key|access[_-]?token|token)=)[^&#\s]+")
@@ -128,6 +122,73 @@ def _redact_field_match(match: re.Match[str]) -> str:
     return f"{prefix}<redacted>"
 
 
+def _escaped_field_value_end(
+    value: str,
+    start: int,
+    quote: str,
+) -> int | None:
+    """Return the end of a quoted value using a linear escape scanner.
+
+    A doubly serialized quote delimiter is represented by ``\\"``.  A quote
+    escaped inside the nested value has three (or more) preceding backslashes,
+    while a literal trailing backslash adds four escapes per nesting level.
+    Consequently, the delimiter is the quote preceded by a backslash run
+    congruent to 1 modulo 4.  Plain quoted values use the usual even/odd
+    backslash rule.  The scanner deliberately returns ``None`` for truncated
+    values rather than retrying an overlapping regular expression.
+    """
+
+    quote_character = quote[-1]
+    serialized_delimiter = quote.startswith("\\")
+    backslash_run = 0
+    for index in range(start, len(value)):
+        character = value[index]
+        if character == "\\":
+            backslash_run += 1
+            continue
+        if character == quote_character:
+            if serialized_delimiter:
+                if backslash_run % 4 == 1:
+                    return index + 1
+            elif backslash_run % 2 == 0:
+                return index + 1
+        backslash_run = 0
+    return None
+
+
+def _redact_escaped_fields(value: str) -> str:
+    """Redact sensitive values in escaped/doubly serialized mappings.
+
+    Only the bounded key/prefix is matched by regex; the value is consumed by
+    the linear scanner above.  This keeps malformed provider error strings
+    from triggering catastrophic backtracking while preserving the original
+    escaped representation for valid values.
+    """
+
+    pieces: list[str] = []
+    cursor = 0
+    search_at = 0
+    while True:
+        match = _SENSITIVE_ESCAPED_FIELD_PREFIX_PATTERN.search(value, search_at)
+        if match is None:
+            pieces.append(value[cursor:])
+            return "".join(pieces)
+
+        pieces.append(value[cursor:match.start()])
+        quote = match.group(2)
+        end = _escaped_field_value_end(value, match.end(), quote)
+        replacement = f"{match.group(1)}{quote}<redacted>"
+        if end is None:
+            # A truncated credential is still sensitive; redact through EOF
+            # instead of preserving the untrusted tail or retrying a regex.
+            pieces.append(replacement)
+            return "".join(pieces)
+
+        pieces.append(f"{replacement}{quote}")
+        cursor = end
+        search_at = end
+
+
 def _safe_error(value: str | None) -> str | None:
     """Keep concise error metadata without persisting obvious credentials."""
 
@@ -138,8 +199,7 @@ def _safe_error(value: str | None) -> str | None:
     if not value:
         return None
     sanitized = value
-    sanitized = _SENSITIVE_ESCAPED_FIELD_PATTERN.sub(
-        _redact_field_match, sanitized)
+    sanitized = _redact_escaped_fields(sanitized)
     sanitized = _SENSITIVE_AUTH_PATTERN.sub(_redact_field_match, sanitized)
     sanitized = _SENSITIVE_FIELD_PATTERN.sub(_redact_field_match, sanitized)
     sanitized = _SENSITIVE_BEARER_PATTERN.sub(r"\1 <redacted>", sanitized)

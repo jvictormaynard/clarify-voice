@@ -273,6 +273,28 @@ class HistoryStoreTests(unittest.TestCase):
             persisted = Path(store.path).read_text(encoding="utf-8")
             self.assertNotIn("abc", persisted)
 
+    def test_truncated_escaped_mapping_redacts_long_escape_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(
+                Path(directory) / "history.json",
+                enabled=True,
+                retention_days=None,
+                clock=fixed_clock,
+            )
+            truncated = 'body="{\\"password\\":\\"' + ("\\" * 40)
+            store.add(
+                status="error",
+                error=truncated,
+                record_id="truncated-escaped-credential",
+            )
+
+            self.assertEqual(
+                store.list_records()[0].error,
+                'body="{\\"password\\":\\"<redacted>',
+            )
+            persisted = Path(store.path).read_text(encoding="utf-8")
+            self.assertNotIn("<redacted>" * 2, persisted)
+
     def test_v0_migration_is_idempotent_and_drops_unsupported_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.json"
