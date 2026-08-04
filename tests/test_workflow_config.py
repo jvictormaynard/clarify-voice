@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from provider_types import (
@@ -222,6 +223,59 @@ class WorkflowConfigurationTests(unittest.TestCase):
             with self.assertRaises(WorkflowConfigurationError):
                 repository.save(typed)
             self.assertFalse(path.exists())
+
+    def test_legacy_app_save_refreshes_nested_routes_for_later_saves(self):
+        import app
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            storage = SimpleNamespace(config=repository)
+            initial = repository.load().to_legacy_mapping()
+            with patch.object(app, "APP_CONFIG", initial):
+                app.APP_CONFIG.update({
+                    "refinement_provider": "groq",
+                    "refinement_model": "llama-3.3-70b-versatile",
+                })
+                app._save_app_config(storage)
+                self.assertEqual(
+                    app.APP_CONFIG["workflows"]["refinement"]["provider_id"],
+                    "groq",
+                )
+                app.APP_CONFIG["ui_language"] = "pt"
+                app._save_app_config(storage)
+
+            loaded = repository.load()
+            self.assertEqual(
+                loaded.workflow(WorkflowScope.REWRITE).provider_id,
+                "groq",
+            )
+
+    def test_mapping_apply_preserves_explicit_refinement_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            repository = LocalConfigRepository(
+                path, secret_store=MemorySecretStore())
+            candidate = repository.load().to_mapping()
+            candidate["refinement_provider"] = "groq"
+            candidate["refinement_model"] = "llama-3.3-70b-versatile"
+            candidate["workflows"]["refinement"] = {
+                "provider_id": "groq",
+                "model_id": "llama-3.3-70b-versatile",
+                "custom_endpoint": "https://refinement-proxy.example/v1",
+            }
+
+            applied = repository.apply(candidate)
+
+            self.assertEqual(
+                applied.workflow(WorkflowScope.REFINEMENT).custom_endpoint,
+                "https://refinement-proxy.example/v1",
+            )
+            self.assertEqual(
+                repository.load().workflow(WorkflowScope.REFINEMENT).custom_endpoint,
+                "https://refinement-proxy.example/v1",
+            )
 
     def test_scoped_configuration_test_ignores_unrelated_invalid_routes(self):
         workflows = AppConfig.from_mapping({

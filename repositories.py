@@ -395,6 +395,8 @@ class AppConfig:
         self,
         legacy_config: "AppConfig",
         changed_keys: set[str],
+        *,
+        preserve_endpoint_scopes: set[str] | frozenset[str] = frozenset(),
     ) -> "AppConfig":
         """Reflect changed flat UI fields without erasing custom routes.
 
@@ -446,17 +448,17 @@ class AppConfig:
                     if (current.custom_endpoint
                             and scope != WorkflowScope.REFINEMENT.value):
                         continue
+                    endpoint = current.custom_endpoint
+                    if (scope == WorkflowScope.REFINEMENT.value
+                            and scope not in preserve_endpoint_scopes):
+                        endpoint = ""
                     workflows = workflows.with_route(
                         scope,
                         replace(
                             current,
                             provider_id=legacy_route.provider_id,
                             model_id=legacy_route.model_id,
-                            custom_endpoint=(
-                                ""
-                                if scope == WorkflowScope.REFINEMENT.value
-                                else current.custom_endpoint
-                            ),
+                            custom_endpoint=endpoint,
                         ),
                     )
             selection = replace(
@@ -871,6 +873,9 @@ class LocalConfigRepository(ConfigRepository):
         self,
         config: Mapping[str, Any],
         current_payload: Mapping[str, Any],
+        *,
+        preserve_explicit_endpoints: bool = False,
+        synchronize_legacy: bool = True,
     ) -> AppConfig:
         """Merge partial legacy input with disk before normalizing routes."""
         merged = dict(current_payload)
@@ -904,15 +909,64 @@ class LocalConfigRepository(ConfigRepository):
             key for key in legacy_workflow_keys
             if key in config and config.get(key) != current_payload.get(key)
         }
-        if changed_keys:
+        explicit_endpoint_scopes: frozenset[str] = frozenset()
+        if preserve_explicit_endpoints and isinstance(incoming_workflows, Mapping):
+            explicit_endpoint_scopes = frozenset(
+                normalize_workflow_scope(scope)
+                for scope, route in incoming_workflows.items()
+                if isinstance(route, Mapping)
+                and "custom_endpoint" in route
+                and self._mapping_route_explicitly_changed(
+                    scope, route, current_workflows)
+            )
+        if changed_keys and synchronize_legacy:
             legacy_values = dict(current_payload)
             legacy_values.update(dict(config))
             legacy_values.pop("workflows", None)
             legacy_model = AppConfig.from_mapping(legacy_values, self.defaults)
-            model = model.synchronize_legacy_routes(legacy_model, changed_keys)
+            model = model.synchronize_legacy_routes(
+                legacy_model,
+                changed_keys,
+                preserve_endpoint_scopes=explicit_endpoint_scopes,
+            )
         return model
 
-    def save(self, config: AppConfig | Mapping[str, Any]) -> None:
+    @staticmethod
+    def _mapping_route_explicitly_changed(
+        scope: str,
+        route: Mapping[str, Any],
+        current_workflows: Any,
+    ) -> bool:
+        """Detect an intentional nested route edit in a compatibility mapping."""
+        if not isinstance(current_workflows, Mapping):
+            return True
+        previous = current_workflows.get(scope)
+        if not isinstance(previous, Mapping):
+            return True
+
+        def value(values: Mapping[str, Any], *keys: str) -> str:
+            for key in keys:
+                if key in values and isinstance(values[key], str):
+                    return values[key].strip()
+            return ""
+
+        incoming_endpoint = value(route, "custom_endpoint", "endpoint", "base_url")
+        previous_endpoint = value(
+            previous, "custom_endpoint", "endpoint", "base_url")
+        if incoming_endpoint.rstrip("/") != previous_endpoint.rstrip("/"):
+            return True
+        return any(
+            key in route
+            and value(route, key) != value(previous, key)
+            for key in ("provider_id", "provider", "model_id", "model")
+        )
+
+    def save(
+        self,
+        config: AppConfig | Mapping[str, Any],
+        *,
+        _synchronize_legacy: bool = True,
+    ) -> None:
         with self._lock:
             _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
             current_payload = _read_json_mapping(self.path) or {}
@@ -929,7 +983,11 @@ class LocalConfigRepository(ConfigRepository):
                     raise UnsupportedSchemaVersionError(
                         f"Cannot save schema version {supplied_version} "
                         f"with supported version {CONFIG_SCHEMA_VERSION}")
-                model = self._model_from_mapping(config, current_payload)
+                model = self._model_from_mapping(
+                    config,
+                    current_payload,
+                    synchronize_legacy=_synchronize_legacy,
+                )
                 supplied_keys = set(config)
 
             # ``save`` is also a public application-facing write path (the
@@ -1017,7 +1075,11 @@ class LocalConfigRepository(ConfigRepository):
             else:
                 _ensure_supported_schema(self.path, CONFIG_SCHEMA_VERSION)
                 current_payload = _read_json_mapping(self.path) or {}
-                model = self._model_from_mapping(config, current_payload)
+                model = self._model_from_mapping(
+                    config,
+                    current_payload,
+                    preserve_explicit_endpoints=True,
+                )
                 supplied_keys = set(config)
             validated = replace(
                 model,
@@ -1030,7 +1092,7 @@ class LocalConfigRepository(ConfigRepository):
             for key in PROVIDER_SECRET_KEYS.values():
                 if key not in supplied_keys:
                     persisted.pop(key, None)
-            self.save(persisted)
+            self.save(persisted, _synchronize_legacy=False)
             return self.load()
 
     def reset_workflow(self, scope: WorkflowScope | str) -> AppConfig:

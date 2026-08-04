@@ -537,7 +537,15 @@ APP_CONFIG = {} if _RUN_SECRET_STORE_SELF_TEST else _load_app_config()
 
 
 def _save_app_config(repositories=None):
-    _storage_repositories(repositories).config.save(APP_CONFIG)
+    config_repository = _storage_repositories(repositories).config
+    config_repository.save(APP_CONFIG)
+    # The legacy UI still keeps a process-wide mapping.  Refresh it from the
+    # repository after every save so flat-field compatibility synchronization
+    # cannot leave a stale nested ``workflows`` object to overwrite the next
+    # unrelated settings write.
+    refreshed = config_repository.load().to_legacy_mapping()
+    APP_CONFIG.clear()
+    APP_CONFIG.update(refreshed)
 
 
 def _provider_key_candidate(provider, entered=""):
