@@ -280,6 +280,15 @@ def _is_recoverable_snapshot(payload: Mapping[str, Any]) -> bool:
     return True
 
 
+def _snapshot_container_is_valid(payload: Mapping[str, Any]) -> bool:
+    version = _version(payload.get("schema_version", payload.get("version")))
+    if version > HISTORY_SCHEMA_VERSION:
+        return False
+    if version == HISTORY_SCHEMA_VERSION:
+        return isinstance(payload.get("records"), list)
+    return _legacy_containers_are_valid(payload)
+
+
 def _legacy_containers_are_valid(payload: Mapping[str, Any]) -> bool:
     return all(
         key not in payload or isinstance(payload[key], list)
@@ -482,11 +491,12 @@ class HistoryStore:
                 # primary with an older temporary snapshot.  The newer file
                 # remains intact for the executable that understands it.
                 return current
-            if not _is_recoverable_snapshot(current):
+            if not _snapshot_container_is_valid(current):
                 # Keep every interrupted snapshot available while the
                 # committed primary is still structurally invalid.  The load
-                # path will fail closed (or migrate safely) without deleting
-                # the only recoverable copy first.
+                # path will fail closed without deleting the only recoverable
+                # copy first. Record-level repairs remain eligible for a
+                # newer validated snapshot below.
                 return current
             # A complete temp written after the primary may represent a crash
             # between flushing the new snapshot and ``os.replace``. Recover it
