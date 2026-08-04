@@ -64,6 +64,7 @@ from repositories import (
     WorkflowConfig,
     WorkflowRoute,
     WorkflowScope,
+    normalize_workflow_scope,
     validate_workflow_route,
 )
 from workflow_settings import WorkflowSettingsController
@@ -966,6 +967,28 @@ def _sync_local_asr_refinement_draft(
         WorkflowScope.LOCAL_ASR_REFINEMENT,
         replace(saved_local, enabled=requested),
     )
+
+
+def _sync_saved_settings_after_workflow_reset(
+        saved_settings: dict[str, object],
+        scope: WorkflowScope | str,
+        route: WorkflowRoute,
+        selected: Mapping[str, object],
+        selected_refinement: Mapping[str, object]) -> None:
+    """Update only the persisted baseline route reset by the user."""
+    normalized = normalize_workflow_scope(scope)
+    saved_workflows = saved_settings.get("workflows")
+    if isinstance(saved_workflows, WorkflowConfig):
+        saved_settings["workflows"] = saved_workflows.with_route(
+            normalized, route)
+    if normalized == WorkflowScope.TRANSCRIPTION.value:
+        saved_settings["transcription"] = (
+            selected.get("provider"), selected.get("model"))
+    elif normalized == WorkflowScope.REFINEMENT.value:
+        saved_settings["refinement"] = (
+            selected_refinement.get("provider"),
+            selected_refinement.get("model"),
+        )
 
 
 def _apply_settings_transaction(
@@ -8478,7 +8501,7 @@ class App(ctk.CTk):
         def reset_workflow_route():
             scope = workflow_scope_state["scope"]
             try:
-                workflow_controller.reset(scope)
+                reset_config = workflow_controller.reset(scope)
                 _activate_repositories(self.repositories)
             except (OSError, ValueError, ProviderError) as error:
                 workflow_feedback_label.configure(
@@ -8486,20 +8509,28 @@ class App(ctk.CTk):
                     text_color="#d17878")
                 return
             load_workflow_form(scope)
-            selected["provider"] = str(APP_CONFIG.get(
-                "transcription_provider", selected["provider"]))
-            selected["model"] = str(APP_CONFIG.get(
-                model_keys.get(selected["provider"], "gemini_model"),
-                selected["model"]))
-            selected_refinement["provider"] = str(APP_CONFIG.get(
-                "refinement_provider", selected_refinement["provider"]))
-            selected_refinement["model"] = str(APP_CONFIG.get(
-                "refinement_model", selected_refinement["model"]))
+            normalized_scope = normalize_workflow_scope(scope)
+            if normalized_scope == WorkflowScope.TRANSCRIPTION.value:
+                selected["provider"] = str(APP_CONFIG.get(
+                    "transcription_provider", selected["provider"]))
+                selected["model"] = str(APP_CONFIG.get(
+                    model_keys.get(selected["provider"], "gemini_model"),
+                    selected["model"]))
+            elif normalized_scope == WorkflowScope.REFINEMENT.value:
+                selected_refinement["provider"] = str(APP_CONFIG.get(
+                    "refinement_provider", selected_refinement["provider"]))
+                selected_refinement["model"] = str(APP_CONFIG.get(
+                    "refinement_model", selected_refinement["model"]))
+            _sync_saved_settings_after_workflow_reset(
+                saved_settings,
+                normalized_scope,
+                reset_config.workflow(normalized_scope),
+                selected,
+                selected_refinement,
+            )
             workflow_feedback_label.configure(
                 text=self._t("workflow_reset_done"), text_color="#69c58a")
             refresh_model_ui(rebuild_menu=False)
-            saved_settings.clear()
-            saved_settings.update(current_settings())
             refresh_dirty_state()
 
         workflow_scope_menu.configure(command=select_workflow_scope)
@@ -9552,6 +9583,12 @@ class App(ctk.CTk):
                     # just-saved preference or disturb other unsaved routes.
                     _sync_local_asr_refinement_draft(
                         workflow_controller, saved_settings, requested)
+                    if (workflow_scope_state["scope"]
+                            == WorkflowScope.LOCAL_ASR_REFINEMENT.value):
+                        if requested:
+                            workflow_enabled_switch.select()
+                        else:
+                            workflow_enabled_switch.deselect()
                     refresh_dirty_state()
 
                 refinement_switch.configure(command=apply_local_preference)

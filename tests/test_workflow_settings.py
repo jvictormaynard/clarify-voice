@@ -157,6 +157,44 @@ class WorkflowSettingsControllerTests(unittest.TestCase):
             saved_settings["workflows"].route(
                 WorkflowScope.LOCAL_ASR_REFINEMENT).enabled)
 
+    def test_reset_baseline_updates_one_scope_and_keeps_other_drafts_dirty(self):
+        controller = WorkflowSettingsController(self.repository())
+        baseline = controller.repository.load()
+        controller.set_route(
+            WorkflowScope.REWRITE,
+            prompt="unsaved rewrite policy",
+        )
+        saved_settings = {
+            "transcription": ("gemini", "gemini-2.5-flash"),
+            "refinement": ("openai", "gpt-4o-mini"),
+            "workflows": baseline.workflows,
+            "autostart": False,
+        }
+
+        reset_config = controller.reset(WorkflowScope.TRANSLATION)
+        selected = {"provider": "gemini", "model": "gemini-2.5-flash"}
+        selected_refinement = {"provider": "openai", "model": "gpt-4o-mini"}
+        app._sync_saved_settings_after_workflow_reset(
+            saved_settings,
+            WorkflowScope.TRANSLATION,
+            reset_config.workflow(WorkflowScope.TRANSLATION),
+            selected,
+            selected_refinement,
+        )
+
+        self.assertEqual(
+            saved_settings["workflows"].route(WorkflowScope.TRANSLATION),
+            reset_config.workflow(WorkflowScope.TRANSLATION),
+        )
+        self.assertEqual(
+            saved_settings["workflows"].route(WorkflowScope.REWRITE),
+            baseline.workflow(WorkflowScope.REWRITE),
+        )
+        self.assertNotEqual(
+            controller.route(WorkflowScope.REWRITE),
+            saved_settings["workflows"].route(WorkflowScope.REWRITE),
+        )
+
 
 class WorkflowOperationRoutingTests(unittest.TestCase):
     def setUp(self):
