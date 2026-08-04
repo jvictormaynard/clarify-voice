@@ -79,6 +79,12 @@ class AudioFileValidationTests(unittest.TestCase):
             path.write_bytes(b"fixture")
             self.assertEqual(validate_audio_path(path), path.resolve())
 
+    def test_local_path_whitespace_is_preserved(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / " recording.wav"
+            path.write_bytes(b"fixture")
+            self.assertEqual(validate_audio_path(str(path)), path.resolve())
+
     def test_invalid_and_remote_paths_are_rejected_without_network(self):
         with TemporaryDirectory() as directory:
             missing = Path(directory) / "missing.wav"

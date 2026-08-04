@@ -370,7 +370,9 @@ def validate_audio_path(
         raise AudioFileValidationError("Audio import must be a local path") from error
     if isinstance(raw, bytes):
         raw = os.fsdecode(raw)
-    value = str(raw).strip()
+    value = str(raw)
+    if not value.strip():
+        raise AudioFileValidationError("Audio import must be a local path")
     if "://" in value:
         raise AudioFileValidationError(
             "Only local audio files are supported; URL downloads are disabled")
