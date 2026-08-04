@@ -5,6 +5,13 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 
+from hotkey_config import (
+    HotkeyAction,
+    HotkeyDefinition,
+    HotkeySettings,
+    HotkeyValidationError,
+)
+
 
 WM_HOTKEY = 0x0312
 WM_PASTE = 0x0302
@@ -14,6 +21,9 @@ EM_GETSEL = 0x00B0
 SMTO_BLOCK = 0x0001
 SMTO_ABORTIFHUNG = 0x0002
 MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 VK_MENU = 0x12
 VK_ESCAPE = 0x1B
@@ -25,6 +35,20 @@ HOTKEY_SPECS = {
     0x5103: ("translation_hotkey", ord("T")),
     0x5104: ("toggle_visibility", ord("R")),
 }
+HOTKEY_IDS_BY_ACTION = {spec[0]: hotkey_id for hotkey_id, spec in HOTKEY_SPECS.items()}
+
+
+class HotkeyRegistrationError(RuntimeError):
+    """Registration failed; no partially active shortcut set remains."""
+
+    def __init__(self, failed_actions, *, registered=(), reason="RegisterHotKey failed"):
+        self.failed_actions = tuple(str(action) for action in failed_actions)
+        self.registered = frozenset(int(item) for item in registered)
+        self.reason = str(reason)
+        actions = ", ".join(self.failed_actions) or "unknown action"
+        super().__init__(
+            f"Could not register hotkey(s) for {actions}: {self.reason}. "
+            "Choose a different combination and try again.")
 
 _CONFIRMABLE_PASTE_CLASSES = frozenset({
     "Edit",
@@ -58,16 +82,85 @@ def action_for_hotkey_id(hotkey_id: int) -> str | None:
     return spec[0] if spec else None
 
 
-def register_global_hotkeys(user32, hwnd) -> set[int]:
-    """Register ClarifyVoice's Alt shortcuts and return successful IDs."""
+def _hotkey_modifier_mask(definition: HotkeyDefinition) -> int:
+    modifiers = {
+        "alt": MOD_ALT,
+        "ctrl": MOD_CONTROL,
+        "shift": MOD_SHIFT,
+        "win": MOD_WIN,
+    }
+    return sum(modifiers[name] for name in definition.modifiers) | MOD_NOREPEAT
+
+
+def _hotkey_virtual_key(key: str) -> int:
+    key = str(key).upper()
+    if key.startswith("F") and key[1:].isdigit():
+        return 0x70 + int(key[1:]) - 1
+    special_keys = {
+        "SPACE": 0x20,
+        "TAB": 0x09,
+        "ENTER": 0x0D,
+        "ESCAPE": 0x1B,
+        "UP": 0x26,
+        "DOWN": 0x28,
+        "LEFT": 0x25,
+        "RIGHT": 0x27,
+    }
+    if key in special_keys:
+        return special_keys[key]
+    return ord(key)
+
+
+def _normalised_registration_settings(settings=None) -> HotkeySettings:
+    if settings is None:
+        return HotkeySettings.defaults()
+    if isinstance(settings, HotkeySettings):
+        return settings
+    if isinstance(settings, dict):
+        if any(str(key) in {action.value for action in HotkeyAction}
+               for key in settings):
+            return HotkeySettings(settings)
+        return HotkeySettings.from_mapping(settings)
+    return HotkeySettings.from_mapping(settings)
+
+
+def register_global_hotkeys(user32, hwnd, settings=None, *, strict=False) -> set[int]:
+    """Register configured shortcuts and return successful IDs.
+
+    ``strict=True`` is used by the tray and settings transaction. It cleans up
+    every successful registration when one action is unavailable, so a failed
+    Apply can never leave a stale or partially active set. The default keeps
+    the historical best-effort return contract for integrations that only
+    need to inspect which IDs the OS accepted.
+    """
+    try:
+        configured = _normalised_registration_settings(settings)
+    except HotkeyValidationError:
+        raise
     user32.RegisterHotKey.argtypes = [
         wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
     user32.RegisterHotKey.restype = wintypes.BOOL
     registered: set[int] = set()
-    modifiers = MOD_ALT | MOD_NOREPEAT
-    for hotkey_id, (_action, virtual_key) in HOTKEY_SPECS.items():
-        if user32.RegisterHotKey(hwnd, hotkey_id, modifiers, virtual_key):
+    failed: list[str] = []
+    for action in HotkeyAction:
+        hotkey_id = HOTKEY_IDS_BY_ACTION[action.value]
+        definition = configured.definition(action)
+        if user32.RegisterHotKey(
+                hwnd, hotkey_id, _hotkey_modifier_mask(definition),
+                _hotkey_virtual_key(definition.key)):
             registered.add(hotkey_id)
+        else:
+            failed.append(action.value)
+    if failed and strict:
+        unregister_global_hotkeys(user32, hwnd, registered)
+        reason = "the combination is already registered by another application"
+        try:
+            last_error = ctypes.get_last_error()
+            if last_error:
+                reason = f"Windows error {last_error}"
+        except (AttributeError, OSError):
+            pass
+        raise HotkeyRegistrationError(failed, registered=registered, reason=reason)
     return registered
 
 
@@ -75,7 +168,62 @@ def unregister_global_hotkeys(user32, hwnd, registered: set[int]) -> None:
     user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
     user32.UnregisterHotKey.restype = wintypes.BOOL
     for hotkey_id in tuple(registered):
-        user32.UnregisterHotKey(hwnd, hotkey_id)
+        try:
+            user32.UnregisterHotKey(hwnd, hotkey_id)
+        except (AttributeError, OSError, TypeError):
+            pass
+
+
+class WindowsHotkeyRegistration:
+    """Transactional registration state for the native tray thread."""
+
+    def __init__(self, user32, hwnd, settings=None):
+        self.user32 = user32
+        self.hwnd = hwnd
+        self.settings = _normalised_registration_settings(settings)
+        self.registered: set[int] = set()
+
+    def register(self, settings=None) -> set[int]:
+        selected = (_normalised_registration_settings(settings)
+                    if settings is not None else self.settings)
+        ids = register_global_hotkeys(
+            self.user32, self.hwnd, selected, strict=True)
+        self.settings = selected
+        self.registered = set(ids)
+        return set(ids)
+
+    def unregister(self) -> None:
+        unregister_global_hotkeys(self.user32, self.hwnd, self.registered)
+        self.registered.clear()
+
+    def replace(self, settings) -> set[int]:
+        """Replace the set atomically, restoring the old set on failure."""
+        selected = _normalised_registration_settings(settings)
+        previous = self.settings
+        previous_was_registered = bool(self.registered)
+        self.unregister()
+        try:
+            return self.register(selected)
+        except Exception:
+            self.settings = previous
+            if previous_was_registered:
+                try:
+                    self.register(previous)
+                except Exception:
+                    # There is deliberately no stale state to report: the OS
+                    # has no registered IDs and the next Apply can retry.
+                    self.registered.clear()
+            raise
+
+
+def supports_push_to_talk() -> bool:
+    """Whether this native layer can observe key-up edges safely.
+
+    RegisterHotKey delivers WM_HOTKEY key-down notifications only. Until a
+    keyboard-hook adapter with explicit lifecycle ownership is added, the
+    packaged Windows path exposes toggle mode and rejects push-to-talk.
+    """
+    return False
 
 
 def register_escape_hotkey(user32, hwnd) -> bool:

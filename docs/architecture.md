@@ -154,8 +154,19 @@ formats. See [Provider HTTP reliability and diagnostics](http-resilience.md).
 
 ### `windows_hotkeys.py`
 
-Owns native Windows `RegisterHotKey` registration and Ctrl-key synthesis.
-Packaged Windows builds exclude the optional cross-platform `keyboard` module.
+Owns native Windows `RegisterHotKey` registration and Ctrl-key synthesis. The
+typed `HotkeySettings` value in `hotkey_config.py` persists the four actions
+(recording, rewrite, translation, and visibility) without coupling them to
+provider adapters. Legacy installations are normalised to Alt+L, Alt+K, Alt+T,
+and Alt+R. Conflicts are rejected before registration, and strict registration
+rolls back every accepted ID if Windows rejects one combination; settings
+therefore cannot leave a stale or partially active set.
+
+The packaged native layer currently supports toggle recording only because
+`RegisterHotKey` delivers key-down notifications and has no key-up edge. The
+settings-facing activation API accepts push-to-talk only when a future
+key-release-capable adapter explicitly opts in. Packaged Windows builds exclude
+the optional cross-platform `keyboard` module.
 
 ### `windows_clipboard.py`
 
