@@ -94,10 +94,11 @@ def _format_timestamp(value: datetime) -> str:
 _SENSITIVE_ERROR_PATTERNS = (
     (
         re.compile(
-            r"(?i)(api[_ -]?key|access[_ -]?token|authorization|"
-            r"client[_ -]?secret|password|secret)\s*[:=]\s*"
-            r"(?:[a-z]+\s+)?([^\s,;&]+)"),
-        r"\1=<redacted>",
+            r"(?i)(['\"]?(?:api[_ -]?key|access[_ -]?token|"
+            r"authorization|bearer|client[_ -]?secret|password|secret)"
+            r"['\"]?\s*[:=]\s*(?:['\"]?[a-z]+\s+)?['\"]?)"
+            r"([^\s,;&'\"}]+)(['\"]?)"),
+        r"\1<redacted>\3",
     ),
     (
         re.compile(r"(?i)(bearer)\s+([^\s,;&]+)"),
@@ -436,9 +437,6 @@ class HistoryStore:
                     "schema_version", item[3].get("version")))
                 <= HISTORY_SCHEMA_VERSION
             ]
-            for item in temporary_payloads:
-                if item not in supported_temporary:
-                    self._remove_best_effort(item[2])
             if not supported_temporary:
                 return current
             try:

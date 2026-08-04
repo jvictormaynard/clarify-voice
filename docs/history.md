@@ -44,7 +44,9 @@ are valid, a newer temporary snapshot (by filesystem mtime) is recovered and
 an older leftover is discarded; the committed primary wins when there is no
 evidence that the temp was newer. Malformed temporary files are removed. An
 operation that crashed before replacement is therefore recovered when
-possible, but it cannot corrupt the previous history.
+possible, but it cannot corrupt the previous history. A valid temporary file
+with a schema newer than this executable is preserved for a future executable
+instead of being deleted.
 
 Schema version 0 prototype shapes (`history`, `entries`, or `records`) migrate
 to version 1. Malformed entries are skipped while valid records remain

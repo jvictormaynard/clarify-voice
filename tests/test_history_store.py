@@ -103,8 +103,8 @@ class HistoryStoreTests(unittest.TestCase):
             error = store.list_records()[0].error
             self.assertEqual(
                 error,
-                "Authorization=<redacted>; Authorization=<redacted>; "
-                "Bearer <redacted>",
+                "Authorization: Bearer <redacted>; "
+                "Authorization: Basic <redacted>; Bearer <redacted>",
             )
             persisted = Path(store.path).read_text(encoding="utf-8")
             self.assertNotIn("sk-secret", persisted)
@@ -301,7 +301,11 @@ class HistoryStoreTests(unittest.TestCase):
             records = HistoryStore(path, enabled=True, retention_days=None,
                                    clock=fixed_clock).list_records()
             self.assertEqual([item.raw_text for item in records], ["supported"])
-            self.assertFalse(candidate.exists())
+            self.assertTrue(candidate.exists())
+            self.assertEqual(
+                json.loads(candidate.read_text(encoding="utf-8"))["schema_version"],
+                HISTORY_SCHEMA_VERSION + 1,
+            )
 
 
 if __name__ == "__main__":
