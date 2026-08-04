@@ -8,7 +8,7 @@ do not prove the packaged Settings flow, offline inference, or process cleanup.
 
 ## Current evidence
 
-The current source baseline is commit `1f3c85579750e2cd31d3ba645e1317355f393904`
+The current source baseline is commit `fd23eeaa548745688706fdbb9933f6f52d231eaf`
 (2026-08-04). From the isolated Linux worktree:
 
 | Gate | Command/evidence | Result |
