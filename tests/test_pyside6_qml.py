@@ -64,6 +64,9 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn('resultPage.copyLabel = "Copy"', main_source)
         self.assertIn("workflow.stopRecording()", main_source)
         self.assertIn("workflow.cancelRecording()", main_source)
+        self.assertIn('workflow.surface === "error"', main_source)
+        self.assertIn("Dismiss workflow error", main_source)
+        self.assertIn("workflow.reset()", main_source)
         self.assertIn("workflow.setLanguage", main_source)
         self.assertIn("workflow.setMode", main_source)
         self.assertNotIn('sequence: "Alt+L"', main_source)
@@ -90,6 +93,7 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("QGuiApplication", source)
         self.assertIn("create_real_workflow_service", source)
         self.assertIn("QmlWorkflowBridge(", source)
+        self.assertIn("app.aboutToQuit.connect(workflow_service.cancel_active)", source)
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("--fake", source)
 

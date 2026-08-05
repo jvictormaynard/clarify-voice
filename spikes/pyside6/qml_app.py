@@ -48,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ClarifyVoice QML startup failed: {error}", file=sys.stderr)
         return 2
 
+    app.aboutToQuit.connect(workflow_service.cancel_active)
+
     bridge = QmlWorkflowBridge(
         workflow_service,
         dispatch_runner=scheduler.run_in_background,

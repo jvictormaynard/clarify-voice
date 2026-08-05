@@ -65,6 +65,12 @@ class QmlWorkflowBridge(QObject):
         "error": "The dictation could not be completed",
         "no_audio": "No usable audio was captured",
     }
+    _ERROR_PHASES = frozenset(
+        {
+            WorkflowPhase.MICROPHONE_UNAVAILABLE,
+            WorkflowPhase.FAILED,
+        }
+    )
     _BUSY_PHASES = frozenset(
         {
             WorkflowPhase.RECORDING,
@@ -111,7 +117,10 @@ class QmlWorkflowBridge(QObject):
             return self._STATUS[WorkflowPhase.READY]
         if self._state.status_key in self._STATUS_KEYS:
             return self._STATUS_KEYS[self._state.status_key]
-        return self._STATUS[self._state.phase]
+        return self._STATUS.get(
+            self._state.phase,
+            "The dictation could not be completed",
+        )
 
     @Property(str, notify=resultChanged)
     def result(self) -> str:
@@ -142,6 +151,8 @@ class QmlWorkflowBridge(QObject):
             return "processing"
         if phase is WorkflowPhase.COMPLETED:
             return "success"
+        if phase in QmlWorkflowBridge._ERROR_PHASES:
+            return "error"
         return "idle"
 
     def _notify_all(self) -> None:

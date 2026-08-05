@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -16,15 +17,25 @@ try:
     from PySide6.QtCore import QCoreApplication
     from spikes.pyside6.qml_bridge import QmlWorkflowBridge
     from spikes.pyside6.qml_runtime import (
+        QtProviderGateway,
         QtRecordingSession,
+        QtWorkflowConfig,
         QtWorkflowScheduler,
         create_real_workflow_service,
     )
+    from provider_types import (
+        ProviderCapability,
+        RewriteResult,
+        TranscriptionResult,
+    )
+    from repositories import AppConfig, ProviderConfig
+    from workflow_config import WorkflowConfig, WorkflowRoute
     from workflows import (
         CancelDictation,
         DismissMicrophoneUnavailable,
         StartDictation,
         StopDictation,
+        RecordingSnapshot,
         WorkflowPhase,
         WorkflowService,
         WorkflowState,
@@ -181,9 +192,12 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
                 status_key="no_audio",
             )
         )
-        self.assertEqual(bridge.surface, "idle")
+        self.assertEqual(bridge.surface, "error")
         self.assertEqual(bridge.status, "No usable audio was captured")
         self.assertFalse(bridge.canShowResult)
+        bridge.reset()
+        self.assertEqual(service.finished, [2])
+        self.assertEqual(bridge.surface, "idle")
 
     def test_slots_submit_commands_without_waiting_for_worker(self):
         service = DeterministicWorkflowService()
@@ -213,6 +227,116 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
         workers[0].join(timeout=1)
         self.assertFalse(workers[0].is_alive())
         self.assertEqual(len(service.commands), 1)
+
+
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
+class QtProviderGatewayTests(unittest.TestCase):
+    def test_prompt_mode_keeps_refinement_and_dictionary_processing(self):
+        class ConfigRepository:
+            path = Path("/tmp/qml-provider-config.json")
+
+            def __init__(self, model):
+                self.model = model
+
+            def load(self):
+                return self.model
+
+        class Repositories:
+            def __init__(self, model):
+                self.config = ConfigRepository(model)
+
+        class Dictionary:
+            def __init__(self):
+                self.applied = None
+                self.expanded = []
+
+            def apply_context(self, request):
+                self.applied = request
+                return replace(request, dictionary_context="Use QML terms")
+
+            def expand(self, text):
+                self.expanded.append(text)
+                return f"{text} expanded"
+
+        class Metadata:
+            default_base_url = "https://provider.test/v1"
+
+            def supports(self, capability):
+                return capability is ProviderCapability.TEXT_GENERATION
+
+        class Registry:
+            def __init__(self):
+                self.transcription_requests = []
+                self.rewrite_requests = []
+
+            def describe(self, _provider):
+                return Metadata()
+
+            def supports(self, _provider, capability):
+                return capability is ProviderCapability.TEXT_GENERATION
+
+            def connection_for_route(self, _provider, connection, _endpoint):
+                return connection
+
+            def transcribe(self, provider, request, _connection, _cancel_token):
+                self.transcription_requests.append((provider, request))
+                return TranscriptionResult("raw transcript", provider, request.model)
+
+            def rewrite(self, provider, request, _connection, _cancel_token):
+                self.rewrite_requests.append((provider, request))
+                return RewriteResult("refined transcript", provider, request.model)
+
+        workflows = WorkflowConfig(
+            transcription=WorkflowRoute(
+                provider_id="openai", model_id="whisper", prompt="Transcribe"
+            ),
+            refinement=WorkflowRoute(
+                provider_id="gemini", model_id="editor", prompt="Refine"
+            ),
+            rewrite=WorkflowRoute(provider_id="gemini", model_id="editor"),
+            translation=WorkflowRoute(provider_id="gemini", model_id="editor"),
+            local_asr_refinement=WorkflowRoute(
+                provider_id="gemini", model_id="editor", enabled=False
+            ),
+        )
+        config = AppConfig(
+            openai=ProviderConfig(
+                api_key="openai-key",
+                base_url="https://openai.test/v1",
+                audio_model="whisper",
+                text_model="editor",
+            ),
+            gemini=ProviderConfig(
+                api_key="gemini-key",
+                base_url="https://gemini.test/v1",
+                text_model="editor",
+            ),
+            workflows=workflows,
+            local_asr_cloud_refinement=False,
+        )
+        dictionary = Dictionary()
+        registry = Registry()
+        audio = RecordingSnapshot(Path("recording.wav"), b"audio", cancel_token=None)
+
+        with patch("spikes.pyside6.qml_runtime.PROVIDER_REGISTRY", registry):
+            gateway = QtProviderGateway(
+                QtWorkflowConfig(Repositories(config)),
+                dictionary,
+            )
+            result = gateway.transcribe(audio, "prompt", "en")
+
+        self.assertEqual(result.text, "refined transcript expanded")
+        self.assertEqual(result.raw_text, "raw transcript")
+        self.assertEqual(result.refined_text, "refined transcript expanded")
+        self.assertEqual(result.refinement_provider_id, "gemini")
+        self.assertEqual(result.refinement_model, "editor")
+        self.assertEqual(dictionary.applied.dictionary_context, "")
+        self.assertEqual(
+            registry.transcription_requests[0][1].dictionary_context,
+            "Use QML terms",
+        )
+        self.assertEqual(dictionary.expanded, ["refined transcript"])
+        self.assertEqual(registry.rewrite_requests[0][0], "gemini")
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")

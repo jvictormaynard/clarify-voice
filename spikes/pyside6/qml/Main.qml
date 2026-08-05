@@ -44,6 +44,8 @@ ApplicationWindow {
                 workflow.cancelRecording()
             else if (workflow.surface === "result" || workflow.surface === "settings")
                 workflow.reset()
+            else if (workflow.surface === "error")
+                workflow.reset()
         }
     }
 
@@ -56,7 +58,7 @@ ApplicationWindow {
                 || workflow.surface === "recording"
                 || workflow.surface === "processing"
                 || workflow.surface === "success"
-                ? height / 2 : theme.panelRadius
+            ? height / 2 : theme.panelRadius
         color: theme.card
         border.color: theme.border
         border.width: 1
@@ -129,6 +131,7 @@ ApplicationWindow {
                                 text: workflow.surface === "idle" ? "Ready"
                                       : workflow.surface === "recording" ? "Recording"
                                       : workflow.surface === "processing" ? "Processing…"
+                                      : workflow.surface === "error" ? workflow.status
                                       : "Done"
                                 color: theme.text
                                 font.pixelSize: 13
@@ -267,6 +270,23 @@ ApplicationWindow {
                             Accessible.name: "Close ClarifyVoice"
                             onClicked: root.close()
                         }
+                    }
+
+                    RowLayout {
+                        id: errorControls
+                        visible: workflow.surface === "error"
+                        spacing: 4
+
+                        PilotButton {
+                            text: "Dismiss"
+                            theme: theme
+                            Layout.preferredWidth: 60
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Dismiss workflow error"
+                            onClicked: workflow.reset()
+                        }
+
+                        Item { Layout.fillWidth: true }
                     }
 
                     PilotButton {
