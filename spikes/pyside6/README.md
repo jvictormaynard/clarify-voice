@@ -14,6 +14,23 @@ spikes\pyside6\.venv\Scripts\python.exe -m spikes.pyside6.app
 
 The window exercises idle, recording, processing, success, result, and settings surfaces. All text and transitions are fake. The prototype does not capture audio, call a provider, touch the clipboard, register a global hotkey, or read user configuration.
 
+## Qt Quick/QML visual pilot
+
+The repository also contains a declarative Qt Quick surface for evaluating the
+visual direction separately from the existing widget prototype:
+
+```powershell
+spikes\pyside6\.venv\Scripts\python.exe -m spikes.pyside6.qml_app
+```
+
+The QML pilot includes the floating status pill, workflow states, result
+surface, settings surface, transitions, and basic accessibility names. It
+uses the same fake-data boundary and does not import production workflows,
+providers, recording, clipboard, hotkeys, or settings. It is a visual pilot;
+the normal packaging script still measures the existing PySide6 widget
+prototype until the QML surface has its own Windows packaging and acceptance
+evidence.
+
 ## Comparable builds and measurements
 
 Build both one-file, windowed artifacts into the spike directory only. The
