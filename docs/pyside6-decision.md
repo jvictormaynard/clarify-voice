@@ -10,7 +10,14 @@ scoped to that limitation.
 
 ## Scope and isolation
 
-The prototype lives in `spikes/pyside6/`. It has its own optional dependency file, a Qt-free fake workflow model, and a standalone entry point. Production startup (`app.py`), provider/audio/clipboard logic, `requirements.txt`, and the normal PyInstaller scripts are unchanged. The spike's package script writes only below `spikes/pyside6/`.
+The prototype lives in `spikes/pyside6/`. It has its own optional dependency
+file, a Qt-free fake workflow model, and two standalone visual entry points:
+the original Qt Widgets comparison surface (`app.py`) and the declarative Qt
+Quick/QML pilot (`qml_app.py`). Production startup, provider/audio/clipboard
+logic, `requirements.txt`, and the normal PyInstaller scripts are unchanged.
+The spike's package script writes only below `spikes/pyside6/`; the QML pilot
+is currently source-run visual evidence and is not yet included in the
+comparable package artifacts.
 
 The fake workflow covers the idle surface, recording/processing/success pill, result panel, settings page, tray show/quit, frameless dragging, rounded corners, transparency, always-on-top, and no-activate overlay flags. It deliberately does not duplicate provider or recording logic and does not register a global hotkey.
 
