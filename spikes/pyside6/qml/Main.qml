@@ -111,6 +111,18 @@ ApplicationWindow {
                         Layout.minimumWidth: 0
                         Layout.alignment: Qt.AlignVCenter
 
+                        // The shell is frameless, so keep the status area
+                        // draggable without taking pointer ownership away
+                        // from the controls to its right.
+                        DragHandler {
+                            id: windowDragHandler
+                            target: null
+                            onActiveChanged: {
+                                if (active)
+                                    root.startSystemMove()
+                            }
+                        }
+
                         RowLayout {
                             anchors.fill: parent
                             spacing: 6
@@ -208,7 +220,9 @@ ApplicationWindow {
                             theme: theme
                             Layout.preferredWidth: 78
                             Layout.preferredHeight: 26
-                            Accessible.name: "Mode"
+                            Accessible.name: "Mode: "
+                                              + (homePage.promptMode
+                                                 ? "Prompt" : "Transcribe")
                             onClicked: homePage.promptMode = !homePage.promptMode
                         }
 
@@ -266,11 +280,25 @@ ApplicationWindow {
                 objectName: "resultPage"
                 property string copyLabel: "Copy"
 
+                function resetCopyConfirmation() {
+                    copyResetTimer.stop()
+                    copyLabel = "Copy"
+                }
+
+                Timer {
+                    id: copyResetTimer
+                    interval: 850
+                    repeat: false
+                    onTriggered: resultPage.copyLabel = "Copy"
+                }
+
+                onVisibleChanged: resetCopyConfirmation()
+
                 Connections {
                     target: workflow
 
                     function onSurfaceChanged() {
-                        resultPage.copyLabel = "Copy"
+                        resultPage.resetCopyConfirmation()
                     }
                 }
 
@@ -336,7 +364,10 @@ ApplicationWindow {
                             Layout.preferredWidth: 52
                             Layout.preferredHeight: 26
                             Accessible.name: "Copy result"
-                            onClicked: resultPage.copyLabel = "OK!"
+                            onClicked: {
+                                resultPage.copyLabel = "OK!"
+                                copyResetTimer.restart()
+                            }
                         }
 
                         PilotButton {

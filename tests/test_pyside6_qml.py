@@ -48,10 +48,16 @@ class PySide6QmlPilotTests(unittest.TestCase):
         self.assertIn("text: languageCode", main_source)
         self.assertIn('Accessible.name: "Language: "', main_source)
         self.assertIn('languageCode === "EN"', main_source)
+        self.assertIn('Accessible.name: "Mode: "', main_source)
+        self.assertIn("root.startSystemMove()", main_source)
+        self.assertIn("DragHandler", main_source)
         self.assertIn("property bool successVisible: false", status_pill_source)
         self.assertIn("interval: 850", status_pill_source)
         self.assertIn(
             'workflow.surface === "success" && successVisible', status_pill_source)
+        self.assertIn("copyResetTimer", main_source)
+        self.assertIn("copyResetTimer.restart()", main_source)
+        self.assertIn("onVisibleChanged: resetCopyConfirmation()", main_source)
         self.assertIn('resultPage.copyLabel = "Copy"', main_source)
 
     def test_qml_entrypoint_uses_qt_quick_and_stays_production_isolated(self):
