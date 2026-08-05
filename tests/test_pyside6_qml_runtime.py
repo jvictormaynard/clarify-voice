@@ -19,9 +19,10 @@ try:
     from spikes.pyside6.qml_runtime import (
         QtProviderGateway,
         QtRecordingSession,
+        QtWorkflowRuntime,
         QtWorkflowConfig,
         QtWorkflowScheduler,
-        create_real_workflow_service,
+        create_real_workflow_runtime,
     )
     from provider_types import (
         ProviderCapability,
@@ -396,14 +397,51 @@ class QtWorkflowSchedulerTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "False")
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+class QtWorkflowRuntimeTests(unittest.TestCase):
+    def test_shutdown_cancels_waits_and_closes_provider_registry(self):
+        calls = []
+
+        class Service:
+            def cancel_active(self):
+                calls.append("cancel_active")
+
+        class Audio:
+            def wait_for_shutdown(self, timeout_seconds):
+                calls.append(("wait_for_shutdown", timeout_seconds))
+                return True
+
+        class Registry:
+            def cancel(self):
+                calls.append("provider_cancel")
+
+            def shutdown(self):
+                calls.append("provider_shutdown")
+
+        runtime = QtWorkflowRuntime(Service(), Audio(), provider_registry=Registry())
+
+        runtime.shutdown(1.25)
+        runtime.shutdown(0.01)
+
+        self.assertEqual(
+            calls,
+            [
+                "cancel_active",
+                "provider_cancel",
+                ("wait_for_shutdown", 1.25),
+                "provider_shutdown",
+            ],
+        )
+
+
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
 class QmlRuntimeFactoryTests(unittest.TestCase):
     def test_factory_composes_ui_free_runtime_without_importing_legacy_app(self):
         with TemporaryDirectory() as directory:
             with patch.dict(os.environ, {"CLARIFYVOICE_DATA_DIR": directory}):
-                service = create_real_workflow_service(object())
+                runtime = create_real_workflow_runtime(object())
 
-        self.assertIsInstance(service, WorkflowService)
+        self.assertIsInstance(runtime.workflow_service, WorkflowService)
         self.assertNotIn("app", sys.modules)
 
 

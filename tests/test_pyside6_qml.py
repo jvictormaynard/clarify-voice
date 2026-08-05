@@ -91,9 +91,9 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertNotIn("windows_clipboard", imported_roots)
         self.assertIn("QQmlApplicationEngine", source)
         self.assertIn("QGuiApplication", source)
-        self.assertIn("create_real_workflow_service", source)
+        self.assertIn("create_real_workflow_runtime", source)
         self.assertIn("QmlWorkflowBridge(", source)
-        self.assertIn("app.aboutToQuit.connect(workflow_service.cancel_active)", source)
+        self.assertIn("app.aboutToQuit.connect(runtime.shutdown)", source)
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("--fake", source)
 
@@ -117,6 +117,7 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         for symbol in (
             "QtProviderGateway",
             "QtRecordingAudioGateway",
+            "QtWorkflowRuntime",
             "QtClipboardGateway",
             "QtStatisticsGateway",
         ):

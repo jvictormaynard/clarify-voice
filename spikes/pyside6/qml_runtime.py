@@ -587,6 +587,15 @@ class QtRecordingAudioGateway:
             self._active = QtRecordingSession(self.recorder)
             return self._active
 
+    def wait_for_shutdown(self, timeout_seconds: float) -> bool:
+        """Wait for the active recording owner to release its workers."""
+
+        with self._lock:
+            active = self._active
+        if active is None:
+            return True
+        return active.shutdown_complete.wait(timeout=max(0.0, float(timeout_seconds)))
+
 
 class QtClipboardGateway(ClipboardGateway):
     """Copy results without taking focus from the QML shell."""
@@ -691,12 +700,39 @@ class QtStatisticsGateway:
         )
 
 
-def create_real_workflow_service(
+class QtWorkflowRuntime:
+    """Own the concrete QML workflow and its application shutdown boundary."""
+
+    def __init__(
+        self,
+        workflow_service: WorkflowService,
+        recording_audio: QtRecordingAudioGateway,
+        *,
+        provider_registry=PROVIDER_REGISTRY,
+    ) -> None:
+        self.workflow_service = workflow_service
+        self.recording_audio = recording_audio
+        self.provider_registry = provider_registry
+        self._shutdown = False
+
+    def shutdown(self, timeout_seconds: float = 3.0) -> None:
+        """Cancel active work, wait briefly for recording, then close providers."""
+
+        if self._shutdown:
+            return
+        self._shutdown = True
+        self.workflow_service.cancel_active()
+        self.provider_registry.cancel()
+        self.recording_audio.wait_for_shutdown(timeout_seconds)
+        self.provider_registry.shutdown()
+
+
+def create_real_workflow_runtime(
     scheduler: QtWorkflowScheduler,
     *,
     repositories: ApplicationRepositories | None = None,
-) -> WorkflowService:
-    """Create the production workflow used by the QML frontend."""
+) -> QtWorkflowRuntime:
+    """Create the production workflow and shutdown boundary for QML."""
 
     active = repositories or create_runtime_repositories()
     config = QtWorkflowConfig(active)
@@ -705,14 +741,16 @@ def create_real_workflow_service(
             Path(active.config.path).parent / "dictionary.json"
         )
     )
-    return WorkflowService(
+    recording_audio = QtRecordingAudioGateway(QtRecorder())
+    service = WorkflowService(
         QtProviderGateway(config, dictionary_service),
-        QtRecordingAudioGateway(QtRecorder()),
+        recording_audio,
         QtClipboardGateway(),
         config,
         QtStatisticsGateway(active),
         scheduler,
     )
+    return QtWorkflowRuntime(service, recording_audio)
 
 
 __all__ = [
@@ -722,8 +760,9 @@ __all__ = [
     "QtProviderGateway",
     "QtRecordingSession",
     "QtRecordingAudioGateway",
+    "QtWorkflowRuntime",
     "QtClipboardGateway",
     "QtStatisticsGateway",
     "create_runtime_repositories",
-    "create_real_workflow_service",
+    "create_real_workflow_runtime",
 ]

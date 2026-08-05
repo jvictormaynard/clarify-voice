@@ -14,14 +14,14 @@ try:
     from .qml_runtime import (
         QtRuntimeError,
         QtWorkflowScheduler,
-        create_real_workflow_service,
+        create_real_workflow_runtime,
     )
 except ImportError:  # PyInstaller analyzes this file as a standalone entry point.
     from qml_bridge import QmlWorkflowBridge
     from qml_runtime import (
         QtRuntimeError,
         QtWorkflowScheduler,
-        create_real_workflow_service,
+        create_real_workflow_runtime,
     )
 
 
@@ -43,12 +43,13 @@ def main(argv: list[str] | None = None) -> int:
 
     scheduler = QtWorkflowScheduler(app)
     try:
-        workflow_service = create_real_workflow_service(scheduler)
+        runtime = create_real_workflow_runtime(scheduler)
     except QtRuntimeError as error:
         print(f"ClarifyVoice QML startup failed: {error}", file=sys.stderr)
         return 2
 
-    app.aboutToQuit.connect(workflow_service.cancel_active)
+    workflow_service = runtime.workflow_service
+    app.aboutToQuit.connect(runtime.shutdown)
 
     bridge = QmlWorkflowBridge(
         workflow_service,
@@ -62,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     engine.addImportPath(str(qml_root))
     engine.load(QUrl.fromLocalFile(str(qml_root / "Main.qml")))
     if not engine.rootObjects():
+        runtime.shutdown()
         return 1
     return app.exec()
 
