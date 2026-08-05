@@ -25,6 +25,8 @@ class PySide6QmlPilotTests(unittest.TestCase):
         self.assertRegex(qml_source, r"(Behavior|NumberAnimation|OpacityAnimator)")
         self.assertRegex(qml_source, r"Accessible\.(name|description)")
         self.assertIn("Accessible.name: workflow.status", qml_source)
+        self.assertIn("Accessible.name: workflow.result", qml_source)
+        self.assertNotIn('Accessible.name: "Prototype result text"', qml_source)
 
     def test_qml_entrypoint_uses_qt_quick_and_stays_production_isolated(self):
         source = (SPIKE / "qml_app.py").read_text(encoding="utf-8")

@@ -316,7 +316,7 @@ ApplicationWindow {
                             lineHeight: 1.35
                             wrapMode: Text.WordWrap
                             verticalAlignment: Text.AlignTop
-                            Accessible.name: "Prototype result text"
+                            Accessible.name: workflow.result
                         }
                     }
 
