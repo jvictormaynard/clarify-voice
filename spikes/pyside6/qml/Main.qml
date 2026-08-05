@@ -40,15 +40,11 @@ ApplicationWindow {
     Shortcut {
         sequence: "Escape"
         onActivated: {
-            if (workflow.surface === "result" || workflow.surface === "settings")
+            if (workflow.surface === "recording")
+                workflow.cancelRecording()
+            else if (workflow.surface === "result" || workflow.surface === "settings")
                 workflow.reset()
         }
-    }
-
-    Shortcut {
-        sequence: "Alt+L"
-        enabled: workflow.surface === "idle"
-        onActivated: workflow.startRecording()
     }
 
     Rectangle {
@@ -153,10 +149,16 @@ ApplicationWindow {
                         MouseArea {
                             anchors.fill: parent
                             enabled: workflow.surface === "idle"
+                                     || workflow.surface === "recording"
                             hoverEnabled: true
                             cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                             Accessible.name: workflow.status
-                            onClicked: workflow.startRecording()
+                            onClicked: {
+                                if (workflow.surface === "recording")
+                                    workflow.stopRecording()
+                                else
+                                    workflow.startRecording()
+                            }
                         }
                     }
 
@@ -209,8 +211,10 @@ ApplicationWindow {
                             Accessible.name: "Language: "
                                               + (languageCode === "EN"
                                                  ? "English" : "Portuguese")
-                            onClicked: languageCode = languageCode === "EN"
-                                                       ? "PT" : "EN"
+                            onClicked: {
+                                languageCode = languageCode === "EN" ? "PT" : "EN"
+                                workflow.setLanguage(languageCode.toLowerCase())
+                            }
                         }
 
                         PilotButton {
@@ -223,7 +227,11 @@ ApplicationWindow {
                             Accessible.name: "Mode: "
                                               + (homePage.promptMode
                                                  ? "Prompt" : "Transcribe")
-                            onClicked: homePage.promptMode = !homePage.promptMode
+                            onClicked: {
+                                homePage.promptMode = !homePage.promptMode
+                                workflow.setMode(homePage.promptMode
+                                                 ? "prompt" : "transcription")
+                            }
                         }
 
                         PilotButton {

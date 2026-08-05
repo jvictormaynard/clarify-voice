@@ -1,35 +1,31 @@
-# PySide6 decision spike
+# Qt Quick frontend
 
-This is an isolated, fake-data prototype for [issue #24](https://github.com/jvictormaynard/clarify-voice/issues/24). It is not imported by `app.py`, is not included in the production requirements, and is not called by the normal startup or build scripts.
+This directory contains the Qt Quick/QML frontend entrypoint for ClarifyVoice.
+The QML process uses the real `WorkflowService` and does not construct the
+CustomTkinter `App` or show a Tk window. Provider, recording, clipboard,
+configuration, statistics, and Qt scheduling are composed by the UI-free
+`qml_runtime.py` module.
 
-## Run the prototype on Windows
+The old widget spike remains only as historical benchmark material in this
+directory. It is not imported by the QML entrypoint.
 
-From the repository root, install only the optional spike dependency into a disposable environment:
+## Run the frontend on Windows
+
+From the repository root, install the optional Qt dependency into a disposable
+environment:
 
 ```powershell
 py -m venv spikes\pyside6\.venv
 spikes\pyside6\.venv\Scripts\python.exe -m pip install -r spikes\pyside6\requirements.txt
-spikes\pyside6\.venv\Scripts\python.exe -m spikes.pyside6.app
-```
-
-The window exercises idle, recording, processing, success, result, and settings surfaces. All text and transitions are fake. The prototype does not capture audio, call a provider, touch the clipboard, register a global hotkey, or read user configuration.
-
-## Qt Quick/QML visual pilot
-
-The repository also contains a declarative Qt Quick surface for evaluating the
-visual direction separately from the existing widget prototype:
-
-```powershell
 spikes\pyside6\.venv\Scripts\python.exe -m spikes.pyside6.qml_app
 ```
 
-The QML pilot includes the floating status pill, workflow states, result
-surface, settings surface, transitions, and basic accessibility names. It
-uses the same fake-data boundary and does not import production workflows,
-providers, recording, clipboard, hotkeys, or settings. It is a visual pilot;
-the normal packaging script still measures the existing PySide6 widget
-prototype until the QML surface has its own Windows packaging and acceptance
-evidence.
+The QML frontend exercises real idle, recording, processing, success, and
+result states. Runtime, provider, microphone, and local-ASR failures surface
+as actionable workflow errors; there is no fake-runtime flag or fallback path.
+The local button starts/stops dictation. Global hotkeys, settings persistence,
+file import, and translation remain later extraction steps and are not
+silently claimed by this entrypoint.
 
 ## Comparable builds and measurements
 
