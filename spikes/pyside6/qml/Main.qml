@@ -140,13 +140,6 @@ ApplicationWindow {
                                 Accessible.name: workflow.status
                             }
 
-                            Label {
-                                id: hotkeyHint
-                                text: workflow.surface === "idle" ? "Alt+L" : ""
-                                color: theme.dim
-                                font.pixelSize: 10
-                                elide: Text.ElideRight
-                            }
                         }
 
                         MouseArea {
@@ -451,28 +444,9 @@ ApplicationWindow {
                         color: theme.border
                     }
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        Label {
-                            text: "Hotkey"
-                            color: theme.text
-                            font.pixelSize: 12
-                        }
-
-                        Item { Layout.fillWidth: true }
-
-                        Label {
-                            text: "Alt+L"
-                            color: theme.dim
-                            font.pixelSize: 11
-                        }
-                    }
-
                     Label {
                         Layout.fillWidth: true
-                        text: "Production shell keeps global shortcuts and settings ownership."
+                        text: "Global shortcuts and settings will be connected to the production shell."
                         color: theme.dim
                         font.pixelSize: 11
                         wrapMode: Text.WordWrap

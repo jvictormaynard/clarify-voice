@@ -129,6 +129,10 @@ class QtWorkflowScheduler(QObject):
             self._run_callback,
             Qt.ConnectionType.QueuedConnection,
         )
+        self._worker_condition = threading.Condition()
+        self._accepting_workers = True
+        self._dispatch_workers: set[threading.Thread] = set()
+        self._background_workers: set[threading.Thread] = set()
 
     @Slot(object)
     def _run_callback(self, callback: Callable[[], None]) -> None:
@@ -138,11 +142,74 @@ class QtWorkflowScheduler(QObject):
         self._callback_ready.emit(callback)
 
     def run_in_background(self, callback: Callable[[], None]) -> None:
-        threading.Thread(
-            target=callback,
-            name="ClarifyVoiceQmlWorkflow",
-            daemon=True,
-        ).start()
+        self._start_worker(
+            callback,
+            self._background_workers,
+            "ClarifyVoiceQmlWorkflow",
+        )
+
+    def run_dispatch(self, callback: Callable[[], None]) -> None:
+        """Submit a QML command while the application accepts new work."""
+
+        self._start_worker(
+            callback,
+            self._dispatch_workers,
+            "ClarifyVoiceQmlDispatch",
+        )
+
+    def begin_shutdown(self) -> None:
+        """Reject queued QML/background callbacks before teardown begins."""
+
+        with self._worker_condition:
+            self._accepting_workers = False
+
+    def wait_for_dispatches(self, timeout_seconds: float) -> bool:
+        """Drain command dispatch workers within the shutdown budget."""
+
+        return self._wait_for_workers(self._dispatch_workers, timeout_seconds)
+
+    def wait_for_background(self, timeout_seconds: float) -> bool:
+        """Drain already-running workflow workers within the shutdown budget."""
+
+        return self._wait_for_workers(self._background_workers, timeout_seconds)
+
+    def _start_worker(
+        self,
+        callback: Callable[[], None],
+        workers: set[threading.Thread],
+        name: str,
+    ) -> None:
+        def run() -> None:
+            try:
+                with self._worker_condition:
+                    if not self._accepting_workers:
+                        return
+                callback()
+            finally:
+                with self._worker_condition:
+                    workers.discard(threading.current_thread())
+                    self._worker_condition.notify_all()
+
+        with self._worker_condition:
+            if not self._accepting_workers:
+                return
+            worker = threading.Thread(target=run, name=name, daemon=True)
+            workers.add(worker)
+        worker.start()
+
+    def _wait_for_workers(
+        self,
+        workers: set[threading.Thread],
+        timeout_seconds: float,
+    ) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        with self._worker_condition:
+            while workers:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._worker_condition.wait(timeout=remaining)
+        return True
 
     def run_recording(
         self,
@@ -707,11 +774,13 @@ class QtWorkflowRuntime:
         self,
         workflow_service: WorkflowService,
         recording_audio: QtRecordingAudioGateway,
+        scheduler: QtWorkflowScheduler,
         *,
         provider_registry=PROVIDER_REGISTRY,
     ) -> None:
         self.workflow_service = workflow_service
         self.recording_audio = recording_audio
+        self.scheduler = scheduler
         self.provider_registry = provider_registry
         self._shutdown = False
 
@@ -721,9 +790,16 @@ class QtWorkflowRuntime:
         if self._shutdown:
             return
         self._shutdown = True
+        timeout_seconds = max(0.0, float(timeout_seconds))
+        deadline = time.monotonic() + timeout_seconds
+        self.scheduler.begin_shutdown()
+        self.scheduler.wait_for_dispatches(max(0.0, deadline - time.monotonic()))
         self.workflow_service.cancel_active()
         self.provider_registry.cancel()
-        self.recording_audio.wait_for_shutdown(timeout_seconds)
+        self.scheduler.wait_for_dispatches(max(0.0, deadline - time.monotonic()))
+        self.workflow_service.cancel_active()
+        self.recording_audio.wait_for_shutdown(max(0.0, deadline - time.monotonic()))
+        self.scheduler.wait_for_background(max(0.0, deadline - time.monotonic()))
         self.provider_registry.shutdown()
 
 
@@ -750,7 +826,7 @@ def create_real_workflow_runtime(
         QtStatisticsGateway(active),
         scheduler,
     )
-    return QtWorkflowRuntime(service, recording_audio)
+    return QtWorkflowRuntime(service, recording_audio, scheduler)
 
 
 __all__ = [

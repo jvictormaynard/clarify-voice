@@ -373,6 +373,40 @@ class QtWorkflowSchedulerTests(unittest.TestCase):
         self.assertTrue(delivered.is_set())
         self.assertEqual(callback_thread_ids, [gui_thread_id])
 
+    def test_shutdown_barrier_rejects_new_dispatches(self):
+        scheduler = QtWorkflowScheduler(self.qt_app)
+        calls = []
+
+        scheduler.begin_shutdown()
+        scheduler.run_dispatch(lambda: calls.append("dispatch"))
+
+        self.assertTrue(scheduler.wait_for_dispatches(0.1))
+        self.assertEqual(calls, [])
+
+    def test_shutdown_barrier_drains_dispatch_started_before_shutdown(self):
+        scheduler = QtWorkflowScheduler(self.qt_app)
+        entered = threading.Event()
+        release = threading.Event()
+
+        scheduler.run_dispatch(lambda: (entered.set(), release.wait(timeout=1)))
+        self.assertTrue(entered.wait(timeout=1))
+        scheduler.begin_shutdown()
+
+        drained = threading.Event()
+        waiter = threading.Thread(
+            target=lambda: (
+                scheduler.wait_for_dispatches(1),
+                drained.set(),
+            ),
+            daemon=True,
+        )
+        waiter.start()
+        self.assertFalse(drained.wait(timeout=0.05))
+        release.set()
+        waiter.join(timeout=1)
+
+        self.assertTrue(drained.is_set())
+
     def test_qml_runtime_modules_do_not_import_app_at_import_time(self):
         repository_root = Path(__file__).resolve().parents[1]
         environment = dict(os.environ)
@@ -418,20 +452,43 @@ class QtWorkflowRuntimeTests(unittest.TestCase):
             def shutdown(self):
                 calls.append("provider_shutdown")
 
-        runtime = QtWorkflowRuntime(Service(), Audio(), provider_registry=Registry())
+        class Scheduler:
+            def begin_shutdown(self):
+                calls.append("begin_shutdown")
+
+            def wait_for_dispatches(self, _timeout_seconds):
+                calls.append("wait_for_dispatches")
+                return True
+
+            def wait_for_background(self, _timeout_seconds):
+                calls.append("wait_for_background")
+                return True
+
+        runtime = QtWorkflowRuntime(
+            Service(),
+            Audio(),
+            Scheduler(),
+            provider_registry=Registry(),
+        )
 
         runtime.shutdown(1.25)
         runtime.shutdown(0.01)
 
         self.assertEqual(
-            calls,
+            calls[:6],
             [
+                "begin_shutdown",
+                "wait_for_dispatches",
                 "cancel_active",
                 "provider_cancel",
-                ("wait_for_shutdown", 1.25),
-                "provider_shutdown",
+                "wait_for_dispatches",
+                "cancel_active",
             ],
         )
+        self.assertEqual(calls[7:], ["wait_for_background", "provider_shutdown"])
+        self.assertEqual(calls[6][0], "wait_for_shutdown")
+        self.assertGreaterEqual(calls[6][1], 0.0)
+        self.assertLessEqual(calls[6][1], 1.25)
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")

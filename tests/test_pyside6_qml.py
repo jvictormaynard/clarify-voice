@@ -69,7 +69,7 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("workflow.reset()", main_source)
         self.assertIn("workflow.setLanguage", main_source)
         self.assertIn("workflow.setMode", main_source)
-        self.assertNotIn('sequence: "Alt+L"', main_source)
+        self.assertNotIn("Alt+L", main_source)
 
     def test_qml_entrypoint_uses_qt_quick_and_stays_production_isolated(self):
         source = (SPIKE / "qml_app.py").read_text(encoding="utf-8")
@@ -93,6 +93,7 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("QGuiApplication", source)
         self.assertIn("create_real_workflow_runtime", source)
         self.assertIn("QmlWorkflowBridge(", source)
+        self.assertIn("dispatch_runner=scheduler.run_dispatch", source)
         self.assertIn("app.aboutToQuit.connect(runtime.shutdown)", source)
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("--fake", source)
