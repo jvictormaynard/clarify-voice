@@ -7,35 +7,32 @@ Button {
     property bool primary: false
     property bool quiet: false
 
-    implicitHeight: 44
+    implicitHeight: control.theme.controlHeight
+    hoverEnabled: true
 
     contentItem: Label {
         text: control.text
         color: !control.enabled
-               ? control.theme.muted
-               : control.primary ? "white" : control.theme.text
+               ? control.theme.dim
+               : control.quiet ? control.theme.dim : control.theme.text
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
-        font.pixelSize: control.quiet ? 12 : 14
-        font.weight: control.primary ? Font.Medium : Font.Normal
+        font.pixelSize: 11
+        font.weight: Font.Normal
         elide: Text.ElideRight
     }
 
     background: Rectangle {
-        radius: control.theme.radiusSmall
+        radius: control.theme.controlRadius
         color: !control.enabled
-               ? control.theme.surfaceRaised
-               : control.quiet ? "transparent"
-               : control.primary ? control.theme.accentStrong
-               : control.theme.surfaceSoft
-        border.width: control.quiet ? 0 : 1
-        border.color: !control.enabled
-                      ? control.theme.border
-                      : control.primary ? control.theme.accent
-                      : control.theme.border
+               ? control.theme.controlDisabled
+               : control.quiet
+                 ? (control.hovered ? control.theme.controlHover : "transparent")
+                 : (control.hovered ? control.theme.controlHover : control.theme.control)
+        border.width: 0
 
         Behavior on color {
-            ColorAnimation { duration: 140; easing.type: Easing.OutCubic }
+            ColorAnimation { duration: 110; easing.type: Easing.OutCubic }
         }
     }
 }

@@ -6,46 +6,40 @@ import QtQuick.Window 6.5
 Window {
     id: pill
     objectName: "workflowStatusPill"
-    width: 360
-    height: 70
+    width: 142
+    height: 42
     color: "transparent"
     flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
            | Qt.WindowDoesNotAcceptFocus
-    visible: true
+    visible: workflow.busy || workflow.surface === "success"
     title: "ClarifyVoice workflow status"
-    property color accentColor: theme.accent
-    property string label: workflow.status
-    property string phase: workflow.surface
 
     required property Theme theme
+    property string label: workflow.status
 
     Rectangle {
         id: card
         anchors.fill: parent
         anchors.margins: 1
         radius: height / 2
-        color: theme.surfaceRaised
+        color: theme.card
         border.color: theme.border
         border.width: 1
-        opacity: workflow.busy ? 1 : 0.98
-        Accessible.name: "ClarifyVoice workflow status"
-
-        Behavior on opacity {
-            NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
-        }
+        Accessible.name: workflow.status
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 20
-            anchors.rightMargin: 20
-            spacing: 12
+            anchors.leftMargin: 12
+            anchors.rightMargin: 12
+            spacing: 8
 
             Rectangle {
                 id: indicator
-                Layout.preferredWidth: 12
-                Layout.preferredHeight: 12
-                radius: 6
-                color: workflow.surface === "recording" ? theme.recording : pill.accentColor
+                Layout.preferredWidth: 8
+                Layout.preferredHeight: 8
+                radius: 4
+                color: theme.text
+                opacity: workflow.surface === "success" ? 1.0 : 0.72
 
                 SequentialAnimation on scale {
                     running: workflow.busy
@@ -59,18 +53,18 @@ Window {
                 Layout.fillWidth: true
                 text: pill.label
                 color: theme.text
-                font.pixelSize: 15
-                font.weight: Font.Medium
+                font.pixelSize: 11
+                font.weight: Font.Normal
                 elide: Text.ElideRight
-                Accessible.name: pill.label
+                Accessible.name: workflow.status
             }
 
             Label {
-                text: workflow.busy ? "LIVE" : "READY"
-                color: workflow.busy ? theme.recording : theme.success
-                font.pixelSize: 10
+                text: workflow.busy ? "LIVE" : "OK"
+                color: theme.dim
+                font.pixelSize: 9
                 font.weight: Font.DemiBold
-                font.letterSpacing: 1.2
+                font.letterSpacing: 0.8
             }
         }
     }
