@@ -54,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     bridge = QmlWorkflowBridge(
         workflow_service,
         dispatch_runner=scheduler.run_dispatch,
+        copy_runner=runtime.copy_result,
         parent=app,
     )
     engine = QQmlApplicationEngine()

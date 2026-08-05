@@ -775,14 +775,21 @@ class QtWorkflowRuntime:
         workflow_service: WorkflowService,
         recording_audio: QtRecordingAudioGateway,
         scheduler: QtWorkflowScheduler,
+        clipboard: QtClipboardGateway,
         *,
         provider_registry=PROVIDER_REGISTRY,
     ) -> None:
         self.workflow_service = workflow_service
         self.recording_audio = recording_audio
         self.scheduler = scheduler
+        self.clipboard = clipboard
         self.provider_registry = provider_registry
         self._shutdown = False
+
+    def copy_result(self, text: str) -> SelectionDisposition:
+        """Copy a visible QML result through the real clipboard adapter."""
+
+        return self.clipboard.write_dictation_result(None, str(text))
 
     def shutdown(self, timeout_seconds: float = 3.0) -> None:
         """Cancel active work, wait briefly for recording, then close providers."""
@@ -818,15 +825,16 @@ def create_real_workflow_runtime(
         )
     )
     recording_audio = QtRecordingAudioGateway(QtRecorder())
+    clipboard = QtClipboardGateway()
     service = WorkflowService(
         QtProviderGateway(config, dictionary_service),
         recording_audio,
-        QtClipboardGateway(),
+        clipboard,
         config,
         QtStatisticsGateway(active),
         scheduler,
     )
-    return QtWorkflowRuntime(service, recording_audio, scheduler)
+    return QtWorkflowRuntime(service, recording_audio, scheduler, clipboard)
 
 
 __all__ = [

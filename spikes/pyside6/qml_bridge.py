@@ -88,11 +88,17 @@ class QmlWorkflowBridge(QObject):
         workflow_service: Any,
         *,
         dispatch_runner: Callable[[Callable[[], None]], None] | None = None,
+        copy_runner: Callable[[str], Any] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._workflow_service = workflow_service
         self._dispatch_runner = dispatch_runner or (lambda callback: callback())
+        self._copy_runner = copy_runner or getattr(
+            workflow_service,
+            "copy_result",
+            lambda _text: None,
+        )
         self._state = workflow_service.state
         self._result_visible = False
         self._settings_visible = False
@@ -216,6 +222,14 @@ class QmlWorkflowBridge(QObject):
         self._result_visible = True
         self._settings_visible = False
         self._notify_all()
+
+    @Slot(result=bool)
+    def copyResult(self) -> bool:
+        if not self.canShowResult:
+            return False
+        result = self.result
+        self._submit(lambda: self._copy_runner(result))
+        return True
 
     @Slot()
     def finish(self) -> None:

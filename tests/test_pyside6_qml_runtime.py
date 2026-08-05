@@ -151,7 +151,8 @@ class QtRecordingSessionTests(unittest.TestCase):
 class QmlWorkflowBridgeTests(unittest.TestCase):
     def test_bridge_maps_real_state_and_finishes_terminal_result(self):
         service = DeterministicWorkflowService()
-        bridge = QmlWorkflowBridge(service)
+        copied = []
+        bridge = QmlWorkflowBridge(service, copy_runner=copied.append)
 
         self.assertEqual(bridge.surface, "idle")
         self.assertFalse(bridge.busy)
@@ -171,6 +172,8 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
 
         bridge.showResult()
         self.assertEqual(bridge.surface, "result")
+        self.assertTrue(bridge.copyResult())
+        self.assertEqual(copied, ["Real result"])
         bridge.reset()
         self.assertEqual(service.finished, [1])
         self.assertEqual(bridge.surface, "idle")
@@ -452,6 +455,11 @@ class QtWorkflowRuntimeTests(unittest.TestCase):
             def shutdown(self):
                 calls.append("provider_shutdown")
 
+        class Clipboard:
+            def write_dictation_result(self, _target, text):
+                calls.append(("copy_result", text))
+                return "copied"
+
         class Scheduler:
             def begin_shutdown(self):
                 calls.append("begin_shutdown")
@@ -468,15 +476,18 @@ class QtWorkflowRuntimeTests(unittest.TestCase):
             Service(),
             Audio(),
             Scheduler(),
+            Clipboard(),
             provider_registry=Registry(),
         )
 
+        self.assertEqual(runtime.copy_result("Visible result"), "copied")
         runtime.shutdown(1.25)
         runtime.shutdown(0.01)
 
         self.assertEqual(
-            calls[:6],
+            calls[:7],
             [
+                ("copy_result", "Visible result"),
                 "begin_shutdown",
                 "wait_for_dispatches",
                 "cancel_active",
@@ -485,10 +496,10 @@ class QtWorkflowRuntimeTests(unittest.TestCase):
                 "cancel_active",
             ],
         )
-        self.assertEqual(calls[7:], ["wait_for_background", "provider_shutdown"])
-        self.assertEqual(calls[6][0], "wait_for_shutdown")
-        self.assertGreaterEqual(calls[6][1], 0.0)
-        self.assertLessEqual(calls[6][1], 1.25)
+        self.assertEqual(calls[8:], ["wait_for_background", "provider_shutdown"])
+        self.assertEqual(calls[7][0], "wait_for_shutdown")
+        self.assertGreaterEqual(calls[7][1], 0.0)
+        self.assertLessEqual(calls[7][1], 1.25)
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")

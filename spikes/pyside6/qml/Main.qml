@@ -386,8 +386,10 @@ ApplicationWindow {
                             Layout.preferredHeight: 26
                             Accessible.name: "Copy result"
                             onClicked: {
-                                resultPage.copyLabel = "OK!"
-                                copyResetTimer.restart()
+                                if (workflow.copyResult()) {
+                                    resultPage.copyLabel = "OK!"
+                                    copyResetTimer.restart()
+                                }
                             }
                         }
 
