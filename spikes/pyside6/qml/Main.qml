@@ -136,7 +136,7 @@ ApplicationWindow {
                                         color: theme.text
                                         font.pixelSize: 22
                                         font.weight: Font.Medium
-                                        Accessible.name: "Workflow status"
+                                        Accessible.name: workflow.status
                                     }
 
                                     Label {
