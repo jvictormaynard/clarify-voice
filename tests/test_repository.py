@@ -33,6 +33,10 @@ class RepositorySafetyTests(unittest.TestCase):
         content = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
         self.assertIn('Join-Path $repoRoot "*.py"', content)
         self.assertIn("${distribution};distribution", content)
+        self.assertIn('Join-Path $repoRoot "local_asr_manifest.json"', content)
+        self.assertIn('Join-Path $repoRoot "licenses"', content)
+        self.assertIn('"${localAsrManifest};."', content)
+        self.assertIn('"${localAsrLicenses};licenses"', content)
         self.assertNotIn('Join-Path $soxDir "*.txt"', content)
         self.assertNotIn('Join-Path $soxDir "LICENSE.GPL.txt"', content)
 

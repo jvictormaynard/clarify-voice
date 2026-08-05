@@ -9,6 +9,8 @@ $repoVersion = Join-Path $repoRoot "version.py"
 $repoExtra = Join-Path $repoRoot "extra"
 $repoAssets = Join-Path $repoRoot "assets"
 $repoDistribution = Join-Path $repoRoot "distribution"
+$repoLocalAsrManifest = Join-Path $repoRoot "local_asr_manifest.json"
+$repoLocalAsrLicenses = Join-Path $repoRoot "licenses"
 $buildRoot = Join-Path $env:TEMP "clarify-voice-build"
 $venvDir = Join-Path $buildRoot "venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
@@ -147,14 +149,23 @@ $source = Join-Path $sourceDir "app.py"
 $extra = Join-Path $sourceDir "extra"
 $assets = Join-Path $sourceDir "assets"
 $distribution = Join-Path $sourceDir "distribution"
-if (-not (Test-Path $repoVersion)) {
-    throw "Required packaged version module is missing: $repoVersion"
+$localAsrManifest = Join-Path $sourceDir "local_asr_manifest.json"
+$localAsrLicenses = Join-Path $sourceDir "licenses"
+foreach ($requiredPath in @(
+    $repoVersion, $repoExtra, $repoAssets, $repoDistribution,
+    $repoLocalAsrManifest, $repoLocalAsrLicenses
+)) {
+    if (-not (Test-Path $requiredPath)) {
+        throw "Required packaged input is missing: $requiredPath"
+    }
 }
 Copy-Item (Join-Path $repoRoot "*.py") $sourceDir -Force
 Copy-Item $repoVersion $sourceDir -Force
 Copy-Item $repoExtra $extra -Recurse -Force
 Copy-Item $repoAssets $assets -Recurse -Force
 Copy-Item $repoDistribution $distribution -Recurse -Force
+Copy-Item $repoLocalAsrManifest $localAsrManifest -Force
+Copy-Item $repoLocalAsrLicenses $localAsrLicenses -Recurse -Force
 # Keep the linked SoX runtime intact, but omit files unused by the app.
 Remove-Item (Join-Path $extra "sox.zip") -Force -ErrorAction SilentlyContinue
 $soxDir = Join-Path $extra "sox-14.4.2"
@@ -177,6 +188,8 @@ $pyinstallerArgs = @(
     "--add-data", "${extra};extra",
     "--add-data", "${assets};assets",
     "--add-data", "${distribution};distribution",
+    "--add-data", "${localAsrManifest};.",
+    "--add-data", "${localAsrLicenses};licenses",
     "--hidden-import", "version",
     "--hidden-import", "sounddevice",
     "--hidden-import", "_sounddevice_data",
