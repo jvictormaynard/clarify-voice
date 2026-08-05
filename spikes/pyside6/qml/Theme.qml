@@ -1,19 +1,25 @@
 import QtQuick 6.5
 
 QtObject {
-    readonly property color canvas: "#0b0f17"
-    readonly property color surface: "#121927"
-    readonly property color surfaceRaised: "#192338"
-    readonly property color surfaceSoft: "#202d45"
-    readonly property color border: "#2d3b55"
-    readonly property color text: "#f5f7fb"
-    readonly property color muted: "#9ca9bf"
-    readonly property color accent: "#72a7ff"
-    readonly property color accentStrong: "#4f83e8"
-    readonly property color success: "#7ee2b8"
-    readonly property color recording: "#ff8d9d"
-    readonly property color warning: "#ffd48a"
-    readonly property int radiusLarge: 24
-    readonly property int radiusMedium: 14
-    readonly property int radiusSmall: 10
+    // Keep these values aligned with app.py's compact black-and-white shell.
+    readonly property color card: "#0a0a0a"
+    readonly property color resultSurface: "#050505"
+    readonly property color border: "#1c1c1c"
+    readonly property color text: "#ffffff"
+    readonly property color secondaryText: "#cccccc"
+    readonly property color dim: "#666666"
+    readonly property color control: "#151515"
+    readonly property color controlHover: "#222222"
+    readonly property color controlDisabled: "#101010"
+    readonly property color transparentKey: "#010101"
+
+    readonly property int pillRadius: 24
+    readonly property int panelRadius: 18
+    readonly property int controlRadius: 13
+    readonly property int controlHeight: 26
+    readonly property int windowWidth: 380
+    readonly property int windowHeight: 48
+    readonly property int resultWidth: 400
+    readonly property int resultHeight: 148
+    readonly property int settingsHeight: 204
 }

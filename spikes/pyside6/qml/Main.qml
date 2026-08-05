@@ -6,314 +6,348 @@ import QtQuick.Window 6.5
 ApplicationWindow {
     id: root
     objectName: "clarifyVoiceQmlPilot"
-    width: 760
-    height: 540
-    minimumWidth: 680
-    minimumHeight: 480
+    width: workflow.surface === "result" ? theme.resultWidth : theme.windowWidth
+    height: workflow.surface === "result"
+            ? theme.resultHeight
+            : workflow.surface === "settings" ? theme.settingsHeight : theme.windowHeight
+    minimumWidth: theme.windowWidth
+    minimumHeight: theme.windowHeight
     visible: true
-    title: "ClarifyVoice · Qt Quick pilot"
-    color: theme.canvas
-    flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
-           | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint
+    title: "ClarifyVoice"
+    color: "transparent"
+    flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+
     Theme { id: theme }
 
+    // The production shell uses the 380x48 card as its idle surface and a
+    // separate 142x42 transient pill while recording/processing. Keep that
+    // relationship visible in the pilot without introducing a dashboard.
     StatusPill {
         id: pill
         theme: theme
         x: root.x + (root.width - width) / 2
-        y: root.y - height - 14
+        y: root.y + root.height + 12
 
         Connections {
             target: root
             function onXChanged() { pill.x = root.x + (root.width - pill.width) / 2 }
-            function onYChanged() { pill.y = root.y - pill.height - 14 }
+            function onYChanged() { pill.y = root.y + root.height + 12 }
             function onWidthChanged() { pill.x = root.x + (root.width - pill.width) / 2 }
+            function onHeightChanged() { pill.y = root.y + root.height + 12 }
         }
     }
 
     Shortcut {
         sequence: "Escape"
-        onActivated: workflow.reset()
+        onActivated: {
+            if (workflow.surface === "result" || workflow.surface === "settings")
+                workflow.reset()
+        }
     }
 
-    ColumnLayout {
-        Accessible.name: "ClarifyVoice Qt Quick visual pilot"
+    Shortcut {
+        sequence: "Alt+L"
+        enabled: workflow.surface === "idle"
+        onActivated: workflow.startRecording()
+    }
+
+    Rectangle {
+        id: card
+        objectName: "mainCard"
         anchors.fill: parent
-        anchors.margins: 30
-        spacing: 22
+        anchors.margins: 1
+        radius: workflow.surface === "idle"
+                || workflow.surface === "recording"
+                || workflow.surface === "processing"
+                || workflow.surface === "success"
+                ? height / 2 : theme.panelRadius
+        color: theme.card
+        border.color: theme.border
+        border.width: 1
+        clip: true
 
-        RowLayout {
-            objectName: "appHeader"
-            z: 2
-            Layout.fillWidth: true
-            spacing: 14
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 3
-
-                Label {
-                    text: "ClarifyVoice"
-                    color: theme.text
-                    font.pixelSize: 27
-                    font.weight: Font.DemiBold
-                }
-
-                Label {
-                    text: "A calmer voice workflow, designed for focus"
-                    color: theme.muted
-                    font.pixelSize: 13
-                }
+        states: [
+            State {
+                name: "recording"
+                when: workflow.surface === "recording"
+                PropertyChanges { target: card; border.color: theme.dim }
+            },
+            State {
+                name: "success"
+                when: workflow.surface === "success"
+                PropertyChanges { target: card; border.color: theme.text }
             }
+        ]
 
-            Label {
-                text: "QT QUICK PILOT"
-                color: theme.accent
-                font.pixelSize: 10
-                font.weight: Font.DemiBold
-                font.letterSpacing: 1.3
+        transitions: [
+            Transition {
+                from: "*"
+                to: "*"
+                ColorAnimation { duration: 180; easing.type: Easing.OutCubic }
             }
-        }
+        ]
 
         StackLayout {
             id: pages
             objectName: "pilotPages"
-            z: 1
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            currentIndex: workflow.surface === "result" ? 1 : workflow.surface === "settings" ? 2 : 0
+            anchors.fill: parent
+            currentIndex: workflow.surface === "result"
+                          ? 1 : workflow.surface === "settings" ? 2 : 0
 
             Item {
+                id: homePage
                 objectName: "homePage"
-                ColumnLayout {
+                property bool promptMode: true
+
+                RowLayout {
                     anchors.fill: parent
-                    spacing: 18
+                    anchors.leftMargin: 15
+                    anchors.rightMargin: 8
+                    spacing: 5
 
-                    Rectangle {
-                        id: workflowCard
+                    Item {
+                        id: statusArea
                         Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        radius: theme.radiusLarge
-                        color: theme.surface
-                        border.color: theme.border
-                        border.width: 1
+                        Layout.minimumWidth: 0
+                        Layout.alignment: Qt.AlignVCenter
 
-                        states: [
-                            State {
-                                name: "recording"
-                                when: workflow.surface === "recording"
-                                PropertyChanges { target: workflowCard; border.color: theme.recording }
-                            },
-                            State {
-                                name: "success"
-                                when: workflow.surface === "success"
-                                PropertyChanges { target: workflowCard; border.color: theme.success }
+                        // The shell is frameless, so keep the status area
+                        // draggable without taking pointer ownership away
+                        // from the controls to its right.
+                        DragHandler {
+                            id: windowDragHandler
+                            target: null
+                            onActiveChanged: {
+                                if (active)
+                                    root.startSystemMove()
                             }
-                        ]
+                        }
 
-                        transitions: [
-                            Transition {
-                                from: "*"
-                                to: "*"
-                                ColorAnimation { duration: 240; easing.type: Easing.OutCubic }
-                            }
-                        ]
-
-                        ColumnLayout {
+                        RowLayout {
                             anchors.fill: parent
-                            anchors.margins: 28
-                            spacing: 16
+                            spacing: 6
 
-                            RowLayout {
+                            Label {
+                                id: statusLabel
                                 Layout.fillWidth: true
-
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 6
-
-                                    Label {
-                                        text: workflow.status
-                                        color: theme.text
-                                        font.pixelSize: 22
-                                        font.weight: Font.Medium
-                                        Accessible.name: workflow.status
-                                    }
-
-                                    Label {
-                                        text: workflow.surface === "idle"
-                                              ? "Press record to simulate the full interaction"
-                                              : "The UI state is driven by an observable workflow bridge"
-                                        color: theme.muted
-                                        font.pixelSize: 13
-                                        wrapMode: Text.WordWrap
-                                    }
-                                }
-
-                                Item {
-                                    visible: workflow.surface === "processing"
-                                    Layout.preferredWidth: 30
-                                    Layout.preferredHeight: 30
-
-                                    Rectangle {
-                                        anchors.fill: parent
-                                        radius: width / 2
-                                        color: "transparent"
-                                        border.color: theme.surfaceSoft
-                                        border.width: 3
-                                    }
-
-                                    Item {
-                                        anchors.fill: parent
-
-                                        Rectangle {
-                                            width: 8
-                                            height: 8
-                                            radius: 4
-                                            anchors.horizontalCenter: parent.horizontalCenter
-                                            y: 0
-                                            color: theme.accent
-                                        }
-
-                                        RotationAnimation on rotation {
-                                            from: 0
-                                            to: 360
-                                            duration: 760
-                                            loops: Animation.Infinite
-                                        }
-                                    }
-                                }
+                                text: workflow.surface === "idle" ? "Ready"
+                                      : workflow.surface === "recording" ? "Recording"
+                                      : workflow.surface === "processing" ? "Processing…"
+                                      : "Done"
+                                color: theme.text
+                                font.pixelSize: 13
+                                font.weight: Font.Bold
+                                elide: Text.ElideRight
+                                Accessible.name: workflow.status
                             }
 
-                            Item { Layout.fillHeight: true }
-
-                            Rectangle {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 92
-                                radius: theme.radiusMedium
-                                color: theme.surfaceRaised
-                                border.color: theme.border
-                                border.width: 1
-
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.margins: 18
-                                    spacing: 14
-
-                                    Rectangle {
-                                        Layout.preferredWidth: 42
-                                        Layout.preferredHeight: 42
-                                        radius: 21
-                                        color: workflow.busy ? theme.recording : theme.accentStrong
-
-                                        Label {
-                                            anchors.centerIn: parent
-                                            text: workflow.busy ? "•••" : "✦"
-                                            color: "white"
-                                            font.pixelSize: 18
-                                        }
-                                    }
-
-                                    ColumnLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 4
-
-                                        Label {
-                                            text: workflow.busy ? "Working on it" : "Ready when you are"
-                                            color: theme.text
-                                            font.pixelSize: 15
-                                            font.weight: Font.Medium
-                                        }
-
-                                        Label {
-                                            text: workflow.busy
-                                                  ? "This pilot keeps the shell responsive while the state changes"
-                                                  : "Your result will stay available for review before publication"
-                                            color: theme.muted
-                                            font.pixelSize: 12
-                                            elide: Text.ElideRight
-                                        }
-                                    }
-                                }
+                            Label {
+                                id: hotkeyHint
+                                text: workflow.surface === "idle" ? "Alt+L" : ""
+                                color: theme.dim
+                                font.pixelSize: 10
+                                elide: Text.ElideRight
                             }
+                        }
 
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 10
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: workflow.surface === "idle"
+                            hoverEnabled: true
+                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            Accessible.name: workflow.status
+                            onClicked: workflow.startRecording()
+                        }
+                    }
 
-                                PilotButton {
-                                    objectName: "recordButton"
-                                    text: workflow.busy ? "Processing…" : "Record sample"
-                                    enabled: !workflow.busy && workflow.surface !== "success"
-                                    primary: true
-                                    theme: theme
-                                    Layout.fillWidth: true
-                                    Accessible.name: "Record sample"
-                                    onClicked: workflow.startRecording()
-                                }
+                    Item {
+                        id: busyIndicator
+                        visible: workflow.busy
+                        Layout.preferredWidth: 14
+                        Layout.preferredHeight: 14
+                        Layout.alignment: Qt.AlignVCenter
 
-                                PilotButton {
-                                    objectName: "resultButton"
-                                    text: "View result"
-                                    enabled: workflow.canShowResult
-                                    theme: theme
-                                    Layout.fillWidth: true
-                                    Accessible.name: "View result"
-                                    onClicked: workflow.showResult()
-                                }
-                            }
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: width / 2
+                            color: "transparent"
+                            border.color: theme.dim
+                            border.width: 1
+                        }
+
+                        Rectangle {
+                            width: 4
+                            height: 4
+                            radius: 2
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 0
+                            color: theme.text
+                        }
+
+                        RotationAnimation on rotation {
+                            running: workflow.busy
+                            from: 0
+                            to: 360
+                            duration: 760
+                            loops: Animation.Infinite
                         }
                     }
 
                     RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 10
+                        id: idleControls
+                        visible: workflow.surface === "idle"
+                        spacing: 4
 
-                        Label {
-                            Layout.fillWidth: true
-                            text: "Fake workflow · no audio, provider, clipboard or hotkey calls"
-                            color: theme.muted
-                            font.pixelSize: 11
+                        PilotButton {
+                            id: languageButton
+                            objectName: "languageButton"
+                            property string languageCode: "EN"
+                            text: languageCode
+                            theme: theme
+                            Layout.preferredWidth: 32
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Language: "
+                                              + (languageCode === "EN"
+                                                 ? "English" : "Portuguese")
+                            onClicked: languageCode = languageCode === "EN"
+                                                       ? "PT" : "EN"
                         }
 
                         PilotButton {
-                            text: "Settings"
+                            id: modeButton
+                            objectName: "modeButton"
+                            text: homePage.promptMode ? "Prompt" : "Transcribe"
+                            theme: theme
+                            Layout.preferredWidth: 78
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Mode: "
+                                              + (homePage.promptMode
+                                                 ? "Prompt" : "Transcribe")
+                            onClicked: homePage.promptMode = !homePage.promptMode
+                        }
+
+                        PilotButton {
+                            id: fileButton
+                            objectName: "fileButton"
+                            text: "Files"
+                            theme: theme
+                            Layout.preferredWidth: 48
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Import audio files"
+                        }
+
+                        PilotButton {
+                            id: settingsButton
+                            objectName: "settingsButton"
+                            text: "☰"
                             theme: theme
                             quiet: true
-                            Accessible.name: "Open prototype settings"
+                            Layout.preferredWidth: 26
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Open settings"
                             onClicked: workflow.openSettings()
                         }
+
+                        PilotButton {
+                            id: closeButton
+                            objectName: "closeButton"
+                            text: "—"
+                            theme: theme
+                            quiet: true
+                            Layout.preferredWidth: 26
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Close ClarifyVoice"
+                            onClicked: root.close()
+                        }
+                    }
+
+                    PilotButton {
+                        id: resultButton
+                        objectName: "resultButton"
+                        visible: workflow.surface === "success"
+                        text: "View"
+                        theme: theme
+                        Layout.preferredWidth: 48
+                        Layout.preferredHeight: 26
+                        Accessible.name: "View result"
+                        onClicked: workflow.showResult()
                     }
                 }
             }
 
             Item {
+                id: resultPage
                 objectName: "resultPage"
+                property string copyLabel: "Copy"
+
+                function resetCopyConfirmation() {
+                    copyResetTimer.stop()
+                    copyLabel = "Copy"
+                }
+
+                Timer {
+                    id: copyResetTimer
+                    interval: 850
+                    repeat: false
+                    onTriggered: resultPage.copyLabel = "Copy"
+                }
+
+                onVisibleChanged: resetCopyConfirmation()
+
+                Connections {
+                    target: workflow
+
+                    function onSurfaceChanged() {
+                        resultPage.resetCopyConfirmation()
+                    }
+                }
+
                 ColumnLayout {
                     anchors.fill: parent
-                    spacing: 16
+                    anchors.margins: 8
+                    spacing: 5
 
-                    Label {
-                        text: "Result"
-                        color: theme.text
-                        font.pixelSize: 24
-                        font.weight: Font.Medium
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        Label {
+                            text: "Result"
+                            color: theme.text
+                            font.pixelSize: 13
+                            font.weight: Font.Bold
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        PilotButton {
+                            text: "—"
+                            theme: theme
+                            quiet: true
+                            Layout.preferredWidth: 26
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Dismiss result"
+                            onClicked: workflow.reset()
+                        }
                     }
 
                     Rectangle {
+                        id: resultCard
                         objectName: "resultCard"
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        radius: theme.radiusMedium
-                        color: theme.surface
+                        Layout.minimumHeight: 64
+                        radius: 10
+                        color: theme.resultSurface
                         border.color: theme.border
+                        border.width: 1
 
                         Label {
                             anchors.fill: parent
-                            anchors.margins: 22
+                            anchors.margins: 10
                             text: workflow.result
-                            color: theme.text
-                            font.pixelSize: 16
-                            lineHeight: 1.35
+                            color: theme.secondaryText
+                            font.pixelSize: 12
+                            lineHeight: 1.2
                             wrapMode: Text.WordWrap
                             verticalAlignment: Text.AlignTop
                             Accessible.name: workflow.result
@@ -322,85 +356,112 @@ ApplicationWindow {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        Item { Layout.fillWidth: true }
+                        spacing: 4
+
                         PilotButton {
-                            text: "Back"
+                            text: resultPage.copyLabel
                             theme: theme
-                            Accessible.name: "Back to workflow"
+                            Layout.preferredWidth: 52
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Copy result"
+                            onClicked: {
+                                resultPage.copyLabel = "OK!"
+                                copyResetTimer.restart()
+                            }
+                        }
+
+                        PilotButton {
+                            text: "Dismiss"
+                            theme: theme
+                            quiet: true
+                            Layout.preferredWidth: 56
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Dismiss result"
                             onClicked: workflow.reset()
                         }
+
+                        Item { Layout.fillWidth: true }
                     }
                 }
             }
 
             Item {
+                id: settingsPage
+                objectName: "settingsPage"
+
                 ColumnLayout {
                     anchors.fill: parent
-                    spacing: 18
+                    anchors.margins: 12
+                    spacing: 8
 
-                    Label {
-                        text: "Settings"
-                        color: theme.text
-                        font.pixelSize: 24
-                        font.weight: Font.Medium
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        Label {
+                            text: "Settings"
+                            color: theme.text
+                            font.pixelSize: 13
+                            font.weight: Font.Bold
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        PilotButton {
+                            text: "—"
+                            theme: theme
+                            quiet: true
+                            Layout.preferredWidth: 26
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Close settings"
+                            onClicked: workflow.closeSettings()
+                        }
                     }
 
                     Rectangle {
                         Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        radius: theme.radiusMedium
-                        color: theme.surface
-                        border.color: theme.border
-
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: 22
-                            spacing: 16
-
-                            Label {
-                                text: "A focused, calmer control surface"
-                                color: theme.text
-                                font.pixelSize: 16
-                                font.weight: Font.Medium
-                            }
-
-                            Label {
-                                text: "The production settings controller will be connected only after this visual pilot passes its interaction review."
-                                color: theme.muted
-                                font.pixelSize: 13
-                                wrapMode: Text.WordWrap
-                                Layout.fillWidth: true
-                            }
-
-                            Rectangle {
-                                Layout.fillWidth: true
-                                height: 1
-                                color: theme.border
-                            }
-
-                            Label {
-                                text: "Hotkey ownership"
-                                color: theme.text
-                                font.pixelSize: 13
-                            }
-
-                            Label {
-                                text: "Production shell remains responsible for global shortcuts"
-                                color: theme.muted
-                                font.pixelSize: 12
-                            }
-
-                            Item { Layout.fillHeight: true }
-                        }
+                        height: 1
+                        color: theme.border
                     }
 
                     RowLayout {
                         Layout.fillWidth: true
+                        spacing: 8
+
+                        Label {
+                            text: "Hotkey"
+                            color: theme.text
+                            font.pixelSize: 12
+                        }
+
                         Item { Layout.fillWidth: true }
+
+                        Label {
+                            text: "Alt+L"
+                            color: theme.dim
+                            font.pixelSize: 11
+                        }
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: "Production shell keeps global shortcuts and settings ownership."
+                        color: theme.dim
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Item { Layout.fillHeight: true }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Item { Layout.fillWidth: true }
+
                         PilotButton {
-                            text: "Close settings"
+                            text: "Close"
                             theme: theme
-                            Accessible.name: "Close prototype settings"
+                            Layout.preferredWidth: 56
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Close settings"
                             onClicked: workflow.closeSettings()
                         }
                     }
