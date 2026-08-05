@@ -189,12 +189,16 @@ ApplicationWindow {
                         PilotButton {
                             id: languageButton
                             objectName: "languageButton"
-                            text: "EN"
+                            property string languageCode: "EN"
+                            text: languageCode
                             theme: theme
                             Layout.preferredWidth: 32
                             Layout.preferredHeight: 26
-                            Accessible.name: "Language: English"
-                            onClicked: text = text === "EN" ? "PT" : "EN"
+                            Accessible.name: "Language: "
+                                              + (languageCode === "EN"
+                                                 ? "English" : "Portuguese")
+                            onClicked: languageCode = languageCode === "EN"
+                                                       ? "PT" : "EN"
                         }
 
                         PilotButton {
@@ -261,6 +265,14 @@ ApplicationWindow {
                 id: resultPage
                 objectName: "resultPage"
                 property string copyLabel: "Copy"
+
+                Connections {
+                    target: workflow
+
+                    function onSurfaceChanged() {
+                        resultPage.copyLabel = "Copy"
+                    }
+                }
 
                 ColumnLayout {
                     anchors.fill: parent

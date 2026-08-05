@@ -11,11 +11,38 @@ Window {
     color: "transparent"
     flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
            | Qt.WindowDoesNotAcceptFocus
-    visible: workflow.busy || workflow.surface === "success"
+    visible: workflow.busy
+             || (workflow.surface === "success" && successVisible)
     title: "ClarifyVoice workflow status"
 
     required property Theme theme
     property string label: workflow.status
+    property bool successVisible: false
+
+    // app.py keeps the compact success confirmation visible for 850 ms before
+    // returning to the main shell. The QML shell stays on the success surface
+    // so its View button remains available, but this separate top-level pill
+    // must not remain visible beside it indefinitely.
+    Timer {
+        id: successTimer
+        interval: 850
+        repeat: false
+        onTriggered: pill.successVisible = false
+    }
+
+    Connections {
+        target: workflow
+
+        function onSurfaceChanged() {
+            if (workflow.surface === "success") {
+                pill.successVisible = true
+                successTimer.restart()
+            } else {
+                successTimer.stop()
+                pill.successVisible = false
+            }
+        }
+    }
 
     Rectangle {
         id: card

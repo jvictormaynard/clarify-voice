@@ -35,6 +35,7 @@ class PySide6QmlPilotTests(unittest.TestCase):
         self.assertIn("readonly property int windowHeight: 48", theme_source)
 
         main_source = (QML_ROOT / "Main.qml").read_text(encoding="utf-8")
+        status_pill_source = (QML_ROOT / "StatusPill.qml").read_text(encoding="utf-8")
         self.assertIn('color: "transparent"', main_source)
         self.assertIn("Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint", main_source)
         self.assertIn("Layout.preferredWidth: 32", main_source)
@@ -43,6 +44,15 @@ class PySide6QmlPilotTests(unittest.TestCase):
         self.assertIn("Layout.preferredWidth: 26", main_source)
         self.assertNotIn("#72a7ff", qml_source)
         self.assertNotIn("#4f83e8", qml_source)
+        self.assertIn("property string languageCode: \"EN\"", main_source)
+        self.assertIn("text: languageCode", main_source)
+        self.assertIn('Accessible.name: "Language: "', main_source)
+        self.assertIn('languageCode === "EN"', main_source)
+        self.assertIn("property bool successVisible: false", status_pill_source)
+        self.assertIn("interval: 850", status_pill_source)
+        self.assertIn(
+            'workflow.surface === "success" && successVisible', status_pill_source)
+        self.assertIn('resultPage.copyLabel = "Copy"', main_source)
 
     def test_qml_entrypoint_uses_qt_quick_and_stays_production_isolated(self):
         source = (SPIKE / "qml_app.py").read_text(encoding="utf-8")
