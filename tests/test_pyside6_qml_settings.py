@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -28,6 +29,7 @@ from repositories import (
     LocalUsageStatsRepository,
 )
 from secret_store import MemorySecretStore
+from provider_types import ModelCatalog
 from workflow_config import WorkflowScope
 
 
@@ -144,6 +146,49 @@ class QmlSettingsControllerTests(unittest.TestCase):
             self.assertTrue(controller.selectWorkflow("rewrite"))
             self.assertEqual(controller.routeProviderId, "groq")
             self.assertEqual(controller.routeModelId, "llama-3.3-70b-versatile")
+
+    def test_provider_onboarding_validates_and_persists_key_in_secret_store(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret_store = MemorySecretStore()
+            repositories = ApplicationRepositories(
+                config=LocalConfigRepository(
+                    root / "config.json",
+                    secret_store=secret_store,
+                ),
+                usage_stats=LocalUsageStatsRepository(root / "usage.json"),
+            )
+            controller = QmlSettingsController(repositories)
+            try:
+                self.assertTrue(controller.selectProvider("openai"))
+                self.assertFalse(controller.providerHasApiKey)
+                controller.setProviderApiKey("onboarding-test-key")
+
+                with patch.object(
+                    qml_settings.PROVIDER_REGISTRY,
+                    "discover_models",
+                    return_value=ModelCatalog(
+                        audio_models=("whisper-1",),
+                        text_models=("gpt-test",),
+                    ),
+                ):
+                    self.assertTrue(controller.validateProvider())
+                    for _ in range(100):
+                        self.qt_app.processEvents()
+                        if controller.providerStatus == "active":
+                            break
+                        time.sleep(0.01)
+
+                self.assertEqual(controller.providerStatus, "active")
+                self.assertTrue(controller.providerHasApiKey)
+                self.assertEqual(secret_store.get("openai"), "onboarding-test-key")
+                self.assertEqual(controller.providerApiKey, "")
+                self.assertNotIn(
+                    "onboarding-test-key",
+                    (root / "config.json").read_text(encoding="utf-8"),
+                )
+            finally:
+                controller.shutdown()
 
     def test_properties_and_slots_update_one_typed_draft(self):
         with TemporaryDirectory() as directory:

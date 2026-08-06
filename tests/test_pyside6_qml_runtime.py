@@ -911,8 +911,7 @@ class QtClipboardGatewayTests(unittest.TestCase):
         with patch(
             "spikes.pyside6.qml_clipboard.subprocess.run", side_effect=failure
         ) as run:
-            gateway = QtClipboardGateway()
-            gateway.adapter.is_windows = False
+            gateway = QtClipboardGateway(is_windows=False, platform_name="Linux")
             with self.assertRaises(subprocess.CalledProcessError):
                 gateway.write_dictation_result(None, "Visible result")
 

@@ -11,14 +11,23 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
-from PySide6.QtCore import Property, QObject, Signal, Slot
+from PySide6.QtCore import Property, QObject, Qt, Signal, Slot
 
+from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
+from local_asr_product import (
+    LocalASRProductController,
+    LocalASRProductState,
+    format_requirement_bytes,
+)
+from provider_http import CancellationToken
 from provider_registry import PROVIDER_REGISTRY
+from provider_types import ProviderCapability, ProviderConnection
 from repositories import (
     AppConfig,
     ApplicationRepositories,
@@ -154,6 +163,29 @@ def _apply_config_with_autostart_transaction(
         raise
 
 
+def _default_local_asr_product() -> LocalASRProductController:
+    """Build the Settings-owned lifecycle around the shared local adapter."""
+
+    adapter = PROVIDER_REGISTRY.adapter(LOCAL_ASR_PROVIDER_ID)
+    backend = getattr(adapter, "backend", None)
+    installer = getattr(backend, "installer", None)
+    return LocalASRProductController(installer=installer, backend=backend)
+
+
+def _format_local_requirements(requirements: dict[str, Any]) -> str:
+    """Return a compact, user-facing summary without exposing file paths."""
+
+    download = format_requirement_bytes(requirements.get("download_bytes", 0))
+    disk = format_requirement_bytes(requirements.get("disk_bytes", 0))
+    memory = format_requirement_bytes(requirements.get("memory_bytes", 0))
+    platform = str(requirements.get("platform", "Windows x64"))
+    compute = str(requirements.get("compute", "")).strip()
+    runtime = str(requirements.get("runtime", "")).strip()
+    details = " · ".join(value for value in (compute, runtime) if value)
+    suffix = f" · {details}" if details else ""
+    return f"{platform} · {download} download · {disk} disk · {memory} RAM{suffix}"
+
+
 class QmlSettingsController(QObject):
     """Expose the typed application configuration to Qt Quick.
 
@@ -171,6 +203,9 @@ class QmlSettingsController(QObject):
     errorChanged = Signal()
     loaded = Signal()
     saved = Signal()
+    providerStateChanged = Signal()
+    _providerValidationFinished = Signal(str, int, bool, object)
+    _localStatePublished = Signal(object)
 
     def __init__(
         self,
@@ -178,15 +213,45 @@ class QmlSettingsController(QObject):
         parent: QObject | None = None,
         *,
         registry: Any | None = None,
+        local_product: LocalASRProductController | None = None,
     ) -> None:
         super().__init__(parent)
         self.repositories = repositories
         self._config_repository: ConfigRepository = repositories.config
         self._autostart_registry = registry
+        self._local_product = local_product or _default_local_asr_product()
+        self._local_state: LocalASRProductState = self._local_product.state
+        self._provider_activity: dict[str, dict[str, Any]] = {}
+        self._provider_tokens: dict[str, CancellationToken] = {}
+        self._provider_generations: dict[str, int] = {}
         self._selected_scope = WorkflowScope.TRANSCRIPTION.value
         self._config = self._config_repository.load()
+        configured_provider = (
+            str(self._config.selection.transcription_provider or "gemini")
+            .strip()
+            .lower()
+        )
+        self._selected_provider_id = (
+            configured_provider
+            if configured_provider in PROVIDER_REGISTRY.provider_ids
+            else PROVIDER_REGISTRY.provider_ids[0]
+        )
+        self._provider_api_key_draft = ""
+        self._provider_base_url_draft = self._default_provider_base_url(
+            self._selected_provider_id
+        )
         self._dirty = False
         self._last_error = ""
+        self._providerValidationFinished.connect(
+            self._finish_provider_validation,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._localStatePublished.connect(
+            self._apply_local_state,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._local_product.subscribe(self._publish_local_state)
+        self._local_product.refresh_async()
 
     @Property("QStringList", constant=True)
     def workflowScopes(self) -> list[str]:
@@ -201,6 +266,89 @@ class QmlSettingsController(QObject):
     @Property("QStringList", constant=True)
     def languages(self) -> list[str]:
         return list(SUPPORTED_LANGUAGES)
+
+    @Property("QStringList", constant=True)
+    def providerIds(self) -> list[str]:
+        return list(PROVIDER_REGISTRY.provider_ids)
+
+    @Property("QVariantMap", notify=providerStateChanged)
+    def providerStates(self) -> dict[str, dict[str, Any]]:
+        return {
+            provider_id: self._provider_state(provider_id)
+            for provider_id in PROVIDER_REGISTRY.provider_ids
+        }
+
+    @Property(str, notify=providerStateChanged)
+    def selectedProviderId(self) -> str:
+        return self._selected_provider_id
+
+    @Property(str, notify=providerStateChanged)
+    def providerDisplayName(self) -> str:
+        return PROVIDER_REGISTRY.describe(self._selected_provider_id).display_name
+
+    @Property(str, notify=providerStateChanged)
+    def providerApiKey(self) -> str:
+        """Return only the editable key draft, never the stored secret."""
+
+        return self._provider_api_key_draft
+
+    @providerApiKey.setter
+    def providerApiKey(self, value: str) -> None:
+        self.setProviderApiKey(value)
+
+    @Property(str, notify=providerStateChanged)
+    def providerBaseUrl(self) -> str:
+        return self._provider_base_url_draft
+
+    @providerBaseUrl.setter
+    def providerBaseUrl(self, value: str) -> None:
+        self.setProviderBaseUrl(value)
+
+    @Property(bool, notify=providerStateChanged)
+    def providerHasApiKey(self) -> bool:
+        return bool(
+            self._provider_api_key_draft.strip()
+            or self._provider_config(self._selected_provider_id).api_key.strip()
+        )
+
+    @Property(bool, notify=providerStateChanged)
+    def providerSupportsCustomEndpoint(self) -> bool:
+        return PROVIDER_REGISTRY.supports(
+            self._selected_provider_id,
+            ProviderCapability.CUSTOM_BASE_URL,
+        )
+
+    @Property(str, notify=providerStateChanged)
+    def providerStatus(self) -> str:
+        return str(self._provider_state(self._selected_provider_id)["status"])
+
+    @Property(str, notify=providerStateChanged)
+    def providerError(self) -> str:
+        return str(self._provider_state(self._selected_provider_id).get("error", ""))
+
+    @Property(bool, notify=providerStateChanged)
+    def providerBusy(self) -> bool:
+        return bool(self._provider_state(self._selected_provider_id).get("busy"))
+
+    @Property(str, notify=providerStateChanged)
+    def localAsrStatus(self) -> str:
+        return self._local_state.status
+
+    @Property(str, notify=providerStateChanged)
+    def localAsrDetail(self) -> str:
+        return self._local_state.detail
+
+    @Property(str, notify=providerStateChanged)
+    def localAsrRequirements(self) -> str:
+        return _format_local_requirements(self._local_state.requirements or {})
+
+    @Property(float, notify=providerStateChanged)
+    def localAsrProgress(self) -> float:
+        return self._local_state.fraction
+
+    @Property(bool, notify=providerStateChanged)
+    def localAsrBusy(self) -> bool:
+        return self._local_product.busy
 
     @Property(str, notify=configChanged)
     def mode(self) -> str:
@@ -241,6 +389,14 @@ class QmlSettingsController(QObject):
     @historyRetentionDays.setter
     def historyRetentionDays(self, value: object) -> None:
         self.setHistoryRetentionDays(value)
+
+    @Property(bool, notify=configChanged)
+    def localAsrCloudRefinement(self) -> bool:
+        return self._config.local_asr_cloud_refinement
+
+    @localAsrCloudRefinement.setter
+    def localAsrCloudRefinement(self, value: bool) -> None:
+        self.setLocalAsrCloudRefinement(value)
 
     @Property(str, notify=selectedScopeChanged)
     def selectedScope(self) -> str:
@@ -468,6 +624,187 @@ class QmlSettingsController(QObject):
             if metadata.supports(capability)
         ]
 
+    @Slot(str, result=bool)
+    def selectProvider(self, provider_id: str) -> bool:
+        normalized = str(provider_id or "").strip().lower()
+        if normalized not in PROVIDER_REGISTRY.provider_ids:
+            self._set_error(ValueError(f"Unknown provider: {normalized or '<empty>'}"))
+            return False
+        if normalized == self._selected_provider_id:
+            return True
+        self._selected_provider_id = normalized
+        self._provider_api_key_draft = ""
+        self._provider_base_url_draft = self._default_provider_base_url(normalized)
+        self._set_error(None)
+        self.providerStateChanged.emit()
+        return True
+
+    @Slot(str, result=bool)
+    def setProviderApiKey(self, value: str) -> bool:
+        self._provider_api_key_draft = str(value or "")
+        self._set_error(None)
+        self.providerStateChanged.emit()
+        return True
+
+    @Slot(str, result=bool)
+    def setProviderBaseUrl(self, value: str) -> bool:
+        self._provider_base_url_draft = str(value or "").strip()
+        self._set_error(None)
+        self.providerStateChanged.emit()
+        return True
+
+    @Slot(result=bool)
+    def validateProvider(self) -> bool:
+        """Validate and persist the selected cloud provider without blocking QML."""
+
+        provider_id = self._selected_provider_id
+        if provider_id == LOCAL_ASR_PROVIDER_ID:
+            self._set_error(
+                ValueError("Local Whisper is configured with the install action")
+            )
+            return False
+        if self.providerBusy:
+            return False
+
+        provider_config = self._provider_config(provider_id)
+        api_key = (
+            self._provider_api_key_draft.strip() or provider_config.api_key.strip()
+        )
+        if not api_key:
+            self._set_error(
+                ValueError("Enter an API key before validating the provider")
+            )
+            return False
+        metadata = PROVIDER_REGISTRY.describe(provider_id)
+        base_url = self._provider_base_url_draft.strip() or metadata.default_base_url
+        if not metadata.supports(ProviderCapability.CUSTOM_BASE_URL):
+            base_url = metadata.default_base_url
+        token = CancellationToken()
+        generation = self._provider_generations.get(provider_id, 0) + 1
+        self._provider_generations[provider_id] = generation
+        previous = self._provider_tokens.get(provider_id)
+        if previous is not None:
+            previous.cancel()
+        self._provider_tokens[provider_id] = token
+        self._provider_activity[provider_id] = {
+            "status": "validating",
+            "error": "",
+            "models": [],
+            "textModels": [],
+            "busy": True,
+        }
+        self._set_error(None)
+        self.providerStateChanged.emit()
+
+        def validate() -> None:
+            try:
+                catalog = PROVIDER_REGISTRY.discover_models(
+                    provider_id,
+                    ProviderConnection(api_key, base_url),
+                    token,
+                )
+            except Exception as error:
+                self._providerValidationFinished.emit(
+                    provider_id,
+                    generation,
+                    False,
+                    {"error": str(error).strip() or type(error).__name__},
+                )
+                return
+            self._providerValidationFinished.emit(
+                provider_id,
+                generation,
+                True,
+                {
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "models": list(catalog.audio_models),
+                    "text_models": list(catalog.text_models),
+                },
+            )
+
+        threading.Thread(
+            target=validate,
+            name=f"ClarifyVoiceProviderValidation-{provider_id}",
+            daemon=True,
+        ).start()
+        return True
+
+    @Slot(result=bool)
+    def clearProvider(self) -> bool:
+        """Remove the selected cloud credential from the secure store."""
+
+        provider_id = self._selected_provider_id
+        if provider_id == LOCAL_ASR_PROVIDER_ID:
+            return False
+        try:
+            updated = replace(
+                self._config,
+                **{
+                    provider_id: replace(
+                        self._provider_config(provider_id),
+                        api_key="",
+                    )
+                },
+            )
+            self._config = self._config_repository.apply(updated)
+        except Exception as error:
+            self._set_error(error)
+            return False
+        self._provider_activity[provider_id] = {
+            "status": "not_configured",
+            "error": "",
+            "models": [],
+            "textModels": [],
+            "busy": False,
+        }
+        self._provider_api_key_draft = ""
+        self._dirty = False
+        self._set_error(None)
+        self.configChanged.emit()
+        self.providerStateChanged.emit()
+        return True
+
+    @Slot(result=bool)
+    def installLocalAsr(self) -> bool:
+        try:
+            self._local_product.install_async()
+        except Exception as error:
+            self._set_error(error)
+            self.providerStateChanged.emit()
+            return False
+        self._set_error(None)
+        self.providerStateChanged.emit()
+        return True
+
+    @Slot(result=bool)
+    def removeLocalAsr(self) -> bool:
+        try:
+            self._local_product.remove_async()
+        except Exception as error:
+            self._set_error(error)
+            self.providerStateChanged.emit()
+            return False
+        self._set_error(None)
+        self.providerStateChanged.emit()
+        return True
+
+    @Slot(result=bool)
+    def cancelLocalAsr(self) -> bool:
+        self._local_product.cancel()
+        return True
+
+    @Slot(result=bool)
+    def refreshLocalAsr(self) -> bool:
+        return bool(self._local_product.refresh_async())
+
+    @Slot()
+    def shutdown(self) -> None:
+        for token in tuple(self._provider_tokens.values()):
+            token.cancel()
+        self._provider_tokens.clear()
+        self._local_product.shutdown()
+
     @Slot(result=bool)
     def load(self) -> bool:
         try:
@@ -527,6 +864,139 @@ class QmlSettingsController(QObject):
                 ui=replace(config.ui, language=normalized),
             )
         )
+
+    @Slot(bool, result=bool)
+    def setLocalAsrCloudRefinement(self, value: bool) -> bool:
+        return self._update_config(
+            replace(self._config, local_asr_cloud_refinement=bool(value))
+        )
+
+    def _provider_config(self, provider_id: str):
+        return getattr(self._config, provider_id)
+
+    @staticmethod
+    def _default_provider_base_url(provider_id: str) -> str:
+        return str(PROVIDER_REGISTRY.describe(provider_id).default_base_url or "")
+
+    def _provider_state(self, provider_id: str) -> dict[str, Any]:
+        metadata = PROVIDER_REGISTRY.describe(provider_id)
+        if provider_id == LOCAL_ASR_PROVIDER_ID:
+            state = self._local_state
+            return {
+                "providerId": provider_id,
+                "displayName": metadata.display_name,
+                "kind": "local",
+                "status": state.status,
+                "detail": state.detail,
+                "error": state.detail if state.status in {"error", "invalid"} else "",
+                "busy": self._local_product.busy,
+                "configured": state.status == "installed",
+                "hasApiKey": False,
+                "baseUrl": "",
+                "requirements": _format_local_requirements(state.requirements or {}),
+                "progress": state.fraction,
+            }
+        config = self._provider_config(provider_id)
+        activity = self._provider_activity.get(provider_id, {})
+        has_key = bool(config.api_key.strip())
+        status = str(
+            activity.get("status") or ("configured" if has_key else "not_configured")
+        )
+        return {
+            "providerId": provider_id,
+            "displayName": metadata.display_name,
+            "kind": "cloud",
+            "status": status,
+            "detail": "",
+            "error": str(activity.get("error") or ""),
+            "busy": bool(activity.get("busy", False)),
+            "configured": has_key and status in {"configured", "active"},
+            "hasApiKey": has_key,
+            "baseUrl": config.base_url or metadata.default_base_url,
+            "models": list(activity.get("models", [])),
+            "textModels": list(activity.get("textModels", [])),
+        }
+
+    @Slot(str, result=str)
+    def providerName(self, provider_id: str) -> str:
+        normalized = str(provider_id or "").strip().lower()
+        if normalized not in PROVIDER_REGISTRY.provider_ids:
+            return normalized
+        return PROVIDER_REGISTRY.describe(normalized).display_name
+
+    @Slot(str, int, bool, object)
+    def _finish_provider_validation(
+        self,
+        provider_id: str,
+        generation: int,
+        success: bool,
+        payload: object,
+    ) -> None:
+        if generation != self._provider_generations.get(provider_id):
+            return
+        self._provider_tokens.pop(provider_id, None)
+        data = payload if isinstance(payload, dict) else {}
+        if not success:
+            self._provider_activity[provider_id] = {
+                "status": "error",
+                "error": str(data.get("error") or "Provider validation failed"),
+                "models": [],
+                "textModels": [],
+                "busy": False,
+            }
+            self._set_error(ValueError(self._provider_activity[provider_id]["error"]))
+            self.providerStateChanged.emit()
+            return
+        try:
+            current = self._provider_config(provider_id)
+            updated = replace(
+                self._config,
+                **{
+                    provider_id: replace(
+                        current,
+                        api_key=str(data.get("api_key") or ""),
+                        base_url=str(data.get("base_url") or ""),
+                    )
+                },
+            )
+            self._config = self._config_repository.apply(updated)
+        except Exception as error:
+            self._provider_activity[provider_id] = {
+                "status": "error",
+                "error": str(error).strip() or type(error).__name__,
+                "models": [],
+                "textModels": [],
+                "busy": False,
+            }
+            self._set_error(error)
+            self.providerStateChanged.emit()
+            return
+        self._provider_activity[provider_id] = {
+            "status": "active",
+            "error": "",
+            "models": list(data.get("models") or []),
+            "textModels": list(data.get("text_models") or []),
+            "busy": False,
+        }
+        self._provider_api_key_draft = ""
+        self._provider_base_url_draft = self._config_provider_base_url(provider_id)
+        self._dirty = False
+        self._set_error(None)
+        self.configChanged.emit()
+        self.providerStateChanged.emit()
+
+    def _config_provider_base_url(self, provider_id: str) -> str:
+        config = self._provider_config(provider_id)
+        return config.base_url or self._default_provider_base_url(provider_id)
+
+    def _publish_local_state(self, state: LocalASRProductState) -> None:
+        self._localStatePublished.emit(state)
+
+    @Slot(object)
+    def _apply_local_state(self, state: object) -> None:
+        if isinstance(state, LocalASRProductState):
+            self._local_state = state
+            self.providerStateChanged.emit()
 
     def _selected_route(self) -> WorkflowRoute:
         return self._config.workflow(self._selected_scope)
@@ -611,8 +1081,13 @@ class QmlSettingsController(QObject):
         )
         config_changed = config != self._config
         self._config = config
+        self._provider_api_key_draft = ""
+        self._provider_base_url_draft = self._config_provider_base_url(
+            self._selected_provider_id
+        )
         if config_changed:
             self.configChanged.emit()
+        self.providerStateChanged.emit()
         if route_changed:
             self.routeChanged.emit()
         if self._dirty:

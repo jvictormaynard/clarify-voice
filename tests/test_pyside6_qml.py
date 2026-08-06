@@ -136,6 +136,11 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("workflow.setLanguage", main_source)
         self.assertIn("workflow.setMode", main_source)
         self.assertIn("workflow.copyResult()", main_source)
+        self.assertIn("modelData.text", main_source)
+        self.assertIn("TextArea", main_source)
+        self.assertIn("selectByMouse: true", main_source)
+        self.assertIn("audioBatch.copyFile(fileResultRow.modelData.path)", main_source)
+        self.assertIn('text: "Select text to reuse"', main_source)
         self.assertNotIn("Global shortcuts and settings will be connected", main_source)
         self.assertIn('objectName: "settingsPage"', main_source)
         for binding in (
@@ -150,6 +155,13 @@ class PySide6QmlFrontendTests(unittest.TestCase):
             "settings.routePrompt",
             "settings.routeCustomEndpoint",
             "settings.routeEnabled",
+            "settings.providerIds",
+            "settings.selectedProviderId",
+            "settings.providerApiKey",
+            "settings.providerBaseUrl",
+            "settings.validateProvider()",
+            "settings.installLocalAsr()",
+            "settings.removeLocalAsr()",
             "settings.lastError",
             "settings.dirty",
             "settings.load()",
@@ -215,6 +227,7 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("copy_runner=runtime.copy_result", source)
         self.assertIn("app.aboutToQuit.connect(shell.stop)", source)
         self.assertIn("app.aboutToQuit.connect(runtime.shutdown)", source)
+        self.assertIn("app.aboutToQuit.connect(settings.shutdown)", source)
         self.assertLess(
             source.index("app.aboutToQuit.connect(shell.stop)"),
             source.index("app.aboutToQuit.connect(runtime.shutdown)"),

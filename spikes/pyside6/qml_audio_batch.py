@@ -32,6 +32,8 @@ PathValue = str | os.PathLike[str] | Path
 SelectionFactory = Callable[..., FileTranscriptionSelection]
 CallSoon = Callable[[Callable[[], None]], None]
 ServiceFactory = Callable[[], AudioFileBatchService]
+CopyRunner = Callable[[str], Any]
+DispatchRunner = Callable[[Callable[[], None]], None]
 
 
 def _default_selection_factory(
@@ -106,6 +108,7 @@ class QmlAudioFileImportController(QObject):
     failedCountChanged = Signal()
     canRetryChanged = Signal()
     lastErrorChanged = Signal()
+    copyCompleted = Signal(str, bool)
 
     def __init__(
         self,
@@ -115,6 +118,8 @@ class QmlAudioFileImportController(QObject):
         selection_factory: SelectionFactory | None = None,
         scheduler: Any | None = None,
         call_soon: CallSoon | None = None,
+        copy_runner: CopyRunner | None = None,
+        dispatch_runner: DispatchRunner | None = None,
         controller_factory: Callable[..., AudioFileImportController] | None = None,
         parent: QObject | None = None,
     ) -> None:
@@ -130,6 +135,10 @@ class QmlAudioFileImportController(QObject):
         if not callable(call_soon):
             raise ValueError("A Qt scheduler with call_soon is required")
         self._call_soon = call_soon
+        if dispatch_runner is None and scheduler is not None:
+            dispatch_runner = getattr(scheduler, "run_dispatch", None)
+        self._dispatch_runner = dispatch_runner or self._call_soon
+        self._copy_runner = copy_runner
         self._selection_factory = selection_factory or _default_selection_factory
         factory = controller_factory or AudioFileImportController
         self._controller = factory(service, on_update=self._on_batch_update)
@@ -361,6 +370,42 @@ class QmlAudioFileImportController(QObject):
         item = self._item_for(path)
         return item.error if item is not None else ""
 
+    @Slot(str, result=bool)
+    def copyFile(self, path: str) -> bool:
+        """Copy one completed transcript through the injected runtime seam."""
+
+        item = self._item_for(path)
+        if (
+            item is None
+            or item.status is not AudioFileStatus.SUCCEEDED
+            or not item.text
+        ):
+            self._set_last_error("That file has no completed transcript to copy")
+            return False
+        if self._copy_runner is None:
+            self._set_last_error("Transcript copying is unavailable")
+            return False
+
+        copied_text = item.text
+
+        def copy() -> None:
+            try:
+                self._copy_runner(copied_text)
+            except Exception as error:
+                message = str(error)
+                self._call_soon(
+                    lambda message=message: self._finish_copy(path, False, message)
+                )
+            else:
+                self._call_soon(lambda: self._finish_copy(path, True, ""))
+
+        try:
+            self._dispatch_runner(copy)
+        except Exception as error:
+            self._set_last_error(str(error))
+            return False
+        return True
+
     def _make_selection(
         self,
         provider_id: str,
@@ -417,6 +462,12 @@ class QmlAudioFileImportController(QObject):
         if error:
             self._set_last_error(error)
         self._refresh_from_controller()
+
+    @Slot(str, bool, str)
+    def _finish_copy(self, path: str, success: bool, error: str) -> None:
+        if error:
+            self._set_last_error(error)
+        self.copyCompleted.emit(path, success)
 
     @Slot()
     def _refresh_from_controller(self) -> None:

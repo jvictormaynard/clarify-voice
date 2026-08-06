@@ -271,6 +271,39 @@ class QmlAudioFileImportControllerTests(unittest.TestCase):
         self.assertEqual(controller.files[0]["status"], "succeeded")
         self.assertEqual(controller.textFor("threaded.wav"), "marshaled")
 
+    def test_completed_transcript_can_be_copied_through_injected_runtime(self):
+        service = _FakeService()
+        scheduler = _QueuedScheduler()
+        copied = []
+        completions = []
+        controller = QmlAudioFileImportController(
+            service,
+            selection_factory=lambda *_args: _selection(),
+            scheduler=scheduler,
+            copy_runner=copied.append,
+            dispatch_runner=lambda callback: callback(),
+        )
+        controller.copyCompleted.connect(
+            lambda path, success: completions.append((path, success))
+        )
+        self.assertTrue(controller.start(["copy.wav"], "p", "m", "en"))
+        service.publish(
+            0,
+            AudioFileResult(
+                Path("copy.wav"),
+                AudioFileStatus.SUCCEEDED,
+                text="transcript to reuse",
+            ),
+        )
+        service.finish(0)
+        scheduler.drain_until(lambda: controller.done)
+
+        self.assertTrue(controller.copyFile("copy.wav"))
+        self.assertEqual(copied, ["transcript to reuse"])
+        self.assertEqual(completions, [])
+        scheduler.drain()
+        self.assertEqual(completions, [("copy.wav", True)])
+
 
 if __name__ == "__main__":
     unittest.main()

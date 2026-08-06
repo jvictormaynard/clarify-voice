@@ -33,11 +33,10 @@ def _branding_icon_path() -> Path:
     seen: set[Path] = set()
     relative_path = Path("assets") / "branding" / "clarify.ico"
     for root in roots:
-        resolved_root = root.resolve()
-        if resolved_root in seen:
+        if root in seen:
             continue
-        seen.add(resolved_root)
-        candidate = resolved_root / relative_path
+        seen.add(root)
+        candidate = root / relative_path
         if candidate.is_file():
             return candidate
 
@@ -70,11 +69,10 @@ def _qml_root() -> Path:
 
     seen: set[Path] = set()
     for root in roots:
-        resolved_root = root.resolve()
-        if resolved_root in seen:
+        if root in seen:
             continue
-        seen.add(resolved_root)
-        candidate = resolved_root / "qml"
+        seen.add(root)
+        candidate = root / "qml"
         if (candidate / "Main.qml").is_file():
             return candidate
 
@@ -298,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
         runtime.audio_batch_service,
         selection_factory=runtime.audio_file_selection,
         scheduler=scheduler,
+        copy_runner=runtime.copy_result,
+        dispatch_runner=scheduler.run_dispatch,
         parent=app,
     )
 
@@ -372,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
         lambda: _show_translation_picker_if_needed(bridge, shell)
     )
     _connect_shutdown(app, shell, runtime, voice_translation, audio_batch)
+    app.aboutToQuit.connect(settings.shutdown)
 
     shell_result = _start_shell_if_available(shell)
     if shell_result is ShellStartResult.SECONDARY_INSTANCE:

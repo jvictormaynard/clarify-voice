@@ -719,6 +719,244 @@ ApplicationWindow {
                             }
 
                             Label {
+                                text: "Providers"
+                                color: theme.secondaryText
+                                font.pixelSize: 10
+                                font.weight: Font.DemiBold
+                                font.letterSpacing: 0.7
+                            }
+
+                            GridLayout {
+                                Layout.fillWidth: true
+                                columns: 2
+                                columnSpacing: 12
+                                rowSpacing: 6
+
+                                Label {
+                                    text: "Provider"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                ComboBox {
+                                    id: onboardingProviderBox
+                                    objectName: "onboardingProviderBox"
+                                    Layout.fillWidth: true
+                                    model: settings.providerIds
+                                    currentIndex: Math.max(
+                                        0, settings.providerIds.indexOf(
+                                            settings.selectedProviderId))
+                                    onActivated: settings.selectProvider(currentText)
+                                    contentItem: Label {
+                                        leftPadding: 8
+                                        rightPadding: 24
+                                        text: settings.providerName(
+                                            onboardingProviderBox.currentText)
+                                        color: theme.text
+                                        font.pixelSize: 11
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    indicator: Label {
+                                        x: onboardingProviderBox.width - width - 8
+                                        y: (onboardingProviderBox.height - height) / 2
+                                        text: "⌄"
+                                        color: theme.dim
+                                        font.pixelSize: 12
+                                    }
+                                    background: Rectangle {
+                                        implicitHeight: 26
+                                        radius: theme.controlRadius
+                                        color: theme.control
+                                        border.color: theme.border
+                                        border.width: 1
+                                    }
+                                }
+
+                                Label {
+                                    text: "API key"
+                                    visible: settings.selectedProviderId !== "local_asr"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                TextField {
+                                    id: providerApiKeyField
+                                    objectName: "providerApiKeyField"
+                                    visible: settings.selectedProviderId !== "local_asr"
+                                    Layout.fillWidth: true
+                                    text: settings.providerApiKey
+                                    placeholderText: settings.providerHasApiKey
+                                                     ? "Saved key; leave blank to keep it"
+                                                     : "Paste API key"
+                                    echoMode: TextInput.Password
+                                    onEditingFinished: settings.setProviderApiKey(text)
+                                    color: theme.text
+                                    placeholderTextColor: theme.dim
+                                    font.pixelSize: 11
+                                    selectByMouse: true
+                                    background: Rectangle {
+                                        implicitHeight: 26
+                                        radius: theme.controlRadius
+                                        color: theme.control
+                                        border.color: theme.border
+                                        border.width: 1
+                                    }
+                                }
+
+                                Label {
+                                    text: "Base URL"
+                                    visible: settings.selectedProviderId !== "local_asr"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                TextField {
+                                    id: providerBaseUrlField
+                                    objectName: "providerBaseUrlField"
+                                    visible: settings.selectedProviderId !== "local_asr"
+                                    enabled: settings.providerSupportsCustomEndpoint
+                                    Layout.fillWidth: true
+                                    text: settings.providerBaseUrl
+                                    onEditingFinished: settings.setProviderBaseUrl(text)
+                                    color: theme.text
+                                    placeholderText: "Provider endpoint"
+                                    placeholderTextColor: theme.dim
+                                    font.pixelSize: 11
+                                    selectByMouse: true
+                                    background: Rectangle {
+                                        implicitHeight: 26
+                                        radius: theme.controlRadius
+                                        color: theme.control
+                                        border.color: theme.border
+                                        border.width: 1
+                                    }
+                                }
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                visible: settings.selectedProviderId !== "local_asr"
+                                text: "Status: " + settings.providerStatus
+                                      + (settings.providerError !== ""
+                                         ? " — " + settings.providerError : "")
+                                color: settings.providerError !== ""
+                                       ? theme.secondaryText : theme.dim
+                                font.pixelSize: 10
+                                wrapMode: Text.WordWrap
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: settings.selectedProviderId !== "local_asr"
+                                spacing: 5
+
+                                Item { Layout.fillWidth: true }
+
+                                AppButton {
+                                    text: settings.providerBusy ? "Validating…"
+                                          : "Validate & save"
+                                    theme: theme
+                                    enabled: !settings.providerBusy
+                                    Layout.preferredWidth: 108
+                                    Layout.preferredHeight: 26
+                                    Accessible.name: "Validate and save provider"
+                                    onClicked: settings.validateProvider()
+                                }
+
+                                AppButton {
+                                    text: "Clear key"
+                                    theme: theme
+                                    quiet: true
+                                    enabled: settings.providerHasApiKey
+                                    Layout.preferredWidth: 68
+                                    Layout.preferredHeight: 26
+                                    Accessible.name: "Clear provider API key"
+                                    onClicked: settings.clearProvider()
+                                }
+                            }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                visible: settings.selectedProviderId === "local_asr"
+                                spacing: 5
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: settings.localAsrRequirements
+                                    color: theme.dim
+                                    font.pixelSize: 10
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                ProgressBar {
+                                    Layout.fillWidth: true
+                                    visible: settings.localAsrBusy
+                                    value: settings.localAsrProgress
+                                    from: 0
+                                    to: 1
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: settings.localAsrStatus
+                                          + (settings.localAsrDetail !== ""
+                                             ? " — " + settings.localAsrDetail : "")
+                                    color: settings.localAsrStatus === "error"
+                                           || settings.localAsrStatus === "invalid"
+                                           ? theme.secondaryText : theme.dim
+                                    font.pixelSize: 10
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 5
+
+                                    AppButton {
+                                        text: settings.localAsrBusy ? "Cancel"
+                                              : settings.localAsrStatus === "installed"
+                                                ? "Installed" : "Download local ASR"
+                                        theme: theme
+                                        enabled: settings.localAsrBusy
+                                                  || settings.localAsrStatus !== "installed"
+                                        Layout.preferredWidth: 126
+                                        Layout.preferredHeight: 26
+                                        Accessible.name: "Install Local Whisper"
+                                        onClicked: settings.localAsrBusy
+                                                   ? settings.cancelLocalAsr()
+                                                   : settings.installLocalAsr()
+                                    }
+
+                                    AppButton {
+                                        text: "Remove assets"
+                                        theme: theme
+                                        quiet: true
+                                        enabled: !settings.localAsrBusy
+                                                  && settings.localAsrStatus === "installed"
+                                        Layout.preferredWidth: 86
+                                        Layout.preferredHeight: 26
+                                        Accessible.name: "Remove Local Whisper assets"
+                                        onClicked: settings.removeLocalAsr()
+                                    }
+
+                                    CheckBox {
+                                        id: localRefinementBox
+                                        visible: settings.localAsrStatus === "installed"
+                                        checked: settings.localAsrCloudRefinement
+                                        text: "Allow cloud refinement"
+                                        onToggled: settings.setLocalAsrCloudRefinement(checked)
+                                        contentItem: Label {
+                                            leftPadding: 24
+                                            text: localRefinementBox.text
+                                            color: theme.dim
+                                            font.pixelSize: 10
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+                                    }
+                                }
+                            }
+
+                            Label {
                                 text: "Workflow route"
                                 color: theme.secondaryText
                                 font.pixelSize: 10
@@ -1111,31 +1349,113 @@ ApplicationWindow {
                                     model: audioBatch.results
 
                                     delegate: Rectangle {
+                                        id: fileResultRow
                                         required property var modelData
+                                        property bool hasTranscript: modelData.status === "succeeded"
+                                                                      && modelData.text.length > 0
+                                        property string copyLabel: "Copy"
                                         width: parent.width
-                                        height: 34
+                                        height: hasTranscript ? 166 : 34
                                         radius: 7
                                         color: theme.control
 
-                                        RowLayout {
+                                        Timer {
+                                            id: transcriptCopyResetTimer
+                                            interval: 900
+                                            repeat: false
+                                            onTriggered: fileResultRow.copyLabel = "Copy"
+                                        }
+
+                                        Connections {
+                                            target: audioBatch
+
+                                            function onCopyCompleted(path, success) {
+                                                if (path !== fileResultRow.modelData.path)
+                                                    return
+                                                fileResultRow.copyLabel = success ? "Copied" : "Copy"
+                                                if (success)
+                                                    transcriptCopyResetTimer.restart()
+                                            }
+                                        }
+
+                                        ColumnLayout {
                                             anchors.fill: parent
                                             anchors.leftMargin: 8
                                             anchors.rightMargin: 8
-                                            spacing: 6
+                                            anchors.topMargin: 4
+                                            anchors.bottomMargin: 4
+                                            spacing: 3
 
                                             Label {
                                                 Layout.fillWidth: true
-                                                text: modelData.name
+                                                Layout.preferredHeight: 22
+                                                text: fileResultRow.modelData.name
                                                 color: theme.text
                                                 font.pixelSize: 10
                                                 elide: Text.ElideMiddle
                                             }
 
                                             Label {
-                                                text: modelData.status
-                                                color: modelData.status === "failed"
+                                                text: fileResultRow.modelData.status
+                                                color: fileResultRow.modelData.status === "failed"
                                                        ? theme.secondaryText : theme.dim
                                                 font.pixelSize: 9
+                                            }
+
+                                            ScrollView {
+                                                visible: fileResultRow.hasTranscript
+                                                Layout.fillWidth: true
+                                                Layout.preferredHeight: 88
+                                                clip: true
+
+                                                TextArea {
+                                                    id: transcriptText
+                                                    width: parent.width
+                                                    height: Math.max(implicitHeight, 88)
+                                                    text: fileResultRow.modelData.text
+                                                    readOnly: true
+                                                    selectByMouse: true
+                                                    wrapMode: TextEdit.Wrap
+                                                    color: theme.secondaryText
+                                                    selectionColor: theme.dim
+                                                    selectedTextColor: theme.text
+                                                    font.pixelSize: 10
+                                                    padding: 0
+                                                    background: Rectangle {
+                                                        color: "transparent"
+                                                    }
+                                                    Accessible.name: "Transcript for "
+                                                                      + fileResultRow.modelData.name
+                                                }
+                                            }
+
+                                            RowLayout {
+                                                visible: fileResultRow.hasTranscript
+                                                Layout.fillWidth: true
+                                                Layout.preferredHeight: 25
+                                                spacing: 5
+
+                                                Label {
+                                                    text: "Select text to reuse"
+                                                    color: theme.dim
+                                                    font.pixelSize: 9
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+                                                }
+
+                                                AppButton {
+                                                    text: fileResultRow.copyLabel
+                                                    theme: theme
+                                                    enabled: !audioBatch.running
+                                                    Layout.preferredWidth: 58
+                                                    Layout.preferredHeight: 24
+                                                    Accessible.name: "Copy transcript for "
+                                                                      + fileResultRow.modelData.name
+                                                    onClicked: {
+                                                        if (audioBatch.copyFile(fileResultRow.modelData.path))
+                                                            fileResultRow.copyLabel = "Copying…"
+                                                    }
+                                                }
                                             }
                                         }
                                     }

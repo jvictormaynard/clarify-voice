@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import sys
 import threading
 import tempfile
 import unittest
@@ -536,6 +537,7 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
         self.assertFalse(backend.is_running)
         self.assertEqual(target.installed, [])
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only user32 seam test")
     def test_linux_requires_an_injected_user32_seam(self):
         backend = WindowsGlobalHotkeyBackend(FakeNativeEventTarget())
         with self.assertRaisesRegex(RuntimeError, "user32 seam"):
