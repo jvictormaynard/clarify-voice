@@ -29,9 +29,12 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from hotkey_config import HotkeyAction, HotkeySettings
 from windows_hotkeys import (
+    ESCAPE_HOTKEY_ID,
     WM_HOTKEY,
     action_for_hotkey_id,
+    register_escape_hotkey,
     register_global_hotkeys,
+    unregister_escape_hotkey,
     unregister_global_hotkeys,
 )
 
@@ -222,6 +225,8 @@ class WindowsGlobalHotkeyBackend(QObject):
         user32: Any | None = None,
         register_hotkeys: Callable[..., set[int]] = register_global_hotkeys,
         unregister_hotkeys: Callable[..., None] = unregister_global_hotkeys,
+        register_escape: Callable[..., bool] = register_escape_hotkey,
+        unregister_escape: Callable[..., None] = unregister_escape_hotkey,
         event_filter_factory: Callable[
             ..., WindowsHotkeyEventFilter
         ] = WindowsHotkeyEventFilter,
@@ -235,12 +240,16 @@ class WindowsGlobalHotkeyBackend(QObject):
         self._user32 = user32
         self._register_hotkeys = register_hotkeys
         self._unregister_hotkeys = unregister_hotkeys
+        self._register_escape = register_escape
+        self._unregister_escape = unregister_escape
         self._event_filter_factory = event_filter_factory
         self._message_decoder = message_decoder
         self._action_for_id = action_for_id
         self._event_filter: QAbstractNativeEventFilter | None = None
         self._registered: set[int] = set()
         self._hwnd: int | None = None
+        self._recording_active = False
+        self._escape_registered = False
 
     @property
     def is_running(self) -> bool:
@@ -248,7 +257,17 @@ class WindowsGlobalHotkeyBackend(QObject):
 
     @property
     def registered_ids(self) -> frozenset[int]:
-        return frozenset(self._registered)
+        registered = set(self._registered)
+        if self._escape_registered:
+            registered.add(ESCAPE_HOTKEY_ID)
+        return frozenset(registered)
+
+    def set_recording_active(self, active: bool) -> None:
+        """Keep the global Escape binding aligned with recording state."""
+
+        self._recording_active = bool(active)
+        if self.is_running:
+            self._set_escape_hotkey(self._recording_active)
 
     def start(self, window: WindowTarget) -> set[int]:
         """Register configured shortcuts against the QML window handle."""
@@ -259,6 +278,8 @@ class WindowsGlobalHotkeyBackend(QObject):
         hwnd = self._window_handle(window)
         user32 = self._user32 if self._user32 is not None else _load_user32()
         registered: set[int] = set()
+        event_filter: QAbstractNativeEventFilter | None = None
+        event_filter_installed = False
         try:
             registered = set(
                 self._register_hotkeys(
@@ -274,14 +295,26 @@ class WindowsGlobalHotkeyBackend(QObject):
                 action_for_id=self._action_for_id,
             )
             self._event_target.installNativeEventFilter(event_filter)
+            event_filter_installed = True
+            self._hwnd = hwnd
+            self._registered = registered
+            self._event_filter = event_filter
+            self._set_escape_hotkey(self._recording_active)
         except BaseException:
-            self._unregister_hotkeys(user32, hwnd, registered)
+            try:
+                self._set_escape_hotkey(False)
+            finally:
+                try:
+                    if event_filter_installed and event_filter is not None:
+                        self._event_target.removeNativeEventFilter(event_filter)
+                finally:
+                    self._unregister_hotkeys(user32, hwnd, registered)
+                    self._registered.clear()
+                    self._hwnd = None
+                    self._event_filter = None
             raise
 
-        self._hwnd = hwnd
-        self._registered = registered
-        self._event_filter = event_filter
-        return set(self._registered)
+        return set(self.registered_ids)
 
     def stop(self) -> None:
         """Remove the native filter and unregister every active shortcut."""
@@ -294,13 +327,33 @@ class WindowsGlobalHotkeyBackend(QObject):
         try:
             self._event_target.removeNativeEventFilter(event_filter)
         finally:
-            self._unregister_hotkeys(user32, self._hwnd, self._registered)
-            self._registered.clear()
-            self._hwnd = None
-            self._event_filter = None
+            try:
+                self._set_escape_hotkey(False)
+            finally:
+                self._unregister_hotkeys(user32, self._hwnd, self._registered)
+                self._registered.clear()
+                self._recording_active = False
+                self._hwnd = None
+                self._event_filter = None
+
+    def _set_escape_hotkey(self, enabled: bool) -> None:
+        if self._hwnd is None:
+            return
+        user32 = self._user32 if self._user32 is not None else _load_user32()
+        if enabled:
+            if self._escape_registered:
+                return
+            self._escape_registered = bool(self._register_escape(user32, self._hwnd))
+            return
+        if not self._escape_registered:
+            return
+        try:
+            self._unregister_escape(user32, self._hwnd)
+        finally:
+            self._escape_registered = False
 
     def _handle_hotkey_id(self, hotkey_id: int) -> None:
-        if int(hotkey_id) not in self._registered:
+        if int(hotkey_id) not in self.registered_ids:
             return
         action = self._action_for_id(int(hotkey_id))
         if action is not None:

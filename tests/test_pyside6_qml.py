@@ -19,6 +19,7 @@ try:
         _load_branding_icon,
         _register_qml_context,
         _show_translation_picker_if_needed,
+        _sync_recording_escape_hotkey,
         _start_shell_if_available,
     )
     from spikes.pyside6.qml_bridge import QmlWorkflowBridge
@@ -212,6 +213,29 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("_start_shell_if_available", source)
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("--fake", source)
+
+    @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+    def test_escape_hotkey_sync_tracks_recording_surface(self):
+        class Bridge:
+            surface = "idle"
+
+        class Hotkeys:
+            def __init__(self):
+                self.states = []
+
+            def set_recording_active(self, active):
+                self.states.append(active)
+
+        bridge = Bridge()
+        hotkeys = Hotkeys()
+
+        _sync_recording_escape_hotkey(bridge, hotkeys)
+        bridge.surface = "recording"
+        _sync_recording_escape_hotkey(bridge, hotkeys)
+        bridge.surface = "processing"
+        _sync_recording_escape_hotkey(bridge, hotkeys)
+
+        self.assertEqual(hotkeys.states, [False, True, False])
 
     @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
     def test_branding_icon_loads_from_source_and_frozen_bundle_paths(self):

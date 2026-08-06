@@ -779,13 +779,15 @@ class QtWorkflowRuntimeTests(unittest.TestCase):
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
 class QmlRuntimeFactoryTests(unittest.TestCase):
     def test_factory_composes_ui_free_runtime_without_importing_legacy_app(self):
+        missing = object()
+        legacy_app_before = sys.modules.get("app", missing)
         with TemporaryDirectory() as directory:
             with patch.dict(os.environ, {"CLARIFYVOICE_DATA_DIR": directory}):
                 runtime = create_real_workflow_runtime(object())
 
         self.assertIsInstance(runtime.workflow_service, WorkflowService)
         self.assertIs(runtime.repositories, runtime.history_recorder.repositories)
-        self.assertNotIn("app", sys.modules)
+        self.assertIs(sys.modules.get("app", missing), legacy_app_before)
 
     def test_factory_constructs_opt_in_history_recorder(self):
         with TemporaryDirectory() as directory:

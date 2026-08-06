@@ -142,6 +142,13 @@ def _show_translation_picker_if_needed(bridge, shell) -> None:
         shell.show_window()
 
 
+def _sync_recording_escape_hotkey(bridge, hotkeys) -> None:
+    """Register global Escape only while the workflow is recording."""
+
+    if hotkeys is not None:
+        hotkeys.set_recording_active(bridge.surface == "recording")
+
+
 def _connect_shutdown(app, shell, runtime) -> None:
     """Stop shell-owned native resources before the workflow runtime."""
 
@@ -210,6 +217,11 @@ def main(argv: list[str] | None = None) -> int:
             settings=repositories.config.load().hotkeys,
             parent=app,
         )
+    if hotkeys is not None:
+        bridge.surfaceChanged.connect(
+            lambda: _sync_recording_escape_hotkey(bridge, hotkeys)
+        )
+        _sync_recording_escape_hotkey(bridge, hotkeys)
     shell = QtShell(
         window,
         hotkeys=hotkeys,

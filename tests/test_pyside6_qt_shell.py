@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from hotkey_config import HotkeyAction, HotkeySettings
+from windows_hotkeys import ESCAPE_HOTKEY_ID
 
 try:
     from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal
@@ -287,6 +288,71 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
         self.assertEqual(target.removed, target.installed)
         self.assertEqual(unregistrations, [("fake-user32", 123, {0x5101})])
         self.assertFalse(backend.is_running)
+
+    def test_backend_registers_escape_only_while_recording(self):
+        target = FakeNativeEventTarget()
+        escape_registrations = []
+        escape_unregistrations = []
+
+        def register_escape(user32, hwnd):
+            escape_registrations.append((user32, hwnd))
+            return True
+
+        def unregister_escape(user32, hwnd):
+            escape_unregistrations.append((user32, hwnd))
+
+        backend = WindowsGlobalHotkeyBackend(
+            target,
+            user32="fake-user32",
+            register_hotkeys=lambda *_args, **_kwargs: {0x5101},
+            unregister_hotkeys=lambda *_args, **_kwargs: None,
+            register_escape=register_escape,
+            unregister_escape=unregister_escape,
+            message_decoder=lambda _event_type, _message: ESCAPE_HOTKEY_ID,
+        )
+        received = []
+        backend.triggered.connect(received.append)
+
+        backend.start(FakeWindow())
+        self.assertEqual(escape_registrations, [])
+        self.assertNotIn(ESCAPE_HOTKEY_ID, backend.registered_ids)
+
+        backend.set_recording_active(True)
+        backend.set_recording_active(True)
+        self.assertEqual(escape_registrations, [("fake-user32", 123)])
+        self.assertIn(ESCAPE_HOTKEY_ID, backend.registered_ids)
+
+        target.installed[0].nativeEventFilter(b"windows_generic_MSG", object())
+        self.assertEqual(received, ["escape"])
+
+        backend.set_recording_active(False)
+        self.assertEqual(escape_unregistrations, [("fake-user32", 123)])
+        self.assertNotIn(ESCAPE_HOTKEY_ID, backend.registered_ids)
+        target.installed[0].nativeEventFilter(b"windows_generic_MSG", object())
+        self.assertEqual(received, ["escape"])
+
+        backend.stop()
+
+    def test_backend_stop_cleans_escape_registration_during_recording(self):
+        escape_unregistrations = []
+
+        backend = WindowsGlobalHotkeyBackend(
+            FakeNativeEventTarget(),
+            user32="fake-user32",
+            register_hotkeys=lambda *_args, **_kwargs: {0x5101},
+            unregister_hotkeys=lambda *_args, **_kwargs: None,
+            register_escape=lambda *_args, **_kwargs: True,
+            unregister_escape=lambda user32, hwnd: escape_unregistrations.append(
+                (user32, hwnd)
+            ),
+        )
+
+        backend.start(FakeWindow())
+        backend.set_recording_active(True)
+        backend.stop()
+
+        self.assertEqual(escape_unregistrations, [("fake-user32", 123)])
+        self.assertFalse(backend.registered_ids)
 
     def test_backend_does_not_register_unsupported_voice_translation_action(self):
         target = FakeNativeEventTarget()
