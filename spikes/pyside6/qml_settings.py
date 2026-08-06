@@ -982,8 +982,9 @@ class QmlSettingsController(QObject):
             "textModels": list(data.get("text_models") or []),
             "busy": False,
         }
-        self._provider_api_key_draft = ""
-        self._provider_base_url_draft = self._config_provider_base_url(provider_id)
+        if provider_id == self._selected_provider_id:
+            self._provider_api_key_draft = ""
+            self._provider_base_url_draft = self._config_provider_base_url(provider_id)
         self._set_error(None)
         self.configChanged.emit()
         self.providerStateChanged.emit()

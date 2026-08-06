@@ -1128,6 +1128,8 @@ class QtWorkflowRuntime:
             raise QtRuntimeError("The QML audio import route requires repositories")
         current = self.repositories.config.load()
         route = current.workflow(WorkflowScope.TRANSCRIPTION)
+        if not route.enabled:
+            raise RuntimeError("transcription workflow is disabled")
         selected_provider = str(provider_id or route.provider_id).strip().lower()
         selected_model = str(model or route.model_id).strip()
         selected_language = (

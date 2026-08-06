@@ -418,6 +418,10 @@ class QmlWorkflowBridge(QObject):
             # translation as dictation or selected-text translation.
             if self._voice_translation_handler is None:
                 return False
+            if self.busy and not bool(
+                getattr(self._voice_translation_controller, "active", False)
+            ):
+                return False
             self._submit(self._voice_translation_handler)
             return True
 
@@ -425,19 +429,21 @@ class QmlWorkflowBridge(QObject):
             if self._state.phase is WorkflowPhase.RECORDING:
                 self.stopRecording()
                 return True
+            if self.busy:
+                return False
             if self._state.phase is WorkflowPhase.READY:
                 self.startRecording()
                 return True
             return False
 
         if normalized == "rewrite_hotkey":
-            if self._state.phase is not WorkflowPhase.READY:
+            if self.busy or self._state.phase is not WorkflowPhase.READY:
                 return False
             self._submit(lambda: self._workflow_service.dispatch(StartRewrite()))
             return True
 
         if normalized == "translation_hotkey":
-            if self._state.phase is not WorkflowPhase.READY:
+            if self.busy or self._state.phase is not WorkflowPhase.READY:
                 return False
             self._submit(lambda: self._workflow_service.dispatch(StartTranslation()))
             return True

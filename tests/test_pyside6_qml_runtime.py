@@ -768,6 +768,28 @@ class QtWorkflowSchedulerTests(unittest.TestCase):
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
 class QtWorkflowRuntimeTests(unittest.TestCase):
+    def test_audio_file_selection_rejects_disabled_transcription_route(self):
+        current = AppConfig()
+        disabled_workflows = replace(
+            current.workflows,
+            transcription=replace(current.workflows.transcription, enabled=False),
+        )
+        repositories = SimpleNamespace(
+            config=SimpleNamespace(
+                load=lambda: replace(current, workflows=disabled_workflows)
+            )
+        )
+        runtime = QtWorkflowRuntime(
+            None,
+            None,
+            None,
+            None,
+            repositories=repositories,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "transcription workflow is disabled"):
+            runtime.audio_file_selection()
+
     def test_shutdown_cancels_waits_and_closes_provider_registry(self):
         calls = []
 

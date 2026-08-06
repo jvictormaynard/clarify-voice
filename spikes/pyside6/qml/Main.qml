@@ -1240,6 +1240,144 @@ ApplicationWindow {
                 id: filesPage
                 objectName: "filesPage"
 
+                // File imports are an explicit batch route.  Start with the
+                // saved transcription route, but keep every picker change
+                // local to this batch instead of mutating Settings.
+                property var persistedTranscriptionRoute:
+                    settings.routes["transcription"]
+                property string batchExecution:
+                    persistedTranscriptionRoute.providerId === "local_asr"
+                    ? "local" : "cloud"
+                property string batchProviderId:
+                    persistedTranscriptionRoute.providerId || ""
+                property string batchModelId:
+                    persistedTranscriptionRoute.modelId || ""
+                property bool batchRouteTouched: false
+                readonly property var defaultAudioModels: ({
+                    "gemini": "gemini-2.5-flash",
+                    "openai": "whisper-1",
+                    "groq": "whisper-large-v3-turbo",
+                    "local_asr": "ggml-small"
+                })
+
+                function providerIdsForExecution(execution) {
+                    var providers = settings.providersForScope("transcription")
+                    var selected = []
+                    for (var index = 0; index < providers.length; ++index) {
+                        var providerId = providers[index]
+                        if ((execution === "local" && providerId === "local_asr")
+                                || (execution === "cloud" && providerId !== "local_asr"))
+                            selected.push(providerId)
+                    }
+                    return selected
+                }
+
+                function modelIdsForProvider(providerId) {
+                    var models = []
+                    var addModel = function(model) {
+                        var value = String(model || "").trim()
+                        if (value !== "" && models.indexOf(value) < 0)
+                            models.push(value)
+                    }
+                    var route = persistedTranscriptionRoute
+                    if (route && route.providerId === providerId)
+                        addModel(route.modelId)
+                    var state = settings.providerStates[providerId]
+                    if (state && state.models) {
+                        for (var index = 0; index < state.models.length; ++index)
+                            addModel(state.models[index])
+                    }
+                    addModel(defaultAudioModels[providerId])
+                    return models
+                }
+
+                function defaultModelForProvider(providerId) {
+                    var route = persistedTranscriptionRoute
+                    if (route && route.providerId === providerId && route.modelId)
+                        return route.modelId
+                    var models = modelIdsForProvider(providerId)
+                    return models.length > 0 ? models[0] : ""
+                }
+
+                function initializeBatchRoute() {
+                    var route = persistedTranscriptionRoute
+                    var providerId = route && route.providerId
+                            ? route.providerId : ""
+                    var execution = providerId === "local_asr" ? "local" : "cloud"
+                    var providers = providerIdsForExecution(execution)
+                    if (providers.indexOf(providerId) < 0)
+                        providerId = providers.length > 0 ? providers[0] : ""
+                    batchExecution = execution
+                    batchProviderId = providerId
+                    batchModelId = route && route.providerId === providerId
+                            ? route.modelId : defaultModelForProvider(providerId)
+                    batchRouteTouched = false
+                }
+
+                function selectBatchExecution(execution) {
+                    var providers = providerIdsForExecution(execution)
+                    var providerId = providers.indexOf(batchProviderId) >= 0
+                            ? batchProviderId
+                            : (providers.length > 0 ? providers[0] : "")
+                    batchExecution = execution
+                    batchProviderId = providerId
+                    batchModelId = defaultModelForProvider(providerId)
+                    batchRouteTouched = true
+                }
+
+                function selectBatchProvider(providerId) {
+                    if (providerIdsForExecution(batchExecution).indexOf(providerId) < 0)
+                        return
+                    batchProviderId = providerId
+                    batchModelId = defaultModelForProvider(providerId)
+                    batchRouteTouched = true
+                }
+
+                function selectBatchModel(model) {
+                    batchModelId = String(model || "").trim()
+                    batchRouteTouched = true
+                }
+
+                function commitBatchModel() {
+                    var value = batchModelId
+                    if (batchModelBox.editable)
+                        value = batchModelBox.editText
+                    batchModelId = String(value || "").trim()
+                    batchRouteTouched = true
+                }
+
+                function startBatch() {
+                    commitBatchModel()
+                    audioBatch.start(
+                        audioBatch.selectedFiles,
+                        batchProviderId,
+                        batchModelId,
+                        workflow.language,
+                        workflow.mode
+                    )
+                }
+
+                function retryBatch() {
+                    commitBatchModel()
+                    audioBatch.retryFailed(
+                        batchProviderId,
+                        batchModelId,
+                        workflow.language,
+                        workflow.mode
+                    )
+                }
+
+                Component.onCompleted: initializeBatchRoute()
+
+                Connections {
+                    target: settings
+
+                    function onConfigChanged() {
+                        if (!filesPage.batchRouteTouched && !audioBatch.running)
+                            filesPage.initializeBatchRoute()
+                    }
+                }
+
                 FileDialog {
                     id: audioFileDialog
                     title: "Import audio files"
@@ -1300,6 +1438,124 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         height: 1
                         color: theme.border
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 4
+                        columnSpacing: 7
+                        rowSpacing: 5
+
+                        Label {
+                            text: "Route"
+                            color: theme.dim
+                            font.pixelSize: 10
+                        }
+
+                        ComboBox {
+                            id: batchExecutionBox
+                            objectName: "batchExecutionBox"
+                            enabled: !audioBatch.running
+                            Layout.fillWidth: true
+                            model: ["local", "cloud"]
+                            currentIndex: Math.max(
+                                0, model.indexOf(filesPage.batchExecution))
+                            onActivated: filesPage.selectBatchExecution(currentText)
+                            contentItem: Label {
+                                leftPadding: 8
+                                rightPadding: 24
+                                text: batchExecutionBox.currentText === "local"
+                                      ? "Local Whisper" : "Cloud"
+                                color: theme.text
+                                font.pixelSize: 10
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                            }
+                            indicator: Label {
+                                x: batchExecutionBox.width - width - 8
+                                y: (batchExecutionBox.height - height) / 2
+                                text: "⌄"
+                                color: theme.dim
+                                font.pixelSize: 12
+                            }
+                            background: Rectangle {
+                                implicitHeight: 26
+                                radius: theme.controlRadius
+                                color: theme.control
+                                border.color: theme.border
+                                border.width: 1
+                            }
+                        }
+
+                        Label {
+                            text: "Provider"
+                            color: theme.dim
+                            font.pixelSize: 10
+                        }
+
+                        ComboBox {
+                            id: batchProviderBox
+                            objectName: "batchProviderBox"
+                            enabled: !audioBatch.running
+                            Layout.fillWidth: true
+                            model: filesPage.providerIdsForExecution(
+                                filesPage.batchExecution)
+                            currentIndex: Math.max(
+                                0, model.indexOf(filesPage.batchProviderId))
+                            onActivated: filesPage.selectBatchProvider(currentText)
+                            contentItem: Label {
+                                leftPadding: 8
+                                rightPadding: 24
+                                text: settings.providerName(
+                                    batchProviderBox.currentText)
+                                color: theme.text
+                                font.pixelSize: 10
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                            }
+                            indicator: Label {
+                                x: batchProviderBox.width - width - 8
+                                y: (batchProviderBox.height - height) / 2
+                                text: "⌄"
+                                color: theme.dim
+                                font.pixelSize: 12
+                            }
+                            background: Rectangle {
+                                implicitHeight: 26
+                                radius: theme.controlRadius
+                                color: theme.control
+                                border.color: theme.border
+                                border.width: 1
+                            }
+                        }
+
+                        Label {
+                            text: "Model"
+                            color: theme.dim
+                            font.pixelSize: 10
+                        }
+
+                        ComboBox {
+                            id: batchModelBox
+                            objectName: "batchModelBox"
+                            enabled: !audioBatch.running
+                            Layout.columnSpan: 3
+                            Layout.fillWidth: true
+                            editable: true
+                            model: filesPage.modelIdsForProvider(
+                                filesPage.batchProviderId)
+                            currentIndex: Math.max(
+                                0, model.indexOf(filesPage.batchModelId))
+                            onActivated: filesPage.selectBatchModel(currentText)
+                            onAccepted: filesPage.commitBatchModel()
+                            background: Rectangle {
+                                implicitHeight: 26
+                                radius: theme.controlRadius
+                                color: theme.control
+                                border.color: theme.border
+                                border.width: 1
+                            }
+                        }
                     }
 
                     RowLayout {
@@ -1494,13 +1750,7 @@ ApplicationWindow {
                             Layout.preferredWidth: 54
                             Layout.preferredHeight: 26
                             Accessible.name: "Start audio transcription"
-                            onClicked: audioBatch.start(
-                                audioBatch.selectedFiles,
-                                "",
-                                "",
-                                workflow.language,
-                                workflow.mode
-                            )
+                            onClicked: filesPage.startBatch()
                         }
 
                         AppButton {
@@ -1522,7 +1772,7 @@ ApplicationWindow {
                             Layout.preferredWidth: 52
                             Layout.preferredHeight: 26
                             Accessible.name: "Retry failed audio files"
-                            onClicked: audioBatch.retry()
+                            onClicked: filesPage.retryBatch()
                         }
 
                         Item { Layout.fillWidth: true }

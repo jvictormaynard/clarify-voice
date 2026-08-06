@@ -220,6 +220,55 @@ class QmlSettingsControllerTests(unittest.TestCase):
             finally:
                 controller.shutdown()
 
+    def test_provider_validation_preserves_draft_for_newly_selected_provider(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            controller = QmlSettingsController(repositories)
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocked_discovery(*_args):
+                started.set()
+                release.wait(timeout=2)
+                return ModelCatalog(audio_models=("whisper-1",))
+
+            try:
+                self.assertTrue(controller.selectProvider("openai"))
+                controller.setProviderApiKey("provider-a-key")
+                controller.setProviderBaseUrl("https://openai-proxy.example/v1")
+
+                with patch.object(
+                    qml_settings.PROVIDER_REGISTRY,
+                    "discover_models",
+                    side_effect=blocked_discovery,
+                ):
+                    self.assertTrue(controller.validateProvider())
+                    self.assertTrue(started.wait(timeout=2))
+
+                    self.assertTrue(controller.selectProvider("groq"))
+                    controller.setProviderApiKey("provider-b-draft")
+                    controller.setProviderBaseUrl("https://groq-proxy.example/v1")
+                    release.set()
+
+                    for _ in range(100):
+                        self.qt_app.processEvents()
+                        if controller.providerStates["openai"]["status"] == "active":
+                            break
+                        time.sleep(0.01)
+
+                self.assertEqual(
+                    controller.providerStates["openai"]["status"], "active"
+                )
+                self.assertEqual(controller.selectedProviderId, "groq")
+                self.assertEqual(controller.providerApiKey, "provider-b-draft")
+                self.assertEqual(
+                    controller.providerBaseUrl,
+                    "https://groq-proxy.example/v1",
+                )
+            finally:
+                release.set()
+                controller.shutdown()
+
     def test_provider_validation_keeps_unrelated_qml_draft_out_of_persistence(self):
         with TemporaryDirectory() as directory:
             repositories = _repositories(directory)

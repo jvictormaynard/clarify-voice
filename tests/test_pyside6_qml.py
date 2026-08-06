@@ -390,6 +390,100 @@ class PySide6QmlFrontendTests(unittest.TestCase):
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+class QmlWorkflowBridgeHotkeyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    class WorkflowService:
+        def __init__(self):
+            from workflows import WorkflowState
+
+            self.state = WorkflowState()
+            self.commands = []
+            self.listeners = []
+
+        def subscribe(self, listener):
+            self.listeners.append(listener)
+
+        def publish(self, state):
+            self.state = state
+            for listener in tuple(self.listeners):
+                listener(state)
+
+        def dispatch(self, command):
+            self.commands.append(command)
+            return True
+
+    class VoiceTranslationController(QObject):
+        stateChanged = Signal(object)
+
+        def __init__(self, active):
+            super().__init__()
+            self.active = active
+            self.state = None
+
+    class AudioBatchController(QObject):
+        runningChanged = Signal()
+
+        def __init__(self, running):
+            super().__init__()
+            self.running = running
+
+    def _bridge(self, *, voice_active=False, audio_running=False, handler=None):
+        service = self.WorkflowService()
+        voice = self.VoiceTranslationController(voice_active)
+        audio = self.AudioBatchController(audio_running)
+        bridge = QmlWorkflowBridge(
+            service,
+            voice_translation_handler=handler,
+            voice_translation_controller=voice,
+            audio_batch_controller=audio,
+        )
+        return service, bridge
+
+    def test_global_hotkeys_are_blocked_by_voice_or_audio_busy_state(self):
+        for busy_kwargs in (
+            {"voice_active": True},
+            {"audio_running": True},
+        ):
+            with self.subTest(busy_kwargs=busy_kwargs):
+                service, bridge = self._bridge(**busy_kwargs)
+
+                self.assertTrue(bridge.busy)
+                for action in (
+                    "recording_hotkey",
+                    "rewrite_hotkey",
+                    "translation_hotkey",
+                ):
+                    with self.subTest(action=action):
+                        self.assertFalse(bridge.handleHotkey(action))
+                self.assertEqual(service.commands, [])
+
+    def test_voice_translation_hotkey_stops_active_voice_workflow(self):
+        calls = []
+        service, bridge = self._bridge(
+            voice_active=True,
+            handler=lambda: calls.append("toggle"),
+        )
+
+        self.assertTrue(bridge.busy)
+        self.assertTrue(bridge.handleHotkey("voice_translation_hotkey"))
+        self.assertEqual(calls, ["toggle"])
+        self.assertEqual(service.commands, [])
+
+    def test_recording_hotkey_stops_active_workflow_even_when_busy(self):
+        from workflows import StopDictation, WorkflowPhase, WorkflowState
+
+        service, bridge = self._bridge(audio_running=True)
+        service.publish(WorkflowState(phase=WorkflowPhase.RECORDING))
+
+        self.assertTrue(bridge.busy)
+        self.assertTrue(bridge.handleHotkey("recording_hotkey"))
+        self.assertIsInstance(service.commands[-1], StopDictation)
+
+
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
 class QmlEntrypointIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
