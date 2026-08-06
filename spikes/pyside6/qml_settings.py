@@ -752,7 +752,16 @@ class QmlSettingsController(QObject):
                 persisted_config=persisted,
             )
         except Exception as error:
+            message = str(error).strip() or type(error).__name__
+            self._provider_activity[provider_id] = {
+                "status": "error",
+                "error": message,
+                "models": [],
+                "textModels": [],
+                "busy": False,
+            }
             self._set_error(error)
+            self.providerStateChanged.emit()
             return False
         self._provider_activity[provider_id] = {
             "status": "not_configured",

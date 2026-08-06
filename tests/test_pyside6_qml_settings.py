@@ -303,6 +303,40 @@ class QmlSettingsControllerTests(unittest.TestCase):
                 release.set()
                 controller.shutdown()
 
+    def test_clear_provider_failure_restores_idle_error_state(self):
+        with TemporaryDirectory() as directory:
+            controller = QmlSettingsController(_repositories(directory))
+            pending = qml_settings.CancellationToken()
+            try:
+                controller.selectProvider("openai")
+                controller._provider_generations["openai"] = 4
+                controller._provider_tokens["openai"] = pending
+                controller._provider_activity["openai"] = {
+                    "status": "validating",
+                    "error": "",
+                    "models": [],
+                    "textModels": [],
+                    "busy": True,
+                }
+
+                with patch.object(
+                    controller,
+                    "_persist_provider_credentials",
+                    side_effect=OSError("credential store unavailable"),
+                ):
+                    self.assertFalse(controller.clearProvider())
+
+                self.assertTrue(pending.cancelled)
+                self.assertFalse(controller.providerBusy)
+                self.assertEqual(controller.providerStatus, "error")
+                self.assertEqual(
+                    controller.providerError,
+                    "credential store unavailable",
+                )
+                self.assertIn("credential store unavailable", controller.lastError)
+            finally:
+                controller.shutdown()
+
     def test_properties_and_slots_update_one_typed_draft(self):
         with TemporaryDirectory() as directory:
             controller = QmlSettingsController(_repositories(directory))
