@@ -32,6 +32,7 @@ DEFAULT_INSTANCE_NAME = "clarifyvoice"
 _WINDOWS_NATIVE_EVENT_TYPES = frozenset(
     {"windows_generic_MSG", "windows_dispatcher_MSG"}
 )
+_UNSUPPORTED_SHELL_HOTKEY_ACTIONS = frozenset({HotkeyAction.VOICE_TRANSLATION})
 
 
 class QtShellError(RuntimeError):
@@ -76,6 +77,30 @@ class GlobalHotkeyBackend(Protocol):
     def start(self, window: WindowTarget) -> set[int]: ...
 
     def stop(self) -> None: ...
+
+
+def _supported_shell_hotkey_settings(
+    settings: HotkeySettings | Mapping[str, Any] | None,
+) -> HotkeySettings:
+    """Filter actions with no real QML runtime handler before registration.
+
+    ``QtWorkflowRuntime`` and ``QmlWorkflowBridge`` do not implement voice
+    translation in this slice.  It is deliberately unsupported here, so the
+    Windows shell must not reserve the configured Alt+V binding until a real
+    handler exists.
+    """
+
+    configured = (
+        settings
+        if isinstance(settings, HotkeySettings)
+        else HotkeySettings.from_mapping(settings)
+    )
+    supported = {
+        action: definition
+        for action, definition in configured.hotkeys.items()
+        if action not in _UNSUPPORTED_SHELL_HOTKEY_ACTIONS
+    }
+    return HotkeySettings(supported, configured.activation_mode)
 
 
 class QtSingleInstanceGuard:
@@ -183,7 +208,7 @@ class WindowsGlobalHotkeyBackend(QObject):
     ) -> None:
         super().__init__(parent)
         self._event_target = event_target
-        self._settings = settings
+        self._settings = _supported_shell_hotkey_settings(settings)
         self._user32 = user32
         self._register_hotkeys = register_hotkeys
         self._unregister_hotkeys = unregister_hotkeys
@@ -309,8 +334,12 @@ class QtShell(QObject):
     def tray(self) -> Any | None:
         return self._tray
 
-    def start(self) -> bool:
-        """Start shell-owned resources if this process is the primary one."""
+    def start(self, *, tray_available: bool = True) -> bool:
+        """Start the guard and optional tray/hotkey resources.
+
+        The single-instance guard is intentionally acquired even when the
+        desktop has no system tray.  Only tray construction is optional.
+        """
 
         if self._started:
             return True
@@ -319,7 +348,8 @@ class QtShell(QObject):
 
         hotkeys_started = False
         try:
-            self._create_tray()
+            if tray_available:
+                self._create_tray()
             if self._hotkeys is not None:
                 if not self._hotkeys_connected:
                     self._hotkeys.triggered.connect(self._handle_hotkey)

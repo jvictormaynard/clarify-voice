@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 import sys
 from pathlib import Path
 
@@ -29,29 +30,50 @@ except ImportError:  # PyInstaller analyzes this file as a standalone entry poin
     from qt_shell import QtShell, WindowsGlobalHotkeyBackend
 
 
-def _start_shell_if_available(shell, hotkeys) -> bool | None:
-    """Start the native shell when the desktop provides a system tray.
+class ShellStartResult(Enum):
+    """Describe the shell outcome without conflating setup errors and peers."""
 
-    ``None`` means the application is running without a tray.  A failed shell
-    start is isolated to shell-owned resources so the QML window can remain
-    usable; both the shell and backend are asked to clean up their resources.
+    STARTED = "started"
+    STARTED_WITHOUT_TRAY = "started_without_tray"
+    SECONDARY_INSTANCE = "secondary_instance"
+    SETUP_FAILED = "setup_failed"
+
+
+def _start_shell_if_available(shell, hotkeys) -> ShellStartResult:
+    """Start the native shell and retain a usable QML window on setup errors.
+
+    The shell always owns the single-instance guard.  Only tray construction is
+    conditional, while a failed optional shell setup is isolated to shell-owned
+    resources so the QML window can remain usable.  A secondary process is the
+    only outcome that should prevent the workflow runtime from continuing.
     """
 
-    if not QSystemTrayIcon.isSystemTrayAvailable():
-        return None
+    tray_available = bool(QSystemTrayIcon.isSystemTrayAvailable())
     try:
-        return bool(shell.start())
+        if not shell.start(tray_available=tray_available):
+            return ShellStartResult.SECONDARY_INSTANCE
     except Exception as error:
-        try:
-            shell.stop()
-        finally:
-            if hotkeys is not None:
-                hotkeys.stop()
+        for resource in (shell, hotkeys):
+            if resource is None:
+                continue
+            try:
+                resource.stop()
+            except Exception as cleanup_error:
+                print(
+                    f"ClarifyVoice QML shell cleanup failed: {cleanup_error}",
+                    file=sys.stderr,
+                )
         print(
             f"ClarifyVoice QML shell unavailable: {error}",
             file=sys.stderr,
         )
-        return False
+        return ShellStartResult.SETUP_FAILED
+
+    return (
+        ShellStartResult.STARTED
+        if tray_available
+        else ShellStartResult.STARTED_WITHOUT_TRAY
+    )
 
 
 def _register_qml_context(engine, workflow, settings) -> None:
@@ -60,6 +82,26 @@ def _register_qml_context(engine, workflow, settings) -> None:
     context = engine.rootContext()
     context.setContextProperty("workflow", workflow)
     context.setContextProperty("settings", settings)
+
+
+def _connect_preference_sync(bridge, settings) -> None:
+    """Keep the persisted draft and compact workflow controls in one state.
+
+    Both controller APIs ignore unchanged values, so these reciprocal signal
+    connections converge without a re-entrancy flag or feedback loop.
+    """
+
+    settings.configChanged.connect(lambda: bridge.setMode(settings.mode))
+    settings.configChanged.connect(lambda: bridge.setLanguage(settings.language))
+    bridge.modeChanged.connect(lambda: settings.setMode(bridge.mode))
+    bridge.languageChanged.connect(lambda: settings.setLanguage(bridge.language))
+
+
+def _show_translation_picker_if_needed(bridge, shell) -> None:
+    """Reveal a picker that was opened by a hotkey while the window was hidden."""
+
+    if bridge.surface == "translation_picker":
+        shell.show_window()
 
 
 def _connect_shutdown(app, shell, runtime) -> None:
@@ -102,13 +144,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    loaded_config = repositories.config.load()
     bridge = QmlWorkflowBridge(
         workflow_service,
+        app_config=loaded_config,
         dispatch_runner=scheduler.run_dispatch,
         copy_runner=runtime.copy_result,
         parent=app,
     )
     settings = QmlSettingsController(repositories, parent=app)
+    _connect_preference_sync(bridge, settings)
     engine = QQmlApplicationEngine()
     _register_qml_context(engine, bridge, settings)
 
@@ -129,13 +174,19 @@ def main(argv: list[str] | None = None) -> int:
         )
     shell = QtShell(window, hotkeys=hotkeys, application=app, parent=app)
     shell.hotkeyTriggered.connect(bridge.handleHotkey)
+    bridge.surfaceChanged.connect(
+        lambda: _show_translation_picker_if_needed(bridge, shell)
+    )
     _connect_shutdown(app, shell, runtime)
 
-    shell_started = _start_shell_if_available(shell, hotkeys)
-    if shell_started is False:
+    shell_result = _start_shell_if_available(shell, hotkeys)
+    if shell_result is ShellStartResult.SECONDARY_INSTANCE:
         runtime.shutdown()
         return 0
-    app.setQuitOnLastWindowClosed(shell_started is None)
+    app.setQuitOnLastWindowClosed(
+        shell_result
+        in (ShellStartResult.STARTED_WITHOUT_TRAY, ShellStartResult.SETUP_FAILED)
+    )
     return app.exec()
 
 

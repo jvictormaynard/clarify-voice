@@ -4,14 +4,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 try:
-    from PySide6.QtCore import QObject, QTimer
+    from PySide6.QtCore import QObject, QTimer, Signal
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtWidgets import QApplication
     from spikes.pyside6.qml_app import (
+        ShellStartResult,
+        _connect_preference_sync,
         _connect_shutdown,
         _register_qml_context,
+        _show_translation_picker_if_needed,
         _start_shell_if_available,
     )
+    from spikes.pyside6.qml_bridge import QmlWorkflowBridge
+    from spikes.pyside6.qml_settings import QmlSettingsController
 except (ImportError, ModuleNotFoundError):
     PYSIDE6_AVAILABLE = False
 else:
@@ -168,12 +173,21 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("QSystemTrayIcon", source)
         self.assertIn("create_real_workflow_runtime", source)
         self.assertIn("QmlSettingsController", source)
+        self.assertIn("loaded_config = repositories.config.load()", source)
+        self.assertIn("app_config=loaded_config", source)
         self.assertIn('setContextProperty("settings", settings)', source)
         self.assertIn("runtime.repositories", source)
         self.assertIn("QtShell", source)
         self.assertIn("WindowsGlobalHotkeyBackend", source)
         self.assertIn('if sys.platform == "win32"', source)
         self.assertIn("shell.hotkeyTriggered.connect(bridge.handleHotkey)", source)
+        self.assertIn("_connect_preference_sync(bridge, settings)", source)
+        self.assertIn("settings.configChanged.connect", source)
+        self.assertIn("bridge.modeChanged.connect", source)
+        self.assertIn("bridge.languageChanged.connect", source)
+        self.assertIn("_show_translation_picker_if_needed", source)
+        self.assertIn("tray_available=tray_available", source)
+        self.assertIn("ShellStartResult.SECONDARY_INSTANCE", source)
         self.assertIn("QmlWorkflowBridge(", source)
         self.assertIn("dispatch_runner=scheduler.run_dispatch", source)
         self.assertIn("copy_runner=runtime.copy_result", source)
@@ -305,12 +319,97 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
 
         self.assertEqual(events[-2:], ["shell", "runtime"])
 
-    def test_shell_failure_is_cleaned_up_and_tray_absence_is_non_fatal(self):
+    def test_preferences_sync_in_both_directions_and_persists_compact_edits(self):
+        from repositories import AppConfig
+        from workflows import StartDictation, WorkflowState
+
+        class ConfigRepository:
+            def __init__(self, config):
+                self.config = config
+
+            def load(self):
+                return self.config
+
+            def apply(self, config):
+                self.config = config
+                return config
+
+        class Repositories:
+            def __init__(self, config):
+                self.config = config
+
+        class WorkflowService:
+            def __init__(self):
+                self.state = WorkflowState()
+                self.listeners = []
+                self.commands = []
+
+            def subscribe(self, listener):
+                self.listeners.append(listener)
+
+            def dispatch(self, command):
+                self.commands.append(command)
+                return True
+
+        initial = AppConfig.from_mapping({"ui_mode": "prompt", "ui_language": "en"})
+        config_repository = ConfigRepository(initial)
+        settings = QmlSettingsController(Repositories(config_repository))
+        service = WorkflowService()
+        bridge = QmlWorkflowBridge(service, app_config=initial)
+        _connect_preference_sync(bridge, settings)
+
+        settings.setMode("transcription")
+        settings.setLanguage("pt")
+        bridge.startRecording()
+
+        self.assertIsInstance(service.commands[-1], StartDictation)
+        self.assertEqual(service.commands[-1].mode, "transcription")
+        self.assertEqual(service.commands[-1].language, "pt")
+
+        bridge.setMode("prompt")
+        bridge.setLanguage("de")
+        self.assertEqual(settings.mode, "prompt")
+        self.assertEqual(settings.language, "de")
+        self.assertTrue(settings.dirty)
+        self.assertTrue(settings.save())
+        persisted = config_repository.load()
+        self.assertEqual(persisted.ui.mode, "prompt")
+        self.assertEqual(persisted.ui.language, "de")
+
+    def test_translation_picker_reveals_a_window_hidden_by_the_tray(self):
+        class Bridge(QObject):
+            surfaceChanged = Signal()
+
+            def __init__(self):
+                super().__init__()
+                self.surface = "idle"
+
+        class Shell:
+            def __init__(self):
+                self.show_calls = 0
+
+            def show_window(self):
+                self.show_calls += 1
+
+        bridge = Bridge()
+        shell = Shell()
+        bridge.surfaceChanged.connect(
+            lambda: _show_translation_picker_if_needed(bridge, shell)
+        )
+
+        bridge.surface = "translation_picker"
+        bridge.surfaceChanged.emit()
+
+        self.assertEqual(shell.show_calls, 1)
+
+    def test_shell_failure_is_distinguished_from_secondary_and_tray_absence(self):
         class Shell:
             def __init__(self):
                 self.stop_calls = 0
+                self.start_calls = []
 
-            def start(self):
+            def start(self, *, tray_available):
+                self.start_calls.append(tray_available)
                 raise RuntimeError("event filter failed")
 
             def stop(self):
@@ -329,17 +428,38 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
             "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
             return_value=True,
         ):
-            self.assertFalse(_start_shell_if_available(shell, hotkeys))
+            result = _start_shell_if_available(shell, hotkeys)
+        self.assertIs(result, ShellStartResult.SETUP_FAILED)
         self.assertEqual(shell.stop_calls, 1)
         self.assertEqual(hotkeys.stop_calls, 1)
 
-        shell = Shell()
+        class NoTrayShell:
+            def __init__(self):
+                self.start_calls = []
+
+            def start(self, *, tray_available):
+                self.start_calls.append(tray_available)
+                return True
+
+        shell = NoTrayShell()
         with patch(
             "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
             return_value=False,
         ):
-            self.assertIsNone(_start_shell_if_available(shell, hotkeys))
-        self.assertEqual(shell.stop_calls, 0)
+            result = _start_shell_if_available(shell, hotkeys)
+        self.assertIs(result, ShellStartResult.STARTED_WITHOUT_TRAY)
+        self.assertEqual(shell.start_calls, [False])
+
+        class SecondaryShell:
+            def start(self, *, tray_available):
+                return False
+
+        with patch(
+            "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
+            return_value=True,
+        ):
+            result = _start_shell_if_available(SecondaryShell(), None)
+        self.assertIs(result, ShellStartResult.SECONDARY_INSTANCE)
 
 
 if __name__ == "__main__":

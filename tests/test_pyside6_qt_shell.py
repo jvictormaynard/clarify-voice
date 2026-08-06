@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from hotkey_config import HotkeyAction, HotkeySettings
+
 try:
     from PySide6.QtCore import QCoreApplication, QObject, Signal
     from PySide6.QtWidgets import QSystemTrayIcon
@@ -257,7 +259,11 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
         backend.triggered.connect(received.append)
 
         self.assertEqual(backend.start(window), {0x5101})
-        self.assertEqual(registrations, [("fake-user32", 123, None, True)])
+        self.assertEqual(registrations[0][0], "fake-user32")
+        self.assertEqual(registrations[0][1], 123)
+        self.assertTrue(registrations[0][3])
+        self.assertIsInstance(registrations[0][2], HotkeySettings)
+        self.assertNotIn(HotkeyAction.VOICE_TRANSLATION, registrations[0][2].hotkeys)
         self.assertEqual(len(target.installed), 1)
 
         target.installed[0].nativeEventFilter(b"windows_generic_MSG", object())
@@ -267,6 +273,41 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
         self.assertEqual(target.removed, target.installed)
         self.assertEqual(unregistrations, [("fake-user32", 123, {0x5101})])
         self.assertFalse(backend.is_running)
+
+    def test_backend_does_not_register_unsupported_voice_translation_action(self):
+        target = FakeNativeEventTarget()
+        registration_settings = []
+        unregistrations = []
+
+        def register(_user32, _hwnd, settings, *, strict):
+            self.assertTrue(strict)
+            registration_settings.append(settings)
+            return {0x5101, 0x5102, 0x5103, 0x5104}
+
+        def unregister(_user32, _hwnd, registered):
+            unregistrations.append(set(registered))
+
+        backend = WindowsGlobalHotkeyBackend(
+            target,
+            settings=HotkeySettings.defaults(),
+            user32="fake-user32",
+            register_hotkeys=register,
+            unregister_hotkeys=unregister,
+        )
+
+        self.assertEqual(
+            backend.start(FakeWindow()),
+            {0x5101, 0x5102, 0x5103, 0x5104},
+        )
+        self.assertEqual(len(registration_settings), 1)
+        self.assertNotIn(
+            HotkeyAction.VOICE_TRANSLATION,
+            registration_settings[0].hotkeys,
+        )
+        self.assertNotIn(0x5106, backend.registered_ids)
+
+        backend.stop()
+        self.assertEqual(unregistrations, [{0x5101, 0x5102, 0x5103, 0x5104}])
 
     def test_event_filter_factory_failure_unregisters_every_registered_id(self):
         target = FakeNativeEventTarget()
@@ -356,6 +397,19 @@ class QtShellTests(unittest.TestCase):
         self.assertIsNone(shell.tray)
 
         owner.release()
+
+    def test_primary_process_acquires_guard_without_a_tray(self):
+        hotkeys = FakeHotkeys()
+        shell = self._shell(hotkeys=hotkeys)
+
+        self.assertTrue(shell.start(tray_available=False))
+        self.assertTrue(shell.is_running)
+        self.assertTrue(shell._instance_guard.is_primary)
+        self.assertIsNone(shell.tray)
+        self.assertTrue(hotkeys.is_running)
+
+        shell.stop()
+        self.assertFalse(shell._instance_guard.is_primary)
 
     def test_primary_shell_owns_tray_hotkeys_and_window_actions(self):
         hotkeys = FakeHotkeys()
@@ -460,6 +514,11 @@ class QtShellSourceTests(unittest.TestCase):
         self.assertNotIn("customtkinter", imported_roots)
         self.assertNotIn("tkinter", imported_roots)
         self.assertIn("PySide6", imported_roots)
+
+        source = MODULE.read_text(encoding="utf-8")
+        self.assertIn("_UNSUPPORTED_SHELL_HOTKEY_ACTIONS", source)
+        self.assertIn("voice", source.lower())
+        self.assertIn("translation in this slice", source.lower())
 
 
 if __name__ == "__main__":
