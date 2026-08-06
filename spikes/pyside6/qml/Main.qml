@@ -712,6 +712,325 @@ ApplicationWindow {
                                 }
                             }
 
+                            Label {
+                                text: "Microphone and recording"
+                                color: theme.secondaryText
+                                font.pixelSize: 10
+                                font.weight: Font.DemiBold
+                                font.letterSpacing: 0.7
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: "Choose a stable input endpoint. A missing endpoint can be recovered with System default."
+                                color: theme.dim
+                                font.pixelSize: 10
+                                wrapMode: Text.WordWrap
+                            }
+
+                            function recordingControlsDraft() {
+                                var current = settings.recordingControls
+                                var vad = current["vad"] || {}
+                                return {
+                                    "max_duration_seconds": maximumDurationField.text.trim() === ""
+                                                               ? null : Number(maximumDurationField.text),
+                                    "warning_seconds": Number(warningSecondsField.text),
+                                    "vad": {
+                                        "enabled": vadEnabledBox.checked,
+                                        "level_threshold": Number(vadLevelField.text),
+                                        "minimum_speech_seconds": Number(minimumSpeechField.text),
+                                        "silence_duration_seconds": Number(silenceDurationField.text)
+                                    }
+                                }
+                            }
+
+                            function updateRecordingControls() {
+                                settings.setRecordingControls(recordingControlsDraft())
+                            }
+
+                            GridLayout {
+                                Layout.fillWidth: true
+                                columns: 2
+                                columnSpacing: 12
+                                rowSpacing: 6
+
+                                Label {
+                                    text: "Input"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 5
+
+                                    ComboBox {
+                                        id: microphoneBox
+                                        objectName: "microphoneBox"
+                                        Layout.fillWidth: true
+                                        model: settings.microphoneDevices
+                                        textRole: "label"
+                                        currentIndex: Math.max(
+                                            0,
+                                            Math.min(settings.microphoneSelectionIndex, count - 1))
+                                        onActivated: settings.selectMicrophone(
+                                            microphoneBox.model[index]["id"])
+                                        contentItem: Label {
+                                            leftPadding: 8
+                                            rightPadding: 24
+                                            text: microphoneBox.currentText
+                                            color: theme.text
+                                            font.pixelSize: 11
+                                            verticalAlignment: Text.AlignVCenter
+                                            elide: Text.ElideRight
+                                        }
+                                        indicator: Label {
+                                            x: microphoneBox.width - width - 8
+                                            y: (microphoneBox.height - height) / 2
+                                            text: "⌄"
+                                            color: theme.dim
+                                            font.pixelSize: 12
+                                        }
+                                        background: Rectangle {
+                                            implicitHeight: 26
+                                            radius: theme.controlRadius
+                                            color: theme.control
+                                            border.color: theme.border
+                                            border.width: 1
+                                        }
+                                    }
+
+                                    AppButton {
+                                        text: "↻"
+                                        theme: theme
+                                        quiet: true
+                                        Layout.preferredWidth: 28
+                                        Layout.preferredHeight: 26
+                                        Accessible.name: "Refresh microphone inventory"
+                                        enabled: !settings.microphoneTestBusy
+                                        onClicked: settings.refreshMicrophoneInventory()
+                                    }
+                                }
+
+                                Label {
+                                    text: "Input status"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 5
+
+                                    Label {
+                                        Layout.fillWidth: true
+                                        text: settings.microphoneStatus
+                                        color: settings.microphoneStatusKind === "error"
+                                               ? theme.secondaryText
+                                               : settings.microphoneStatusKind === "warning"
+                                                 ? "#d3a46f" : theme.dim
+                                        font.pixelSize: 10
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    AppButton {
+                                        text: "Use default"
+                                        theme: theme
+                                        quiet: true
+                                        visible: settings.selectedMicrophoneId !== null
+                                        Layout.preferredWidth: 78
+                                        Layout.preferredHeight: 26
+                                        Accessible.name: "Use current system microphone"
+                                        onClicked: settings.selectMicrophone("")
+                                    }
+
+                                    AppButton {
+                                        text: settings.microphoneTestBusy ? "Listening…" : "Test"
+                                        theme: theme
+                                        enabled: !settings.microphoneTestBusy
+                                        Layout.preferredWidth: 62
+                                        Layout.preferredHeight: 26
+                                        Accessible.name: "Test microphone input"
+                                        onClicked: settings.testMicrophone()
+                                    }
+                                }
+
+                                Label {
+                                    text: "Maximum seconds"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                TextField {
+                                    id: maximumDurationField
+                                    objectName: "maximumDurationField"
+                                    Layout.fillWidth: true
+                                    text: settings.recordingControls["max_duration_seconds"] === null
+                                          || settings.recordingControls["max_duration_seconds"] === undefined
+                                          ? "" : String(settings.recordingControls["max_duration_seconds"])
+                                    placeholderText: "Blank = unlimited"
+                                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                                    onEditingFinished: settingsContent.updateRecordingControls()
+                                    color: theme.text
+                                    placeholderTextColor: theme.dim
+                                    font.pixelSize: 11
+                                    selectByMouse: true
+                                    background: Rectangle {
+                                        implicitHeight: 26
+                                        radius: theme.controlRadius
+                                        color: theme.control
+                                        border.color: theme.border
+                                        border.width: 1
+                                    }
+                                }
+
+                                Label {
+                                    text: "Warning seconds"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                TextField {
+                                    id: warningSecondsField
+                                    objectName: "warningSecondsField"
+                                    Layout.fillWidth: true
+                                    text: String(settings.recordingControls["warning_seconds"])
+                                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                                    onEditingFinished: settingsContent.updateRecordingControls()
+                                    color: theme.text
+                                    font.pixelSize: 11
+                                    selectByMouse: true
+                                    background: Rectangle {
+                                        implicitHeight: 26
+                                        radius: theme.controlRadius
+                                        color: theme.control
+                                        border.color: theme.border
+                                        border.width: 1
+                                    }
+                                }
+
+                                CheckBox {
+                                    id: vadEnabledBox
+                                    objectName: "vadEnabledBox"
+                                    Layout.columnSpan: 2
+                                    checked: settings.recordingControls["vad"]["enabled"]
+                                    text: "Stop after speech and silence"
+                                    onToggled: settingsContent.updateRecordingControls()
+                                    contentItem: Label {
+                                        leftPadding: 24
+                                        text: vadEnabledBox.text
+                                        color: theme.text
+                                        font.pixelSize: 11
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    indicator: Rectangle {
+                                        x: 0
+                                        y: (vadEnabledBox.height - height) / 2
+                                        implicitWidth: 16
+                                        implicitHeight: 16
+                                        radius: 3
+                                        color: vadEnabledBox.checked ? theme.text : theme.control
+                                        border.color: vadEnabledBox.checked ? theme.text : theme.border
+                                        border.width: 1
+
+                                        Label {
+                                            anchors.centerIn: parent
+                                            visible: vadEnabledBox.checked
+                                            text: "✓"
+                                            color: theme.card
+                                            font.pixelSize: 11
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    text: "Level threshold"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                TextField {
+                                    id: vadLevelField
+                                    objectName: "vadLevelField"
+                                    Layout.fillWidth: true
+                                    text: String(settings.recordingControls["vad"]["level_threshold"])
+                                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                                    onEditingFinished: settingsContent.updateRecordingControls()
+                                    color: theme.text
+                                    font.pixelSize: 11
+                                    selectByMouse: true
+                                    background: Rectangle {
+                                        implicitHeight: 26
+                                        radius: theme.controlRadius
+                                        color: theme.control
+                                        border.color: theme.border
+                                        border.width: 1
+                                    }
+                                }
+
+                                Label {
+                                    text: "Minimum speech seconds"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                TextField {
+                                    id: minimumSpeechField
+                                    objectName: "minimumSpeechField"
+                                    Layout.fillWidth: true
+                                    text: String(settings.recordingControls["vad"]["minimum_speech_seconds"])
+                                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                                    onEditingFinished: settingsContent.updateRecordingControls()
+                                    color: theme.text
+                                    font.pixelSize: 11
+                                    selectByMouse: true
+                                    background: Rectangle {
+                                        implicitHeight: 26
+                                        radius: theme.controlRadius
+                                        color: theme.control
+                                        border.color: theme.border
+                                        border.width: 1
+                                    }
+                                }
+
+                                Label {
+                                    text: "Silence seconds"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                TextField {
+                                    id: silenceDurationField
+                                    objectName: "silenceDurationField"
+                                    Layout.fillWidth: true
+                                    text: String(settings.recordingControls["vad"]["silence_duration_seconds"])
+                                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                                    onEditingFinished: settingsContent.updateRecordingControls()
+                                    color: theme.text
+                                    font.pixelSize: 11
+                                    selectByMouse: true
+                                    background: Rectangle {
+                                        implicitHeight: 26
+                                        radius: theme.controlRadius
+                                        color: theme.control
+                                        border.color: theme.border
+                                        border.width: 1
+                                    }
+                                }
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                visible: settings.microphoneTestStatus !== ""
+                                text: settings.microphoneTestStatus
+                                color: settings.microphoneTestStatusKind === "error"
+                                       ? theme.secondaryText
+                                       : settings.microphoneTestStatusKind === "ok"
+                                         ? "#69c58a" : theme.dim
+                                font.pixelSize: 10
+                                wrapMode: Text.WordWrap
+                            }
+
                             Rectangle {
                                 Layout.fillWidth: true
                                 height: 1

@@ -278,6 +278,95 @@ class QtRecordingSessionTests(unittest.TestCase):
             with self.assertRaises(MicrophoneUnavailableError):
                 recorder.start(Path("capture.wav"), threading.Event())
 
+    def test_recorder_exposes_only_sox_safe_microphones_to_qml(self):
+        from microphone_controls import MicrophoneDevice, MicrophoneInventory
+
+        prefix = "x" * 31
+        colliding_a = MicrophoneDevice(
+            stable_id="a",
+            name=prefix + "-a",
+            input_channels=1,
+            backend_index=4,
+        )
+        colliding_b = MicrophoneDevice(
+            stable_id="b",
+            name=prefix + "-b",
+            input_channels=1,
+            backend_index=5,
+        )
+        safe = MicrophoneDevice(
+            stable_id="safe",
+            name="USB microphone",
+            input_channels=1,
+            backend_index=6,
+        )
+        inventory = MicrophoneInventory.from_records(
+            [colliding_a, colliding_b, safe], default_id="safe"
+        )
+
+        with patch(
+            "spikes.pyside6.qml_runtime.platform.system", return_value="Windows"
+        ):
+            recorder = QtRecorder()
+            selectable = recorder.selectable_microphone_devices(inventory)
+
+        self.assertEqual([device.stable_id for device in selectable], ["safe"])
+
+    def test_qml_microphone_test_uses_the_selected_backend_handle_and_closes_stream(
+        self,
+    ):
+        from array import array
+        from microphone_controls import MicrophoneDevice, MicrophoneInventory
+        from spikes.pyside6 import qml_runtime
+
+        selected = MicrophoneDevice(
+            stable_id="selected",
+            name="USB microphone",
+            input_channels=1,
+            backend_index=4,
+        )
+        inventory = MicrophoneInventory.from_records([selected], default_id="selected")
+
+        class InventorySource:
+            def snapshot(self):
+                return inventory
+
+        class Stream:
+            instance = None
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.started = False
+                self.stopped = False
+                self.closed = False
+                Stream.instance = self
+
+            def start(self):
+                self.started = True
+                self.kwargs["callback"](array("h", [1024, -1024]), 2, None, None)
+
+            def stop(self):
+                self.stopped = True
+
+            def close(self):
+                self.closed = True
+
+        recorder = QtRecorder(None, InventorySource())
+        selection = inventory.resolve("selected")
+        fake_sounddevice = SimpleNamespace(RawInputStream=Stream)
+        with (
+            patch.object(qml_runtime, "_sounddevice", fake_sounddevice),
+            patch.object(qml_runtime.platform, "system", return_value="Windows"),
+            patch.object(qml_runtime.time, "sleep"),
+        ):
+            peak = recorder.test_microphone(selection, inventory)
+
+        self.assertGreater(peak, 0.0)
+        self.assertEqual(Stream.instance.kwargs["device"], 4)
+        self.assertTrue(Stream.instance.started)
+        self.assertTrue(Stream.instance.stopped)
+        self.assertTrue(Stream.instance.closed)
+
     def test_recording_session_stops_at_configured_max_duration(self):
         from microphone_controls import RecordingBoundaryReason, RecordingControls
 

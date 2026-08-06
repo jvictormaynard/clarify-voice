@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from enum import Enum
+from functools import partial
 from pathlib import Path
 
 # Source autostart executes this file directly from ``spikes/pyside6`` while
@@ -90,6 +91,7 @@ try:
     )
     from .qml_runtime import (  # noqa: E402
         QtRuntimeError,
+        QtStatisticsGateway,
         QtWorkflowScheduler,
         create_real_workflow_runtime,
     )
@@ -103,6 +105,7 @@ except ImportError:  # PyInstaller analyzes this file as a standalone entry poin
     )
     from qml_runtime import (  # noqa: E402
         QtRuntimeError,
+        QtStatisticsGateway,
         QtWorkflowScheduler,
         create_real_workflow_runtime,
     )
@@ -250,6 +253,34 @@ def _connect_shutdown(
     app.aboutToQuit.connect(runtime.shutdown)
 
 
+def _record_voice_translation_usage(
+    statistics,
+    config,
+    state,
+    duration_seconds,
+) -> None:
+    """Record both voice-translation legs through the QML stats boundary."""
+
+    source = str(getattr(state, "raw_transcript", "") or "")
+    statistics.record_dictation(
+        {
+            "provider": str(getattr(state, "transcription_provider", "") or ""),
+            "model": str(getattr(state, "transcription_model", "") or ""),
+            "mode": "voice_translation",
+        },
+        duration_seconds,
+        source,
+    )
+    route = getattr(config, "route", None)
+    statistics.record_translation(
+        str(getattr(route, "provider_id", "") or ""),
+        str(getattr(route, "model_id", "") or ""),
+        source,
+        str(getattr(state, "translated_text", "") or ""),
+        str(getattr(config, "target_language", "") or ""),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Start the real QML frontend; missing runtime dependencies are fatal."""
 
@@ -285,11 +316,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     loaded_config = repositories.config.load()
+    usage_statistics = QtStatisticsGateway(repositories)
     voice_translation = create_qml_voice_translation_controller(
         repositories.config.load,
         runtime.recording_audio,
         runtime.clipboard,
         scheduler,
+        on_usage=partial(_record_voice_translation_usage, usage_statistics),
         parent=app,
     )
     audio_batch = QmlAudioFileImportController(
@@ -327,7 +360,11 @@ def main(argv: list[str] | None = None) -> int:
         audio_batch_controller=audio_batch,
         parent=app,
     )
-    settings = QmlSettingsController(repositories, parent=app)
+    settings = QmlSettingsController(
+        repositories,
+        parent=app,
+        microphone_backend=runtime.recording_audio.recorder,
+    )
     _connect_preference_sync(bridge, settings)
     engine = QQmlApplicationEngine()
     _register_qml_context(

@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 try:
@@ -18,6 +19,7 @@ try:
         _branding_icon_path,
         _load_branding_icon,
         _qml_root,
+        _record_voice_translation_usage,
         _register_qml_context,
         _hidden_start_requested,
         _show_translation_picker_if_needed,
@@ -28,6 +30,10 @@ try:
     from spikes.pyside6.qml_settings import QmlSettingsController
 except (ImportError, ModuleNotFoundError):
     PYSIDE6_AVAILABLE = False
+    QObject = object
+
+    def Signal(*args, **kwargs):
+        return None
 else:
     PYSIDE6_AVAILABLE = True
 
@@ -149,6 +155,14 @@ class PySide6QmlFrontendTests(unittest.TestCase):
             "settings.autostart",
             "settings.historyEnabled",
             "settings.historyRetentionDays",
+            "settings.microphoneDevices",
+            "settings.selectedMicrophoneId",
+            "settings.microphoneStatus",
+            "settings.microphoneTestStatus",
+            "settings.recordingControls",
+            "settings.refreshMicrophoneInventory()",
+            "settings.testMicrophone()",
+            "settings.setRecordingControls",
             "settings.selectedScope",
             "settings.routeProviderId",
             "settings.routeModelId",
@@ -225,6 +239,15 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("QmlWorkflowBridge(", source)
         self.assertIn("dispatch_runner=scheduler.run_dispatch", source)
         self.assertIn("copy_runner=runtime.copy_result", source)
+        self.assertIn("QtStatisticsGateway", source)
+        self.assertIn(
+            "on_usage=partial(_record_voice_translation_usage, usage_statistics)",
+            source,
+        )
+        self.assertIn(
+            "microphone_backend=runtime.recording_audio.recorder",
+            source,
+        )
         self.assertIn("app.aboutToQuit.connect(shell.stop)", source)
         self.assertIn("app.aboutToQuit.connect(runtime.shutdown)", source)
         self.assertIn("app.aboutToQuit.connect(settings.shutdown)", source)
@@ -387,6 +410,44 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertTrue(_hidden_start_requested(["--hidden"]))
         with self.assertRaises(ValueError):
             _hidden_start_requested(["--compat"])
+
+    @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+    def test_voice_translation_usage_callback_records_both_legs(self):
+        class UsageRepository:
+            def __init__(self):
+                self.events = []
+
+            def append(self, event):
+                self.events.append(event)
+
+        usage_repository = UsageRepository()
+        statistics = qml_app.QtStatisticsGateway(
+            SimpleNamespace(usage_stats=usage_repository)
+        )
+        config = SimpleNamespace(
+            route=SimpleNamespace(provider_id="openai", model_id="gpt-4o-mini"),
+            target_language="en-US",
+        )
+        state = SimpleNamespace(
+            transcription_provider="gemini",
+            transcription_model="gemini-audio",
+            raw_transcript="Olá",
+            translated_text="Hello",
+        )
+
+        _record_voice_translation_usage(statistics, config, state, 12.5)
+
+        self.assertEqual(
+            [event["event"] for event in usage_repository.events],
+            ["dictation", "translation"],
+        )
+        self.assertEqual(usage_repository.events[0]["provider"], "gemini")
+        self.assertEqual(usage_repository.events[0]["model"], "gemini-audio")
+        self.assertEqual(usage_repository.events[0]["mode"], "voice_translation")
+        self.assertEqual(usage_repository.events[0]["duration_seconds"], 12.5)
+        self.assertEqual(usage_repository.events[1]["provider"], "openai")
+        self.assertEqual(usage_repository.events[1]["model"], "gpt-4o-mini")
+        self.assertEqual(usage_repository.events[1]["target_language"], "en-US")
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")

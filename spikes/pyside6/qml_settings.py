@@ -9,6 +9,7 @@ autostart is handled by a small, local Run-key boundary.
 
 from __future__ import annotations
 
+import platform
 import subprocess
 import sys
 import threading
@@ -24,6 +25,14 @@ from local_asr_product import (
     LocalASRProductController,
     LocalASRProductState,
     format_requirement_bytes,
+)
+from microphone_controls import (
+    MicrophoneInventory,
+    MicrophoneSelection,
+    MicrophoneSelectionState,
+    MicrophoneSettings,
+    RecordingControls,
+    SoundDeviceMicrophoneInventory,
 )
 from provider_http import CancellationToken
 from provider_registry import PROVIDER_REGISTRY
@@ -186,6 +195,16 @@ def _format_local_requirements(requirements: dict[str, Any]) -> str:
     return f"{platform} · {download} download · {disk} disk · {memory} RAM{suffix}"
 
 
+def _default_microphone_inventory_source() -> Any | None:
+    """Build the optional PortAudio inventory without making it a hard import."""
+
+    try:
+        import sounddevice
+    except (ImportError, OSError):
+        return None
+    return SoundDeviceMicrophoneInventory(sounddevice)
+
+
 class QmlSettingsController(QObject):
     """Expose the typed application configuration to Qt Quick.
 
@@ -204,8 +223,11 @@ class QmlSettingsController(QObject):
     loaded = Signal()
     saved = Signal()
     providerStateChanged = Signal()
+    microphoneChanged = Signal()
+    microphoneTestChanged = Signal()
     _providerValidationFinished = Signal(str, int, bool, object)
     _localStatePublished = Signal(object)
+    _microphoneTestFinished = Signal(int, bool, object)
 
     def __init__(
         self,
@@ -214,6 +236,8 @@ class QmlSettingsController(QObject):
         *,
         registry: Any | None = None,
         local_product: LocalASRProductController | None = None,
+        microphone_backend: Any | None = None,
+        microphone_inventory_source: Any | None = None,
     ) -> None:
         super().__init__(parent)
         self.repositories = repositories
@@ -221,6 +245,17 @@ class QmlSettingsController(QObject):
         self._autostart_registry = registry
         self._local_product = local_product or _default_local_asr_product()
         self._local_state: LocalASRProductState = self._local_product.state
+        self._microphone_backend = microphone_backend
+        self._microphone_inventory_source = (
+            microphone_inventory_source
+            or getattr(microphone_backend, "microphone_inventory_source", None)
+            or _default_microphone_inventory_source()
+        )
+        self._microphone_inventory = MicrophoneInventory.unavailable("not_refreshed")
+        self._microphone_test_generation = 0
+        self._microphone_test_busy = False
+        self._microphone_test_status = ""
+        self._microphone_test_kind = "info"
         self._provider_activity: dict[str, dict[str, Any]] = {}
         self._provider_tokens: dict[str, CancellationToken] = {}
         self._provider_generations: dict[str, int] = {}
@@ -250,8 +285,13 @@ class QmlSettingsController(QObject):
             self._apply_local_state,
             Qt.ConnectionType.QueuedConnection,
         )
+        self._microphoneTestFinished.connect(
+            self._finish_microphone_test,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._local_product.subscribe(self._publish_local_state)
         self._local_product.refresh_async()
+        self.refreshMicrophoneInventory()
 
     @Property("QStringList", constant=True)
     def workflowScopes(self) -> list[str]:
@@ -389,6 +429,87 @@ class QmlSettingsController(QObject):
     @historyRetentionDays.setter
     def historyRetentionDays(self, value: object) -> None:
         self.setHistoryRetentionDays(value)
+
+    @Property("QVariant", notify=microphoneChanged)
+    def selectedMicrophoneId(self) -> str | None:
+        """Return the draft's stable microphone identity, if one is set."""
+
+        return self._config.microphone.selected_id
+
+    @Property("QVariantList", notify=microphoneChanged)
+    def microphoneDevices(self) -> list[dict[str, Any]]:
+        """Return a QML-friendly default option plus safe input endpoints."""
+
+        options: list[dict[str, Any]] = [
+            {
+                "id": "",
+                "label": "System default",
+                "name": "System default",
+                "hostApi": "",
+                "isDefault": True,
+            }
+        ]
+        for device in self._microphone_selectable_devices():
+            label = device.name
+            if device.host_api:
+                label = f"{label} · {device.host_api}"
+            if any(option["label"] == label for option in options):
+                label = f"{label} · {device.stable_id[-6:]}"
+            options.append(
+                {
+                    "id": device.stable_id,
+                    "label": label,
+                    "name": device.name,
+                    "hostApi": device.host_api,
+                    "isDefault": bool(device.is_default),
+                }
+            )
+        return options
+
+    @Property(int, notify=microphoneChanged)
+    def microphoneSelectionIndex(self) -> int:
+        selected = self._config.microphone.selected_id
+        if selected:
+            for index, option in enumerate(self.microphoneDevices):
+                if option.get("id") == selected:
+                    return index
+        # A stale or backend-unsafe identity is deliberately shown as the
+        # recoverable System default option until the user chooses a new one.
+        return 0
+
+    @Property("QVariantMap", notify=microphoneChanged)
+    def microphoneInventory(self) -> dict[str, Any]:
+        return self._microphone_inventory.to_mapping()
+
+    @Property(str, notify=microphoneChanged)
+    def microphoneSelectionState(self) -> str:
+        return self._microphone_selection().state.value
+
+    @Property(str, notify=microphoneChanged)
+    def microphoneStatus(self) -> str:
+        return self._microphone_status()[0]
+
+    @Property(str, notify=microphoneChanged)
+    def microphoneStatusKind(self) -> str:
+        return self._microphone_status()[1]
+
+    @Property(str, notify=microphoneTestChanged)
+    def microphoneTestStatus(self) -> str:
+        return self._microphone_test_status
+
+    @Property(str, notify=microphoneTestChanged)
+    def microphoneTestStatusKind(self) -> str:
+        return self._microphone_test_kind
+
+    @Property(bool, notify=microphoneTestChanged)
+    def microphoneTestBusy(self) -> bool:
+        return self._microphone_test_busy
+
+    @Property("QVariantMap", notify=microphoneChanged)
+    def recordingControls(self) -> dict[str, Any]:
+        """Expose the typed boundary settings without recreating their rules."""
+
+        return self._config.recording_controls.to_mapping()
 
     @Property(bool, notify=configChanged)
     def localAsrCloudRefinement(self) -> bool:
@@ -534,6 +655,116 @@ class QmlSettingsController(QObject):
         return self._update_config(
             replace(self._config, history_retention_days=retention)
         )
+
+    @Slot(object, result=bool)
+    def setMicrophone(self, value: object) -> bool:
+        """Update only the stable microphone preference in the draft."""
+
+        if value is not None and not isinstance(value, str):
+            self._set_error(ValueError("microphone ID must be text"))
+            return False
+        selected_id = str(value or "").strip() or None
+        if selected_id and not self._microphone_supports_explicit_selection():
+            self._set_error(
+                ValueError(
+                    "Explicit microphone selection is unavailable with SoX PulseAudio"
+                )
+            )
+            return False
+        try:
+            microphone = MicrophoneSettings(selected_id)
+        except (TypeError, ValueError) as error:
+            self._set_error(error)
+            return False
+        return self._update_config(replace(self._config, microphone=microphone))
+
+    @Slot(object, result=bool)
+    def selectMicrophone(self, value: object) -> bool:
+        """QML-friendly alias for the explicit selection action."""
+
+        return self.setMicrophone(value)
+
+    @Slot(object, result=bool)
+    def setRecordingControls(self, value: object) -> bool:
+        """Validate boundary settings through the shared typed policy."""
+
+        try:
+            controls = RecordingControls.from_mapping(value)
+        except (TypeError, ValueError) as error:
+            self._set_error(error)
+            return False
+        return self._update_config(replace(self._config, recording_controls=controls))
+
+    @Slot(result=bool)
+    def refreshMicrophoneInventory(self) -> bool:
+        """Refresh one inventory snapshot without changing the saved draft."""
+
+        try:
+            inventory = self._snapshot_microphone_inventory()
+        except Exception as error:
+            inventory = MicrophoneInventory.unavailable("enumeration_failed")
+            self._set_error(error)
+        else:
+            # Hardware enumeration is diagnostic state, not an editable
+            # configuration error.  Leave an unrelated Settings draft error
+            # untouched only when the snapshot itself was successful.
+            self._set_error(None)
+        self._microphone_inventory = inventory
+        self.microphoneChanged.emit()
+        return True
+
+    @Slot(result=bool)
+    def refreshMicrophones(self) -> bool:
+        """Short alias retained for a concise QML action name."""
+
+        return self.refreshMicrophoneInventory()
+
+    @Slot(result=bool)
+    def testMicrophone(self) -> bool:
+        """Run a short local-only input-level test off the Qt GUI thread."""
+
+        if self._microphone_test_busy:
+            return False
+        selection = self._microphone_selection_for_test()
+        if selection is None or not selection.can_record:
+            self._microphone_test_status = "No safe microphone to test."
+            self._microphone_test_kind = "error"
+            self.microphoneTestChanged.emit()
+            return False
+
+        backend_test = getattr(self._microphone_backend, "test_microphone", None)
+        if not callable(backend_test):
+            self._microphone_test_status = "Input test unavailable without PortAudio."
+            self._microphone_test_kind = "info"
+            self.microphoneTestChanged.emit()
+            return False
+
+        self._microphone_test_generation += 1
+        generation = self._microphone_test_generation
+        self._microphone_test_busy = True
+        self._microphone_test_status = "Listening…"
+        self._microphone_test_kind = "info"
+        self.microphoneTestChanged.emit()
+        inventory = self._microphone_inventory
+
+        def run() -> None:
+            try:
+                peak = float(backend_test(selection, inventory))
+            except Exception as error:
+                self._microphoneTestFinished.emit(
+                    generation,
+                    False,
+                    str(error).strip() or type(error).__name__,
+                )
+                return
+            self._microphoneTestFinished.emit(generation, True, peak)
+
+        threading.Thread(
+            target=run,
+            name="ClarifyVoiceQmlMicrophoneTest",
+            daemon=True,
+        ).start()
+        return True
 
     @Slot(str, str, str, str, str, bool, result=bool)
     def setRoute(
@@ -814,6 +1045,8 @@ class QmlSettingsController(QObject):
         for token in tuple(self._provider_tokens.values()):
             token.cancel()
         self._provider_tokens.clear()
+        self._microphone_test_generation += 1
+        self._microphone_test_busy = False
         self._local_product.shutdown()
 
     @Slot(result=bool)
@@ -1041,6 +1274,146 @@ class QmlSettingsController(QObject):
             self._local_state = state
             self.providerStateChanged.emit()
 
+    def _microphone_supports_explicit_selection(self) -> bool:
+        backend_method = getattr(
+            self._microphone_backend,
+            "supports_explicit_microphone_selection",
+            None,
+        )
+        if callable(backend_method):
+            try:
+                return bool(backend_method())
+            except Exception:
+                return False
+        return platform.system() in {"Windows", "Darwin"}
+
+    def _snapshot_microphone_inventory(self) -> MicrophoneInventory:
+        backend_snapshot = getattr(
+            self._microphone_backend, "microphone_inventory", None
+        )
+        if callable(backend_snapshot):
+            inventory = backend_snapshot()
+        elif self._microphone_inventory_source is not None:
+            inventory = self._microphone_inventory_source.snapshot()
+        else:
+            inventory = MicrophoneInventory.unavailable("portaudio_unavailable")
+        if not isinstance(inventory, MicrophoneInventory):
+            raise TypeError("microphone inventory source returned an invalid snapshot")
+        return inventory
+
+    def _microphone_selectable_devices(self) -> tuple[Any, ...]:
+        if not self._microphone_supports_explicit_selection():
+            return ()
+        backend_filter = getattr(
+            self._microphone_backend,
+            "selectable_microphone_devices",
+            None,
+        )
+        if callable(backend_filter):
+            try:
+                return tuple(backend_filter(self._microphone_inventory))
+            except Exception:
+                return ()
+        return tuple(self._microphone_inventory.available_devices)
+
+    def _microphone_selection(self) -> MicrophoneSelection:
+        return self._microphone_inventory.resolve(self._config.microphone.selected_id)
+
+    def _microphone_selection_for_test(self) -> MicrophoneSelection | None:
+        if self._microphone_inventory.error_code == "not_refreshed":
+            return None
+        requested_id = self._config.microphone.selected_id
+        if not self._microphone_supports_explicit_selection():
+            requested_id = None
+        selection = self._microphone_inventory.resolve(requested_id)
+        if selection.state is MicrophoneSelectionState.SELECTED:
+            selectable_ids = {
+                device.stable_id for device in self._microphone_selectable_devices()
+            }
+            if selection.selected_id not in selectable_ids:
+                return MicrophoneSelection(
+                    MicrophoneSelectionState.UNAVAILABLE,
+                    requested_id=requested_id,
+                    reason="unsafe_backend_name",
+                )
+        return selection
+
+    def _microphone_status(self) -> tuple[str, str]:
+        requested_id = self._config.microphone.selected_id
+        if not self._microphone_supports_explicit_selection():
+            if requested_id:
+                return (
+                    "Explicit input selection is unavailable with SoX PulseAudio; "
+                    "System default remains active.",
+                    "warning",
+                )
+            return (
+                "Explicit input selection is unavailable with SoX PulseAudio; "
+                "System default remains active.",
+                "info",
+            )
+
+        if self._microphone_inventory.error_code in {
+            "not_refreshed",
+            "portaudio_unavailable",
+            "enumeration_failed",
+        }:
+            return (
+                "Input inventory unavailable; System default remains active.",
+                "info",
+            )
+
+        selection = self._microphone_selection()
+        if selection.state is MicrophoneSelectionState.SELECTED:
+            selectable_ids = {
+                device.stable_id for device in self._microphone_selectable_devices()
+            }
+            if selection.selected_id not in selectable_ids:
+                return (
+                    "Saved microphone cannot be routed safely; choose System default.",
+                    "error",
+                )
+        if not selection.can_record:
+            return (
+                f"No safe input device ({self._microphone_inventory.error_code or 'unavailable'}).",
+                "error",
+            )
+        if selection.is_fallback:
+            assert selection.device is not None
+            return (
+                "Saved microphone unavailable; using current default: "
+                + selection.device.name,
+                "warning",
+            )
+        assert selection.device is not None
+        return (
+            f"{selection.device.name} · {selection.device.host_api or 'default'}",
+            "ok",
+        )
+
+    @Slot(int, bool, object)
+    def _finish_microphone_test(
+        self,
+        generation: int,
+        success: bool,
+        payload: object,
+    ) -> None:
+        if generation != self._microphone_test_generation:
+            return
+        self._microphone_test_busy = False
+        if success:
+            try:
+                peak = float(payload)
+            except (TypeError, ValueError):
+                peak = 0.0
+            self._microphone_test_status = f"Input level peak: {peak:.2f}"
+            self._microphone_test_kind = "ok"
+        else:
+            message = str(payload or "Input test failed")
+            self._microphone_test_status = f"Input test failed: {message}"
+            self._microphone_test_kind = "error"
+        self.microphoneTestChanged.emit()
+
     def _selected_route(self) -> WorkflowRoute:
         return self._config.workflow(self._selected_scope)
 
@@ -1091,6 +1464,10 @@ class QmlSettingsController(QObject):
         self._set_error(None)
         if config == self._config:
             return True
+        microphone_changed = (
+            config.microphone != self._config.microphone
+            or config.recording_controls != self._config.recording_controls
+        )
         route_changed = config.workflow(self._selected_scope) != self._config.workflow(
             self._selected_scope
         )
@@ -1099,6 +1476,8 @@ class QmlSettingsController(QObject):
             self._dirty = True
             self.dirtyChanged.emit()
         self.configChanged.emit()
+        if microphone_changed:
+            self.microphoneChanged.emit()
         if route_changed:
             self.routeChanged.emit()
         return True
@@ -1119,6 +1498,10 @@ class QmlSettingsController(QObject):
         return True
 
     def _replace_loaded_config(self, config: AppConfig) -> None:
+        microphone_changed = (
+            config.microphone != self._config.microphone
+            or config.recording_controls != self._config.recording_controls
+        )
         route_changed = config.workflow(self._selected_scope) != self._config.workflow(
             self._selected_scope
         )
@@ -1130,6 +1513,8 @@ class QmlSettingsController(QObject):
         )
         if config_changed:
             self.configChanged.emit()
+        if microphone_changed:
+            self.microphoneChanged.emit()
         self.providerStateChanged.emit()
         if route_changed:
             self.routeChanged.emit()

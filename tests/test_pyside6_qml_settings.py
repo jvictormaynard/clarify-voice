@@ -32,6 +32,11 @@ from repositories import (
 from secret_store import MemorySecretStore
 from provider_types import ModelCatalog
 from workflow_config import WorkflowScope
+from microphone_controls import (
+    MicrophoneDevice,
+    MicrophoneInventory,
+    RecordingControls,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +52,27 @@ def _repositories(directory: str) -> ApplicationRepositories:
         ),
         usage_stats=LocalUsageStatsRepository(root / "usage_stats.json"),
     )
+
+
+class _MicrophoneBackend:
+    """Small QML-facing backend double that preserves typed inventory seams."""
+
+    def __init__(self, inventory):
+        self.inventory = inventory
+        self.test_started = threading.Event()
+
+    def supports_explicit_microphone_selection(self):
+        return True
+
+    def microphone_inventory(self):
+        return self.inventory
+
+    def selectable_microphone_devices(self, inventory):
+        return inventory.available_devices
+
+    def test_microphone(self, selection, inventory):
+        self.test_started.set()
+        return 0.42
 
 
 class _RegistryKey:
@@ -95,6 +121,159 @@ class QmlSettingsControllerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.qt_app = QCoreApplication.instance() or QCoreApplication([])
+
+    @staticmethod
+    def _microphone_inventory():
+        selected = MicrophoneDevice(
+            stable_id="mic-selected",
+            name="USB microphone",
+            host_api="Windows WASAPI",
+            input_channels=1,
+            backend_index=7,
+        )
+        default = MicrophoneDevice(
+            stable_id="mic-default",
+            name="System microphone",
+            host_api="Windows WASAPI",
+            input_channels=1,
+            is_default=True,
+            backend_index=2,
+        )
+        return MicrophoneInventory.from_records(
+            [selected, default], default_id=default.stable_id
+        )
+
+    def test_microphone_inventory_recovery_uses_stable_ids_and_typed_draft(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            repositories.config.save(
+                AppConfig.from_mapping(
+                    {"microphone": {"selected_id": "stale-microphone"}}
+                )
+            )
+            backend = _MicrophoneBackend(self._microphone_inventory())
+            controller = QmlSettingsController(
+                repositories,
+                microphone_backend=backend,
+            )
+            try:
+                self.assertEqual(controller.selectedMicrophoneId, "stale-microphone")
+                self.assertEqual(
+                    controller.microphoneSelectionState,
+                    "fallback_default",
+                )
+                self.assertIn(
+                    "Saved microphone unavailable", controller.microphoneStatus
+                )
+                self.assertEqual(controller.microphoneSelectionIndex, 0)
+                self.assertEqual(
+                    [option["id"] for option in controller.microphoneDevices],
+                    ["", "mic-selected", "mic-default"],
+                )
+
+                self.assertTrue(controller.selectMicrophone("mic-selected"))
+                self.assertEqual(controller.selectedMicrophoneId, "mic-selected")
+                self.assertTrue(controller.setMicrophone(""))
+                self.assertIsNone(controller.selectedMicrophoneId)
+
+                self.assertTrue(
+                    controller.setRecordingControls(
+                        {
+                            "max_duration_seconds": 45,
+                            "warning_seconds": 5,
+                            "vad": {
+                                "enabled": True,
+                                "level_threshold": 0.03,
+                                "minimum_speech_seconds": 0.4,
+                                "silence_duration_seconds": 1.2,
+                            },
+                        }
+                    )
+                )
+                self.assertTrue(controller.dirty)
+                self.assertTrue(controller.save())
+
+                persisted = repositories.config.load()
+                self.assertIsNone(persisted.microphone.selected_id)
+                self.assertEqual(
+                    persisted.recording_controls.max_duration_seconds,
+                    45,
+                )
+                self.assertTrue(persisted.recording_controls.vad.enabled)
+            finally:
+                controller.shutdown()
+
+    def test_recording_controls_reject_invalid_boundary_without_mutating_draft(self):
+        with TemporaryDirectory() as directory:
+            backend = _MicrophoneBackend(self._microphone_inventory())
+            controller = QmlSettingsController(
+                _repositories(directory),
+                microphone_backend=backend,
+            )
+            try:
+                before = controller.recordingControls
+                self.assertFalse(
+                    controller.setRecordingControls(
+                        {"max_duration_seconds": 2, "warning_seconds": 3}
+                    )
+                )
+                self.assertIn("cannot exceed", controller.lastError)
+                self.assertEqual(controller.recordingControls, before)
+                self.assertEqual(
+                    controller.recordingControls,
+                    RecordingControls.defaults().to_mapping(),
+                )
+            finally:
+                controller.shutdown()
+
+    def test_microphone_test_is_async_and_does_not_persist_audio(self):
+        with TemporaryDirectory() as directory:
+            backend = _MicrophoneBackend(self._microphone_inventory())
+            controller = QmlSettingsController(
+                _repositories(directory),
+                microphone_backend=backend,
+            )
+            try:
+                self.assertTrue(controller.testMicrophone())
+                self.assertTrue(backend.test_started.wait(timeout=1))
+                for _ in range(100):
+                    self.qt_app.processEvents()
+                    if not controller.microphoneTestBusy:
+                        break
+                    time.sleep(0.01)
+                self.assertFalse(controller.microphoneTestBusy)
+                self.assertEqual(
+                    controller.microphoneTestStatus, "Input level peak: 0.42"
+                )
+                self.assertEqual(controller.microphoneTestStatusKind, "ok")
+                self.assertFalse((Path(directory) / "recording.wav").exists())
+            finally:
+                controller.shutdown()
+
+    def test_unavailable_inventory_exposes_recoverable_default_and_fails_closed_test(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            backend = _MicrophoneBackend(
+                MicrophoneInventory.unavailable("enumeration_failed")
+            )
+            controller = QmlSettingsController(
+                _repositories(directory),
+                microphone_backend=backend,
+            )
+            try:
+                self.assertEqual(controller.microphoneDevices[0]["id"], "")
+                self.assertEqual(controller.microphoneSelectionState, "unavailable")
+                self.assertIn(
+                    "Input inventory unavailable", controller.microphoneStatus
+                )
+                self.assertFalse(controller.testMicrophone())
+                self.assertEqual(
+                    controller.microphoneTestStatus,
+                    "No safe microphone to test.",
+                )
+            finally:
+                controller.shutdown()
 
     def test_load_exposes_typed_app_config_and_selected_route(self):
         with TemporaryDirectory() as directory:
@@ -708,6 +887,13 @@ class QmlSettingsControllerTests(unittest.TestCase):
                 "routePrompt",
                 "routeCustomEndpoint",
                 "routeEnabled",
+                "selectedMicrophoneId",
+                "microphoneDevices",
+                "microphoneInventory",
+                "microphoneStatus",
+                "microphoneTestStatus",
+                "microphoneTestBusy",
+                "recordingControls",
                 "dirty",
                 "lastError",
             }.issubset(property_names)

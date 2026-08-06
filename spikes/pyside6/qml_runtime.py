@@ -7,6 +7,7 @@ legacy frontend or any Tk/CustomTkinter module.
 
 from __future__ import annotations
 
+import math
 import os
 import platform
 import shutil
@@ -52,6 +53,7 @@ try:
     )
     from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
     from microphone_controls import (
+        MicrophoneInventory,
         MicrophoneSelectionState,
         RecordingBoundaryPolicy,
         RecordingBoundaryReason,
@@ -92,6 +94,7 @@ except ImportError:  # PyInstaller analyzes this file as a standalone entry poin
     from ...provider_http import CancellationToken  # type: ignore[no-redef]
     from ...local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID  # type: ignore[no-redef]
     from ...microphone_controls import (  # type: ignore[no-redef]
+        MicrophoneInventory,
         MicrophoneSelectionState,
         RecordingBoundaryPolicy,
         RecordingBoundaryReason,
@@ -657,6 +660,109 @@ class QtRecorder:
                 )
             return "default"
         return device.name
+
+    def microphone_inventory(self) -> Any:
+        """Return the same safe inventory boundary used by recording.
+
+        Settings must be able to recover a stale saved identity without
+        reaching into PortAudio directly.  Keep enumeration owned by the
+        recorder's injected source so the QML surface and a recording session
+        observe the same backend snapshot contract.
+        """
+
+        if self.microphone_inventory_source is None:
+            return MicrophoneInventory.unavailable("portaudio_unavailable")
+        return self.microphone_inventory_source.snapshot()
+
+    @staticmethod
+    def supports_explicit_microphone_selection(system: str | None = None) -> bool:
+        """Return whether the active SoX driver can honor an input name."""
+
+        return (system or platform.system()) in {"Windows", "Darwin"}
+
+    def selectable_microphone_devices(self, inventory: Any) -> tuple[Any, ...]:
+        """Expose only endpoint names the active SoX route can disambiguate."""
+
+        if not self.supports_explicit_microphone_selection():
+            return ()
+        return tuple(
+            device
+            for device in inventory.available_devices
+            if _sox_microphone_name_is_unambiguous(inventory, device, platform.system())
+        )
+
+    def test_microphone(self, selection: Any, inventory: Any) -> float:
+        """Capture a short local-only level sample for the Settings test."""
+
+        if _sounddevice is None:
+            raise QtRuntimeError("Input test unavailable without PortAudio")
+        if selection is None or not selection.can_record:
+            raise MicrophoneUnavailableError("No safe microphone to test")
+
+        system = platform.system()
+        stream_device = None
+        if selection.state is MicrophoneSelectionState.SELECTED:
+            device = selection.device
+            if device is None:
+                raise MicrophoneUnavailableError("No safe microphone to test")
+            if not self.supports_explicit_microphone_selection(system):
+                is_default = (
+                    device.is_default or inventory.default_id == device.stable_id
+                )
+                if not is_default:
+                    raise MicrophoneUnavailableError(
+                        "Explicit microphone selection is unavailable with SoX PulseAudio"
+                    )
+            elif device not in self.selectable_microphone_devices(inventory):
+                raise MicrophoneUnavailableError(
+                    "Selected microphone has no unambiguous backend name"
+                )
+            else:
+                stream_device = (
+                    device.backend_index
+                    if device.backend_index is not None
+                    else device.name
+                )
+
+        peak = 0.0
+        stream = None
+
+        def callback(indata, _frames, _time_info, _status):
+            nonlocal peak
+            raw_samples = memoryview(indata)
+            samples = (
+                raw_samples
+                if raw_samples.format in {"h", "<h", "=h", "@h"}
+                and raw_samples.ndim == 1
+                else memoryview(raw_samples.tobytes()).cast("h")
+            )
+            if samples:
+                rms = math.sqrt(
+                    sum(sample * sample for sample in samples) / len(samples)
+                )
+                peak = max(peak, min(1.0, rms / 32768.0 * 16))
+
+        try:
+            kwargs = {
+                "channels": 1,
+                "samplerate": 16000,
+                "blocksize": 256,
+                "dtype": "int16",
+                "callback": callback,
+            }
+            if stream_device is not None:
+                kwargs["device"] = stream_device
+            stream = _sounddevice.RawInputStream(**kwargs)
+            stream.start()
+            time.sleep(0.25)
+        finally:
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+        return peak
 
     def start(self, path: Path, cancel_event: threading.Event) -> None:
         if not self.sox:

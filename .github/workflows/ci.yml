@@ -173,16 +173,28 @@ jobs:
         shell: pwsh
         run: |
           $executable = (Resolve-Path .\dist\ClarifyVoice.exe).Path
-          $process = Start-Process -FilePath $executable `
-            -ArgumentList @('--hidden') -PassThru
+          $smokeDataDirectory = Join-Path $env:RUNNER_TEMP "clarifyvoice-packaged-smoke"
+          New-Item -Path $smokeDataDirectory -ItemType Directory -Force | Out-Null
+          $previousDataDirectory = $env:CLARIFYVOICE_DATA_DIR
+          $env:CLARIFYVOICE_DATA_DIR = $smokeDataDirectory
           try {
-            Start-Sleep -Seconds 5
-            if ($process.HasExited) {
-              throw "Packaged QML entrypoint exited during hidden launch (exit code $($process.ExitCode))."
+            $process = Start-Process -FilePath $executable `
+              -ArgumentList @('--hidden') -PassThru
+            try {
+              Start-Sleep -Seconds 5
+              if ($process.HasExited) {
+                throw "Packaged QML entrypoint exited during hidden launch (exit code $($process.ExitCode))."
+              }
+            } finally {
+              if (-not $process.HasExited) {
+                Stop-Process -Id $process.Id -Force
+              }
             }
           } finally {
-            if (-not $process.HasExited) {
-              Stop-Process -Id $process.Id -Force
+            if ($null -eq $previousDataDirectory) {
+              Remove-Item Env:CLARIFYVOICE_DATA_DIR -ErrorAction SilentlyContinue
+            } else {
+              $env:CLARIFYVOICE_DATA_DIR = $previousDataDirectory
             }
           }
 
