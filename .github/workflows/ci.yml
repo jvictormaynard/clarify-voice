@@ -200,7 +200,7 @@ jobs:
 
       - name: Validate secret-store contract
         run: >-
-          python -c "import app; raise SystemExit(app._run_cli(['secret-store-self-test']))"
+          python -c "import sys; sys.argv = ['app.py', 'secret-store-self-test']; import app; raise SystemExit(app._run_cli(['secret-store-self-test']))"
 
       - name: Test install, upgrade, repair, rollback, and uninstall
         shell: pwsh
