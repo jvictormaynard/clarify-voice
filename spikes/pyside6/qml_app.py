@@ -123,16 +123,37 @@ def _register_qml_context(engine, workflow, settings) -> None:
 
 
 def _connect_preference_sync(bridge, settings) -> None:
-    """Keep the persisted draft and compact workflow controls in one state.
+    """Synchronize Settings and home preferences with explicit ownership.
 
-    Both controller APIs ignore unchanged values, so these reciprocal signal
-    connections converge without a re-entrancy flag or feedback loop.
+    Settings edits remain a draft until its Save action. Home mode/language
+    changes are the only bridge-originated updates and persist immediately.
+    The guard prevents the Settings-to-bridge reflection from being mistaken
+    for a new home edit and saving the draft recursively.
     """
 
-    settings.configChanged.connect(lambda: bridge.setMode(settings.mode))
-    settings.configChanged.connect(lambda: bridge.setLanguage(settings.language))
-    bridge.modeChanged.connect(lambda: settings.setMode(bridge.mode))
-    bridge.languageChanged.connect(lambda: settings.setLanguage(bridge.language))
+    syncing_from_settings = False
+
+    def sync_bridge_from_settings() -> None:
+        nonlocal syncing_from_settings
+        syncing_from_settings = True
+        try:
+            bridge.setMode(settings.mode)
+            bridge.setLanguage(settings.language)
+        finally:
+            syncing_from_settings = False
+
+    def persist_home_preference(setter, value) -> None:
+        setter(value)
+        if not syncing_from_settings:
+            settings.save()
+
+    settings.configChanged.connect(sync_bridge_from_settings)
+    bridge.modeChanged.connect(
+        lambda: persist_home_preference(settings.setMode, bridge.mode)
+    )
+    bridge.languageChanged.connect(
+        lambda: persist_home_preference(settings.setLanguage, bridge.language)
+    )
 
 
 def _show_translation_picker_if_needed(bridge, shell) -> None:

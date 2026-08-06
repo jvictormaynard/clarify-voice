@@ -195,6 +195,8 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("shell.hotkeyTriggered.connect(bridge.handleHotkey)", source)
         self.assertIn("_connect_preference_sync(bridge, settings)", source)
         self.assertIn("settings.configChanged.connect", source)
+        self.assertIn("syncing_from_settings", source)
+        self.assertIn("settings.save()", source)
         self.assertIn("bridge.modeChanged.connect", source)
         self.assertIn("bridge.languageChanged.connect", source)
         self.assertIn("_show_translation_picker_if_needed", source)
@@ -378,19 +380,21 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
 
         self.assertEqual(events[-2:], ["shell", "runtime"])
 
-    def test_preferences_sync_in_both_directions_and_persists_compact_edits(self):
+    def test_preferences_sync_persists_home_changes_and_keeps_settings_as_draft(self):
         from repositories import AppConfig
         from workflows import StartDictation, WorkflowState
 
         class ConfigRepository:
             def __init__(self, config):
                 self.config = config
+                self.applied = []
 
             def load(self):
                 return self.config
 
             def apply(self, config):
                 self.config = config
+                self.applied.append(config)
                 return config
 
         class Repositories:
@@ -419,6 +423,7 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
 
         settings.setMode("transcription")
         settings.setLanguage("pt")
+        self.assertEqual(config_repository.applied, [])
         bridge.startRecording()
 
         self.assertIsInstance(service.commands[-1], StartDictation)
@@ -429,11 +434,23 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
         bridge.setLanguage("de")
         self.assertEqual(settings.mode, "prompt")
         self.assertEqual(settings.language, "de")
+        self.assertEqual(len(config_repository.applied), 2)
+        reloaded = QmlSettingsController(Repositories(config_repository))
+        self.assertEqual(reloaded.mode, "prompt")
+        self.assertEqual(reloaded.language, "de")
+
+        settings.setMode("transcription")
+        settings.setLanguage("pt")
+        self.assertEqual(bridge.mode, "transcription")
+        self.assertEqual(bridge.language, "pt")
         self.assertTrue(settings.dirty)
+        self.assertEqual(len(config_repository.applied), 2)
+
         self.assertTrue(settings.save())
+        self.assertEqual(len(config_repository.applied), 3)
         persisted = config_repository.load()
-        self.assertEqual(persisted.ui.mode, "prompt")
-        self.assertEqual(persisted.ui.language, "de")
+        self.assertEqual(persisted.ui.mode, "transcription")
+        self.assertEqual(persisted.ui.language, "pt")
 
     def test_translation_picker_reveals_a_window_hidden_by_the_tray(self):
         class Bridge(QObject):
