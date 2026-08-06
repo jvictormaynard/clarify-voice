@@ -15,7 +15,14 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QLockFile, QObject, Signal, Slot
+from PySide6.QtCore import (
+    QAbstractNativeEventFilter,
+    QEvent,
+    QLockFile,
+    QObject,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
@@ -32,7 +39,13 @@ DEFAULT_INSTANCE_NAME = "clarifyvoice"
 _WINDOWS_NATIVE_EVENT_TYPES = frozenset(
     {"windows_generic_MSG", "windows_dispatcher_MSG"}
 )
-_UNSUPPORTED_SHELL_HOTKEY_ACTIONS = frozenset({HotkeyAction.VOICE_TRANSLATION})
+_UNSUPPORTED_SHELL_HOTKEY_ACTIONS = frozenset(
+    {
+        HotkeyAction.REWRITE,
+        HotkeyAction.TRANSLATION,
+        HotkeyAction.VOICE_TRANSLATION,
+    }
+)
 
 
 class QtShellError(RuntimeError):
@@ -57,6 +70,10 @@ class NativeEventTarget(Protocol):
 
 class WindowTarget(Protocol):
     """Small window contract used by tray and hotkey shell actions."""
+
+    def installEventFilter(self, filter_object: QObject) -> None: ...
+
+    def removeEventFilter(self, filter_object: QObject) -> None: ...
 
     def show(self) -> None: ...
 
@@ -326,6 +343,7 @@ class QtShell(QObject):
         self._started = False
         self._hotkeys_connected = False
         self._hotkeys_started = False
+        self._window_close_filter_installed = False
 
     @property
     def is_running(self) -> bool:
@@ -351,6 +369,7 @@ class QtShell(QObject):
         try:
             if tray_available:
                 self._create_tray()
+                self._install_window_close_filter()
             if self._hotkeys is not None:
                 if not self._hotkeys_connected:
                     self._hotkeys.triggered.connect(self._handle_hotkey)
@@ -364,6 +383,7 @@ class QtShell(QObject):
                     self._hotkeys.stop()
             finally:
                 self._hotkeys_started = False
+                self._remove_window_close_filter()
                 self._cleanup_tray()
                 self._started = False
             raise
@@ -384,6 +404,7 @@ class QtShell(QObject):
                 self._hotkeys.stop()
         finally:
             self._hotkeys_started = False
+            self._remove_window_close_filter()
             self._cleanup_tray()
             self._instance_guard.release()
             self.stopped.emit()
@@ -397,6 +418,19 @@ class QtShell(QObject):
     @Slot()
     def hide_window(self) -> None:
         self._window.hide()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Hide a tray-owned QWindow instead of destroying its native handle."""
+
+        if (
+            watched is self._window
+            and self._tray is not None
+            and event.type() == QEvent.Type.Close
+        ):
+            event.ignore()
+            self.hide_window()
+            return True
+        return bool(super().eventFilter(watched, event))
 
     @Slot()
     def toggle_window(self) -> None:
@@ -425,6 +459,20 @@ class QtShell(QObject):
         tray.setContextMenu(menu)
         tray.activated.connect(self._handle_tray_activation)
         tray.show()
+
+    def _install_window_close_filter(self) -> None:
+        if self._window_close_filter_installed:
+            return
+        self._window.installEventFilter(self)
+        self._window_close_filter_installed = True
+
+    def _remove_window_close_filter(self) -> None:
+        if not self._window_close_filter_installed:
+            return
+        try:
+            self._window.removeEventFilter(self)
+        finally:
+            self._window_close_filter_installed = False
 
     def _cleanup_tray(self) -> None:
         """Hide and release tray resources, including partially built ones."""

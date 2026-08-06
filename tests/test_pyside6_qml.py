@@ -1,16 +1,22 @@
 import ast
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 try:
     from PySide6.QtCore import QObject, QTimer, Signal
+    from PySide6.QtGui import QIcon
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtWidgets import QApplication
+    from spikes.pyside6 import qml_app
     from spikes.pyside6.qml_app import (
         ShellStartResult,
         _connect_preference_sync,
         _connect_shutdown,
+        _branding_icon_path,
+        _load_branding_icon,
         _register_qml_context,
         _show_translation_picker_if_needed,
         _start_shell_if_available,
@@ -171,6 +177,9 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("QApplication", source)
         self.assertNotIn("QGuiApplication", source)
         self.assertIn("QSystemTrayIcon", source)
+        self.assertIn("QIcon", source)
+        self.assertIn("_branding_icon_path", source)
+        self.assertIn("icon=_load_branding_icon()", source)
         self.assertIn("_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]", source)
         self.assertIn("sys.path.insert(0, str(_REPOSITORY_ROOT))", source)
         self.assertIn("create_real_workflow_runtime", source)
@@ -203,6 +212,29 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("_start_shell_if_available", source)
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("--fake", source)
+
+    @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+    def test_branding_icon_loads_from_source_and_frozen_bundle_paths(self):
+        source_icon = ROOT / "assets" / "branding" / "clarify.ico"
+        self.assertEqual(_branding_icon_path(), source_icon)
+        source_qicon = _load_branding_icon()
+        self.assertIsInstance(source_qicon, QIcon)
+        self.assertFalse(source_qicon.isNull())
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            bundle_root = Path(temporary_directory)
+            frozen_icon = bundle_root / "assets" / "branding" / "clarify.ico"
+            frozen_icon.parent.mkdir(parents=True)
+            shutil.copyfile(source_icon, frozen_icon)
+            with (
+                patch.object(qml_app.sys, "_MEIPASS", str(bundle_root), create=True),
+                patch.object(qml_app.sys, "frozen", True, create=True),
+            ):
+                self.assertEqual(_branding_icon_path(), frozen_icon)
+                frozen_qicon = _load_branding_icon()
+
+            self.assertIsInstance(frozen_qicon, QIcon)
+            self.assertFalse(frozen_qicon.isNull())
 
     def test_qml_bridge_hydrates_persisted_preferences(self):
         bridge_source = (SPIKE / "qml_bridge.py").read_text(encoding="utf-8")

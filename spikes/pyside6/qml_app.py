@@ -14,8 +14,46 @@ if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from PySide6.QtCore import QUrl  # noqa: E402
+from PySide6.QtGui import QIcon  # noqa: E402
 from PySide6.QtQml import QQmlApplicationEngine  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
+
+
+def _branding_icon_path() -> Path:
+    """Resolve the bundled branding icon for source and frozen launches."""
+
+    roots: list[Path] = []
+    bundled_root = getattr(sys, "_MEIPASS", None)
+    if bundled_root:
+        roots.append(Path(bundled_root))
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve().parent)
+    roots.append(_REPOSITORY_ROOT)
+
+    seen: set[Path] = set()
+    relative_path = Path("assets") / "branding" / "clarify.ico"
+    for root in roots:
+        resolved_root = root.resolve()
+        if resolved_root in seen:
+            continue
+        seen.add(resolved_root)
+        candidate = resolved_root / relative_path
+        if candidate.is_file():
+            return candidate
+
+    raise FileNotFoundError(
+        f"ClarifyVoice branding icon was not found under: {', '.join(map(str, roots))}"
+    )
+
+
+def _load_branding_icon() -> QIcon:
+    """Load a non-null QIcon for the native tray shell."""
+
+    icon = QIcon(str(_branding_icon_path()))
+    if icon.isNull():
+        raise RuntimeError("ClarifyVoice branding icon could not be loaded")
+    return icon
+
 
 try:
     from .qml_bridge import QmlWorkflowBridge  # noqa: E402
@@ -172,7 +210,13 @@ def main(argv: list[str] | None = None) -> int:
             settings=repositories.config.load().hotkeys,
             parent=app,
         )
-    shell = QtShell(window, hotkeys=hotkeys, application=app, parent=app)
+    shell = QtShell(
+        window,
+        hotkeys=hotkeys,
+        application=app,
+        icon=_load_branding_icon(),
+        parent=app,
+    )
     shell.hotkeyTriggered.connect(bridge.handleHotkey)
     bridge.surfaceChanged.connect(
         lambda: _show_translation_picker_if_needed(bridge, shell)

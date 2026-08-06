@@ -10,7 +10,7 @@ from pathlib import Path
 from hotkey_config import HotkeyAction, HotkeySettings
 
 try:
-    from PySide6.QtCore import QCoreApplication, QObject, Signal
+    from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal
     from PySide6.QtWidgets import QSystemTrayIcon
     from spikes.pyside6.qt_shell import (
         QtShell,
@@ -62,6 +62,14 @@ class FakeWindow:
         self.visible = visible
         self.handle = handle
         self.calls: list[str] = []
+        self.event_filters = []
+        self.removed_event_filters = []
+
+    def installEventFilter(self, filter_object) -> None:
+        self.event_filters.append(filter_object)
+
+    def removeEventFilter(self, filter_object) -> None:
+        self.removed_event_filters.append(filter_object)
 
     def winId(self) -> int:
         return self.handle
@@ -288,7 +296,7 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
         def register(_user32, _hwnd, settings, *, strict):
             self.assertTrue(strict)
             registration_settings.append(settings)
-            return {0x5101, 0x5102, 0x5103, 0x5104}
+            return {0x5101, 0x5104}
 
         def unregister(_user32, _hwnd, registered):
             unregistrations.append(set(registered))
@@ -303,17 +311,23 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
 
         self.assertEqual(
             backend.start(FakeWindow()),
-            {0x5101, 0x5102, 0x5103, 0x5104},
+            {0x5101, 0x5104},
         )
         self.assertEqual(len(registration_settings), 1)
+        self.assertEqual(
+            set(registration_settings[0].hotkeys),
+            {HotkeyAction.RECORDING, HotkeyAction.VISIBILITY},
+        )
+        self.assertNotIn(HotkeyAction.REWRITE, registration_settings[0].hotkeys)
+        self.assertNotIn(HotkeyAction.TRANSLATION, registration_settings[0].hotkeys)
         self.assertNotIn(
             HotkeyAction.VOICE_TRANSLATION,
             registration_settings[0].hotkeys,
         )
-        self.assertNotIn(0x5106, backend.registered_ids)
+        self.assertEqual(backend.registered_ids, {0x5101, 0x5104})
 
         backend.stop()
-        self.assertEqual(unregistrations, [{0x5101, 0x5102, 0x5103, 0x5104}])
+        self.assertEqual(unregistrations, [{0x5101, 0x5104}])
 
     def test_event_filter_factory_failure_unregisters_every_registered_id(self):
         target = FakeNativeEventTarget()
@@ -446,6 +460,32 @@ class QtShellTests(unittest.TestCase):
         self.assertEqual(application.quit_calls, 1)
         self.assertFalse(shell.is_running)
 
+    def test_tray_close_event_hides_window_and_preserves_native_handle(self):
+        shell = self._shell()
+        self.assertTrue(shell.start())
+        shell.show_window()
+        close_event = QEvent(QEvent.Type.Close)
+
+        self.assertTrue(shell.eventFilter(shell._window, close_event))
+        self.assertFalse(close_event.isAccepted())
+        self.assertFalse(shell._window.visible)
+        self.assertEqual(shell._window.handle, 123)
+        self.assertEqual(shell._window.event_filters, [shell])
+
+        shell.stop()
+        self.assertEqual(shell._window.removed_event_filters, [shell])
+
+    def test_explicit_quit_removes_close_filter_before_quitting(self):
+        application = FakeApplication()
+        shell = self._shell(application=application)
+        self.assertTrue(shell.start())
+
+        shell.quit()
+
+        self.assertEqual(application.quit_calls, 1)
+        self.assertEqual(shell._window.removed_event_filters, [shell])
+        self.assertFalse(shell.is_running)
+
     def test_tray_configuration_failure_hides_and_releases_partial_tray(self):
         tray = FakeTray(None, None)
         tray.fail_on_tooltip = True
@@ -544,6 +584,8 @@ class QtShellSourceTests(unittest.TestCase):
 
         source = MODULE.read_text(encoding="utf-8")
         self.assertIn("_UNSUPPORTED_SHELL_HOTKEY_ACTIONS", source)
+        self.assertIn("HotkeyAction.REWRITE", source)
+        self.assertIn("HotkeyAction.TRANSLATION", source)
         self.assertIn("voice", source.lower())
         self.assertIn("translation in this slice", source.lower())
 
