@@ -95,7 +95,7 @@ ApplicationWindow {
             Item {
                 id: homePage
                 objectName: "homePage"
-                property bool promptMode: true
+                property bool promptMode: workflow.mode === "prompt"
 
                 RowLayout {
                     anchors.fill: parent
@@ -199,7 +199,7 @@ ApplicationWindow {
                         PilotButton {
                             id: languageButton
                             objectName: "languageButton"
-                            property string languageCode: "EN"
+                            property string languageCode: workflow.language.toUpperCase()
                             text: languageCode
                             theme: theme
                             Layout.preferredWidth: 32
@@ -208,8 +208,7 @@ ApplicationWindow {
                                               + (languageCode === "EN"
                                                  ? "English" : "Portuguese")
                             onClicked: {
-                                languageCode = languageCode === "EN" ? "PT" : "EN"
-                                workflow.setLanguage(languageCode.toLowerCase())
+                                workflow.setLanguage(languageCode === "EN" ? "pt" : "en")
                             }
                         }
 
@@ -224,9 +223,8 @@ ApplicationWindow {
                                               + (homePage.promptMode
                                                  ? "Prompt" : "Transcribe")
                             onClicked: {
-                                homePage.promptMode = !homePage.promptMode
                                 workflow.setMode(homePage.promptMode
-                                                 ? "prompt" : "transcription")
+                                                 ? "transcription" : "prompt")
                             }
                         }
 

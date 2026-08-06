@@ -46,10 +46,18 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("Layout.preferredWidth: 26", main_source)
         self.assertNotIn("#72a7ff", qml_source)
         self.assertNotIn("#4f83e8", qml_source)
-        self.assertIn('property string languageCode: "EN"', main_source)
         self.assertIn("text: languageCode", main_source)
         self.assertIn('Accessible.name: "Language: "', main_source)
         self.assertIn('languageCode === "EN"', main_source)
+        self.assertIn(
+            "property string languageCode: workflow.language.toUpperCase()",
+            main_source,
+        )
+        self.assertIn(
+            'property bool promptMode: workflow.mode === "prompt"', main_source
+        )
+        self.assertNotIn("languageCode = languageCode ===", main_source)
+        self.assertNotIn("homePage.promptMode = !homePage.promptMode", main_source)
         self.assertIn('Accessible.name: "Mode: "', main_source)
         self.assertIn("root.startSystemMove()", main_source)
         self.assertIn("DragHandler", main_source)
@@ -101,6 +109,27 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("app.aboutToQuit.connect(runtime.shutdown)", source)
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("--fake", source)
+
+    def test_qml_bridge_hydrates_persisted_preferences(self):
+        bridge_source = (SPIKE / "qml_bridge.py").read_text(encoding="utf-8")
+        self.assertIn("app_config: Any | None = None", bridge_source)
+        self.assertIn("saved_config = current_config()", bridge_source)
+        self.assertIn('getattr(ui_preferences, "mode", "prompt")', bridge_source)
+        self.assertIn('getattr(ui_preferences, "language", "en")', bridge_source)
+        self.assertIn("def mode(self) -> str:", bridge_source)
+        self.assertIn("def language(self) -> str:", bridge_source)
+        self.assertIn("StartDictation(None, self._mode, self._language)", bridge_source)
+
+        main_source = (QML_ROOT / "Main.qml").read_text(encoding="utf-8")
+        self.assertIn(
+            'property bool promptMode: workflow.mode === "prompt"', main_source
+        )
+        self.assertIn(
+            "property string languageCode: workflow.language.toUpperCase()",
+            main_source,
+        )
+        self.assertNotIn("languageCode = languageCode ===", main_source)
+        self.assertNotIn("homePage.promptMode = !homePage.promptMode", main_source)
 
     def test_qml_runtime_uses_ui_free_adapters(self):
         for filename in ("qml_bridge.py", "qml_runtime.py"):

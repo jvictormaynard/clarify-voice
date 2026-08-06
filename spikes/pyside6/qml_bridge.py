@@ -47,6 +47,8 @@ class QmlWorkflowBridge(QObject):
     resultChanged = Signal()
     busyChanged = Signal()
     canShowResultChanged = Signal()
+    modeChanged = Signal()
+    languageChanged = Signal()
     copyCompleted = Signal(bool)
 
     _STATUS = {
@@ -88,6 +90,7 @@ class QmlWorkflowBridge(QObject):
         self,
         workflow_service: Any,
         *,
+        app_config: Any | None = None,
         dispatch_runner: Callable[[Callable[[], None]], None] | None = None,
         copy_runner: Callable[[str], Any] | None = None,
         parent: QObject | None = None,
@@ -103,8 +106,17 @@ class QmlWorkflowBridge(QObject):
         self._result_visible = False
         self._settings_visible = False
         self._finishing = False
-        self._mode = "prompt"
-        self._language = "en"
+        saved_config = app_config
+        if saved_config is None:
+            config_provider = getattr(workflow_service, "_config", None)
+            current_config = getattr(config_provider, "current", None)
+            if callable(current_config):
+                saved_config = current_config()
+        ui_preferences = getattr(saved_config, "ui", None)
+        self._mode = self._normalize_mode(getattr(ui_preferences, "mode", "prompt"))
+        self._language = self._normalize_language(
+            getattr(ui_preferences, "language", "en")
+        )
         workflow_service.subscribe(self._on_workflow_state)
 
     @Property(str, notify=surfaceChanged)
@@ -141,6 +153,14 @@ class QmlWorkflowBridge(QObject):
         return self._state.phase is WorkflowPhase.COMPLETED and bool(
             self._state.result_text
         )
+
+    @Property(str, notify=modeChanged)
+    def mode(self) -> str:
+        return self._mode
+
+    @Property(str, notify=languageChanged)
+    def language(self) -> str:
+        return self._language
 
     @staticmethod
     def _surface_for_phase(phase: WorkflowPhase) -> str:
@@ -179,17 +199,29 @@ class QmlWorkflowBridge(QObject):
     def _submit(self, callback: Callable[[], None]) -> None:
         self._dispatch_runner(callback)
 
+    @staticmethod
+    def _normalize_mode(mode: Any) -> str:
+        normalized = str(mode or "").strip().lower()
+        return normalized if normalized in {"prompt", "transcription"} else "prompt"
+
+    @staticmethod
+    def _normalize_language(language: Any) -> str:
+        normalized = str(language or "").strip().lower()
+        return normalized or "en"
+
     @Slot(str)
     def setMode(self, mode: str) -> None:
         normalized = str(mode or "").strip().lower()
-        if normalized in {"prompt", "transcription"}:
+        if normalized in {"prompt", "transcription"} and normalized != self._mode:
             self._mode = normalized
+            self.modeChanged.emit()
 
     @Slot(str)
     def setLanguage(self, language: str) -> None:
         normalized = str(language or "").strip().lower()
-        if normalized:
+        if normalized and normalized != self._language:
             self._language = normalized
+            self.languageChanged.emit()
 
     @Slot()
     def startRecording(self) -> None:

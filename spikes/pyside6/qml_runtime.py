@@ -21,7 +21,7 @@ from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 try:
     import sounddevice as _sounddevice
-except ImportError:
+except (ImportError, OSError):
     _sounddevice = None
 
 try:
@@ -29,6 +29,7 @@ try:
         DictionarySnippetService,
         LocalDictionarySnippetsRepository,
     )
+    from history_store import HistoryStore, HistoryStoreError
     from provider_registry import PROVIDER_REGISTRY
     from provider_http import CancellationToken
     from provider_types import (
@@ -44,6 +45,9 @@ try:
     from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
     from microphone_controls import (
         MicrophoneSelectionState,
+        RecordingBoundaryPolicy,
+        RecordingBoundaryReason,
+        RecordingControls,
         SoundDeviceMicrophoneInventory,
     )
     from repositories import (
@@ -61,6 +65,8 @@ try:
         RecordingSnapshot,
         SelectionDisposition,
         SelectionTarget,
+        WorkflowKind,
+        WorkflowPhase,
         WorkflowService,
     )
     from windows_clipboard import WindowsClipboardAdapter
@@ -69,11 +75,15 @@ except ImportError:  # PyInstaller analyzes this file as a standalone entry poin
         DictionarySnippetService,
         LocalDictionarySnippetsRepository,
     )
+    from ...history_store import HistoryStore, HistoryStoreError  # type: ignore[no-redef]
     from ...provider_registry import PROVIDER_REGISTRY  # type: ignore[no-redef]
     from ...provider_http import CancellationToken  # type: ignore[no-redef]
     from ...local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID  # type: ignore[no-redef]
     from ...microphone_controls import (  # type: ignore[no-redef]
         MicrophoneSelectionState,
+        RecordingBoundaryPolicy,
+        RecordingBoundaryReason,
+        RecordingControls,
         SoundDeviceMicrophoneInventory,
     )
     from ...provider_types import (  # type: ignore[no-redef]
@@ -101,6 +111,8 @@ except ImportError:  # PyInstaller analyzes this file as a standalone entry poin
         RecordingSnapshot,
         SelectionDisposition,
         SelectionTarget,
+        WorkflowKind,
+        WorkflowPhase,
         WorkflowService,
     )
     from ...windows_clipboard import WindowsClipboardAdapter  # type: ignore[no-redef]
@@ -600,15 +612,11 @@ class QtRecorder:
         if not selected_id:
             return "default"
         if self.microphone_inventory_source is None:
-            raise MicrophoneUnavailableError(
-                "The configured microphone is unavailable"
-            )
+            raise MicrophoneUnavailableError("The configured microphone is unavailable")
         inventory = self.microphone_inventory_source.snapshot()
         selection = inventory.resolve(selected_id)
         if not selection.can_record:
-            raise MicrophoneUnavailableError(
-                "The configured microphone is unavailable"
-            )
+            raise MicrophoneUnavailableError("The configured microphone is unavailable")
         if selection.state is not MicrophoneSelectionState.SELECTED:
             return "default"
         device = selection.device
@@ -692,8 +700,15 @@ class QtRecorder:
 class QtRecordingSession(RecordingSessionGateway):
     """Own one temporary recording until the provider has its snapshot."""
 
-    def __init__(self, recorder: QtRecorder) -> None:
+    def __init__(
+        self,
+        recorder: QtRecorder,
+        config: QtWorkflowConfig | None = None,
+    ) -> None:
         self.recorder = recorder
+        self.config = (
+            config if config is not None else getattr(recorder, "config", None)
+        )
         descriptor, raw_path = tempfile.mkstemp(
             prefix="clarifyvoice-recording-",
             suffix=".wav",
@@ -711,6 +726,89 @@ class QtRecordingSession(RecordingSessionGateway):
         self._started = False
         self._terminal = False
         self._error: Exception | None = None
+        self._boundary_callback: Callable[[Any], None] | None = None
+        self._boundary_stop = threading.Event()
+        self._boundary_worker: threading.Thread | None = None
+        self._boundary_policy: RecordingBoundaryPolicy | None = None
+        self.boundary_reason = RecordingBoundaryReason.NONE
+
+    def set_boundary_callback(self, callback: Callable[[Any], None] | None) -> None:
+        """Register the workflow stop callback for a hard duration boundary."""
+
+        if callback is not None and not callable(callback):
+            raise TypeError("recording boundary callback must be callable")
+        with self._lock:
+            self._boundary_callback = callback
+
+    def _recording_controls(self) -> RecordingControls:
+        config = self.config
+        if config is None:
+            return RecordingControls.defaults()
+        current = config.current()
+        controls = getattr(current, "recording_controls", None)
+        if isinstance(controls, RecordingControls):
+            return controls
+        return RecordingControls.from_mapping(controls)
+
+    def _prepare_boundary_policy(self) -> RecordingControls:
+        controls = self._recording_controls()
+        policy = RecordingBoundaryPolicy(controls)
+        policy.start(time.monotonic())
+        with self._lock:
+            self._boundary_policy = policy
+            self.boundary_reason = RecordingBoundaryReason.NONE
+        return controls
+
+    def _start_boundary_monitor(self, controls: RecordingControls) -> None:
+        with self._lock:
+            policy = self._boundary_policy
+            callback = self._boundary_callback
+        if policy is None:
+            return
+        if controls.max_duration_seconds is None or callback is None:
+            return
+
+        self._boundary_stop.clear()
+
+        def monitor() -> None:
+            try:
+                while not self._boundary_stop.wait(0.1):
+                    decision = policy.observe_duration(time.monotonic())
+                    if not decision.should_stop:
+                        continue
+                    with self._lock:
+                        callback = self._boundary_callback
+                        self.boundary_reason = decision.reason
+                    if not self._boundary_stop.is_set() and callback is not None:
+                        callback(decision.reason)
+                    return
+            except Exception:
+                # The recording lifecycle remains authoritative if a clock or
+                # policy callback is invalidated during shutdown.
+                return
+            finally:
+                with self._lock:
+                    if self._boundary_worker is threading.current_thread():
+                        self._boundary_worker = None
+
+        worker = threading.Thread(
+            target=monitor,
+            name="ClarifyVoiceQmlRecordingBoundary",
+            daemon=True,
+        )
+        with self._lock:
+            self._boundary_worker = worker
+        worker.start()
+
+    def _stop_boundary_monitor(self) -> None:
+        self._boundary_stop.set()
+        with self._lock:
+            worker = self._boundary_worker
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=1.0)
+        with self._lock:
+            if self._boundary_worker is worker:
+                self._boundary_worker = None
 
     def attach_worker(self, worker: Any) -> None:
         with self._lock:
@@ -726,9 +824,11 @@ class QtRecordingSession(RecordingSessionGateway):
 
     def start(self) -> None:
         try:
+            controls = self._prepare_boundary_policy()
             self.recorder.start(self.audio_path, self.cancel_event)
             with self._lock:
                 self._started = True
+            self._start_boundary_monitor(controls)
         except Exception as error:
             with self._lock:
                 self._error = error
@@ -743,6 +843,7 @@ class QtRecordingSession(RecordingSessionGateway):
 
     def stop(self) -> RecordingSnapshot:
         self.wait_until_started()
+        self._stop_boundary_monitor()
         self.recorder.stop()
         time.sleep(0.3)
         try:
@@ -762,11 +863,13 @@ class QtRecordingSession(RecordingSessionGateway):
     def cancel(self) -> None:
         self.cancel_event.set()
         self.provider_cancel_token.cancel()
+        self._stop_boundary_monitor()
         self.recorder.cancel()
         self._cleanup()
         self._mark_terminal()
 
     def complete(self) -> bool:
+        self._stop_boundary_monitor()
         self._cleanup()
         self._mark_terminal()
         return True
@@ -774,6 +877,7 @@ class QtRecordingSession(RecordingSessionGateway):
     def fail(self, error: Exception) -> None:
         with self._lock:
             self._error = error
+        self._stop_boundary_monitor()
         self._cleanup()
         self._mark_terminal()
 
@@ -788,8 +892,15 @@ class QtRecordingSession(RecordingSessionGateway):
 
 
 class QtRecordingAudioGateway:
-    def __init__(self, recorder: QtRecorder) -> None:
+    def __init__(
+        self,
+        recorder: QtRecorder,
+        config: QtWorkflowConfig | None = None,
+    ) -> None:
         self.recorder = recorder
+        self.config = (
+            config if config is not None else getattr(recorder, "config", None)
+        )
         self._active: QtRecordingSession | None = None
         self._lock = threading.Lock()
 
@@ -800,7 +911,7 @@ class QtRecordingAudioGateway:
         with self._lock:
             if self._active is not None and not self._active.shutdown_complete.is_set():
                 return None
-            self._active = QtRecordingSession(self.recorder)
+            self._active = QtRecordingSession(self.recorder, self.config)
             return self._active
 
     def wait_for_shutdown(self, timeout_seconds: float) -> bool:
@@ -916,6 +1027,88 @@ class QtStatisticsGateway:
         )
 
 
+def _history_path_for_repositories(repositories: ApplicationRepositories) -> Path:
+    explicit_path = getattr(repositories, "history_path", None)
+    if explicit_path is not None:
+        return Path(explicit_path)
+    config_path = getattr(repositories.config, "path", None)
+    if config_path is None:
+        raise QtRuntimeError(
+            "The QML history store requires a repository history_path or config path"
+        )
+    return Path(config_path).with_name("history.json")
+
+
+class QtHistoryRecorder:
+    """Persist opted-in terminal workflow states outside the Qt UI thread."""
+
+    def __init__(
+        self,
+        repositories: ApplicationRepositories,
+        scheduler: QtWorkflowScheduler,
+    ) -> None:
+        self.repositories = repositories
+        self.scheduler = scheduler
+        current = repositories.config.load()
+        self.store = HistoryStore(
+            _history_path_for_repositories(repositories),
+            enabled=bool(current.history_enabled),
+            retention_days=current.history_retention_days,
+        )
+
+    def on_state(self, state: Any) -> None:
+        if state.phase not in (WorkflowPhase.COMPLETED, WorkflowPhase.FAILED):
+            return
+        self.scheduler.run_in_background(lambda: self.record_state(state))
+
+    def record_state(self, state: Any) -> None:
+        try:
+            current = self.repositories.config.load()
+            self.store.enabled = bool(current.history_enabled)
+            self.store.retention_days = current.history_retention_days
+            kind = (
+                state.kind.value
+                if isinstance(state.kind, WorkflowKind)
+                else "transcription"
+            )
+            provider = str(state.provider_id or "unknown")
+            model = str(state.model or "unknown")
+            if state.phase is WorkflowPhase.COMPLETED:
+                if state.kind is WorkflowKind.DICTATION:
+                    raw_text = (
+                        state.source_text
+                        if state.source_text is not None
+                        else state.result_text
+                    )
+                    refined_text = state.refined_text
+                else:
+                    raw_text = state.source_text
+                    refined_text = state.result_text
+                self.store.add(
+                    raw_text=raw_text,
+                    refined_text=refined_text,
+                    workflow=kind,
+                    provider=provider,
+                    model=model,
+                    refinement_provider=getattr(state, "refinement_provider_id", None),
+                    refinement_model=getattr(state, "refinement_model", None),
+                    status="success",
+                )
+            else:
+                self.store.add(
+                    workflow=kind,
+                    provider=provider,
+                    model=model,
+                    refinement_provider=getattr(state, "refinement_provider_id", None),
+                    refinement_model=getattr(state, "refinement_model", None),
+                    status="error",
+                    error=state.status_key or "error",
+                )
+        except (HistoryStoreError, ValueError):
+            # History is explicitly opt-in and must never change workflow UX.
+            return
+
+
 class QtWorkflowRuntime:
     """Own the concrete QML workflow and its application shutdown boundary."""
 
@@ -927,12 +1120,14 @@ class QtWorkflowRuntime:
         clipboard: QtClipboardGateway,
         *,
         provider_registry=PROVIDER_REGISTRY,
+        history_recorder: QtHistoryRecorder | None = None,
     ) -> None:
         self.workflow_service = workflow_service
         self.recording_audio = recording_audio
         self.scheduler = scheduler
         self.clipboard = clipboard
         self.provider_registry = provider_registry
+        self.history_recorder = history_recorder
         self._shutdown = False
 
     def copy_result(self, text: str) -> SelectionDisposition:
@@ -973,8 +1168,9 @@ def create_real_workflow_runtime(
             Path(active.config.path).parent / "dictionary.json"
         )
     )
-    recording_audio = QtRecordingAudioGateway(QtRecorder(config))
+    recording_audio = QtRecordingAudioGateway(QtRecorder(config), config)
     clipboard = QtClipboardGateway()
+    history_recorder = QtHistoryRecorder(active, scheduler)
     service = WorkflowService(
         QtProviderGateway(config, dictionary_service),
         recording_audio,
@@ -983,7 +1179,14 @@ def create_real_workflow_runtime(
         QtStatisticsGateway(active),
         scheduler,
     )
-    return QtWorkflowRuntime(service, recording_audio, scheduler, clipboard)
+    service.subscribe(history_recorder.on_state)
+    return QtWorkflowRuntime(
+        service,
+        recording_audio,
+        scheduler,
+        clipboard,
+        history_recorder=history_recorder,
+    )
 
 
 __all__ = [
@@ -996,6 +1199,7 @@ __all__ = [
     "QtWorkflowRuntime",
     "QtClipboardGateway",
     "QtStatisticsGateway",
+    "QtHistoryRecorder",
     "create_runtime_repositories",
     "create_real_workflow_runtime",
 ]

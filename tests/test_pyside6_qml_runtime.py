@@ -27,6 +27,7 @@ if PYSIDE6_AVAILABLE:
         QtProviderGateway,
         QtRecorder,
         QtRecordingSession,
+        QtHistoryRecorder,
         QtWorkflowRuntime,
         QtWorkflowConfig,
         QtWorkflowScheduler,
@@ -157,12 +158,14 @@ class QtRecordingSessionTests(unittest.TestCase):
         selected = MicrophoneDevice(
             stable_id="selected",
             name="USB microphone",
+            input_channels=1,
             is_default=False,
             backend_index=4,
         )
         default = MicrophoneDevice(
             stable_id="default",
             name="System microphone",
+            input_channels=1,
             is_default=True,
             backend_index=1,
         )
@@ -210,18 +213,21 @@ class QtRecordingSessionTests(unittest.TestCase):
         selected = MicrophoneDevice(
             stable_id="selected",
             name=prefix + "-a",
+            input_channels=1,
             is_default=False,
             backend_index=4,
         )
         colliding = MicrophoneDevice(
             stable_id="colliding",
             name=prefix + "-b",
+            input_channels=1,
             is_default=False,
             backend_index=5,
         )
         default = MicrophoneDevice(
             stable_id="default",
             name="System microphone",
+            input_channels=1,
             is_default=True,
             backend_index=1,
         )
@@ -247,9 +253,63 @@ class QtRecordingSessionTests(unittest.TestCase):
             with self.assertRaises(MicrophoneUnavailableError):
                 recorder.start(Path("capture.wav"), threading.Event())
 
+    def test_recording_session_stops_at_configured_max_duration(self):
+        from microphone_controls import RecordingBoundaryReason, RecordingControls
+
+        controls = RecordingControls(max_duration_seconds=0.02, warning_seconds=0)
+        config = SimpleNamespace(
+            current=lambda: SimpleNamespace(recording_controls=controls)
+        )
+        boundary = threading.Event()
+        reasons = []
+
+        class Recorder:
+            def __init__(self):
+                self.config = config
+
+            def start(self, path, _cancel_event):
+                path.write_bytes(b"RIFF" + b"0" * 1196)
+
+            def stop(self):
+                return None
+
+            def cancel(self):
+                return None
+
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "spikes.pyside6.qml_runtime._data_directory",
+                return_value=Path(directory),
+            ),
+        ):
+            session = QtRecordingSession(Recorder())
+            session.set_boundary_callback(
+                lambda reason: (reasons.append(reason), boundary.set())
+            )
+            session.start()
+            self.assertTrue(boundary.wait(timeout=1))
+            self.assertEqual(reasons, [RecordingBoundaryReason.MAX_DURATION])
+            session.cancel()
+
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
 class QmlWorkflowBridgeTests(unittest.TestCase):
+    def test_bridge_hydrates_saved_mode_and_language(self):
+        service = DeterministicWorkflowService()
+        service._config = SimpleNamespace(
+            current=lambda: SimpleNamespace(
+                ui=SimpleNamespace(mode="transcription", language="pt")
+            )
+        )
+        bridge = QmlWorkflowBridge(service)
+
+        self.assertEqual(bridge.mode, "transcription")
+        self.assertEqual(bridge.language, "pt")
+        bridge.startRecording()
+        self.assertEqual(service.commands[0].mode, "transcription")
+        self.assertEqual(service.commands[0].language, "pt")
+
     def test_bridge_maps_real_state_and_finishes_terminal_result(self):
         service = DeterministicWorkflowService()
         copied = []
@@ -411,9 +471,7 @@ class QtProviderGatewayTests(unittest.TestCase):
                 return RewriteResult("refined transcript", provider, request.model)
 
         workflows = WorkflowConfig(
-            transcription=WorkflowRoute(
-                provider_id="openai", model_id="whisper"
-            ),
+            transcription=WorkflowRoute(provider_id="openai", model_id="whisper"),
             refinement=WorkflowRoute(
                 provider_id="gemini",
                 model_id="editor",
@@ -459,8 +517,12 @@ class QtProviderGatewayTests(unittest.TestCase):
         transcription_request = registry.transcription_requests[0][1]
         self.assertIn("editing, not summarization", transcription_request.instruction)
         self.assertIn("NEVER answer it", transcription_request.instruction)
-        self.assertIn("Output MUST be in Brazilian Portuguese.", transcription_request.instruction)
-        self.assertIn("Output MUST be in Brazilian Portuguese.", transcription_request.prompt)
+        self.assertIn(
+            "Output MUST be in Brazilian Portuguese.", transcription_request.instruction
+        )
+        self.assertIn(
+            "Output MUST be in Brazilian Portuguese.", transcription_request.prompt
+        )
         self.assertEqual(dictionary.applied.dictionary_context, "")
         self.assertEqual(
             transcription_request.dictionary_context,
@@ -655,6 +717,60 @@ class QmlRuntimeFactoryTests(unittest.TestCase):
         self.assertIsInstance(runtime.workflow_service, WorkflowService)
         self.assertNotIn("app", sys.modules)
 
+    def test_factory_constructs_opt_in_history_recorder(self):
+        with TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"CLARIFYVOICE_DATA_DIR": directory}):
+                runtime = create_real_workflow_runtime(object())
+
+        self.assertIsInstance(runtime.history_recorder, QtHistoryRecorder)
+        self.assertFalse(runtime.history_recorder.store.enabled)
+
+
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
+class QtHistoryRecorderTests(unittest.TestCase):
+    def test_terminal_dictation_preserves_raw_and_refined_history(self):
+        from workflows import WorkflowKind
+
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+
+            class ConfigRepository:
+                path = config_path
+
+                def load(self):
+                    return AppConfig(
+                        ui=AppConfig().ui,
+                        history_enabled=True,
+                        history_retention_days=30,
+                    )
+
+            repositories = SimpleNamespace(config=ConfigRepository())
+
+            class Scheduler:
+                def run_in_background(self, callback):
+                    callback()
+
+            recorder = QtHistoryRecorder(repositories, Scheduler())
+            recorder.on_state(
+                WorkflowState(
+                    phase=WorkflowPhase.COMPLETED,
+                    kind=WorkflowKind.DICTATION,
+                    source_text="raw transcript",
+                    result_text="refined transcript",
+                    refined_text="refined transcript",
+                    provider_id="gemini",
+                    model="audio-model",
+                    refinement_provider_id="openai",
+                    refinement_model="text-model",
+                )
+            )
+
+            records = recorder.store.list_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].raw_text, "raw transcript")
+            self.assertEqual(records[0].refined_text, "refined transcript")
+            self.assertEqual(records[0].refinement_provider, "openai")
+
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
 class QtClipboardGatewayTests(unittest.TestCase):
@@ -663,14 +779,13 @@ class QtClipboardGatewayTests(unittest.TestCase):
 
         gateway = QtClipboardGateway()
         gateway.adapter.is_windows = False
-        failure = subprocess.CalledProcessError(
-            1, ["xclip", "-selection", "clipboard"]
-        )
-        with patch(
-            "spikes.pyside6.qml_runtime.platform.system", return_value="Linux"
-        ), patch(
-            "spikes.pyside6.qml_runtime.subprocess.run", side_effect=failure
-        ) as run:
+        failure = subprocess.CalledProcessError(1, ["xclip", "-selection", "clipboard"])
+        with (
+            patch("spikes.pyside6.qml_runtime.platform.system", return_value="Linux"),
+            patch(
+                "spikes.pyside6.qml_runtime.subprocess.run", side_effect=failure
+            ) as run,
+        ):
             with self.assertRaises(subprocess.CalledProcessError):
                 gateway.write_dictation_result(None, "Visible result")
 
