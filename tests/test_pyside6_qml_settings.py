@@ -45,6 +45,47 @@ def _repositories(directory: str) -> ApplicationRepositories:
     )
 
 
+class _RegistryKey:
+    def __init__(self, registry):
+        self.registry = registry
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+class _Registry:
+    HKEY_CURRENT_USER = 1
+    REG_SZ = 1
+
+    def __init__(self):
+        self.values = {}
+        self.types = {}
+
+    def CreateKey(self, *_args):
+        return _RegistryKey(self)
+
+    def OpenKey(self, *_args):
+        return _RegistryKey(self)
+
+    def SetValueEx(self, _key, name, _reserved, kind, value):
+        self.values[name] = value
+        self.types[name] = kind
+
+    def QueryValueEx(self, _key, name):
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        return self.values[name], self.types.get(name, self.REG_SZ)
+
+    def DeleteValue(self, _key, name):
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        del self.values[name]
+        self.types.pop(name, None)
+
+
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
 class QmlSettingsControllerTests(unittest.TestCase):
     @classmethod
@@ -241,6 +282,69 @@ class QmlSettingsControllerTests(unittest.TestCase):
                 (Path(directory) / "config.json").read_text(encoding="utf-8")
             )
             self.assertEqual(payload["workflows"]["rewrite"]["provider_id"], "groq")
+
+    def test_windows_save_applies_autostart_run_key_and_config(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            registry = _Registry()
+            controller = QmlSettingsController(repositories, registry=registry)
+            controller.setAutostart(True)
+            with (
+                patch("spikes.pyside6.qml_settings._is_windows", return_value=True),
+                patch.object(
+                    repositories.config,
+                    "apply",
+                    wraps=repositories.config.apply,
+                ) as apply,
+            ):
+                self.assertTrue(controller.save())
+
+            apply.assert_called_once()
+            self.assertIn("qml_app.py", registry.values["ClarifyVoice"])
+            self.assertNotIn("--hidden", registry.values["ClarifyVoice"])
+            self.assertTrue(repositories.config.load().startup.autostart)
+            self.assertFalse(controller.dirty)
+
+    def test_windows_save_removes_autostart_when_disabled(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            registry = _Registry()
+            registry.values["ClarifyVoice"] = r"C:\Legacy\ClarifyVoice.exe --old"
+            controller = QmlSettingsController(repositories, registry=registry)
+
+            with patch("spikes.pyside6.qml_settings._is_windows", return_value=True):
+                self.assertTrue(controller.save())
+
+            self.assertNotIn("ClarifyVoice", registry.values)
+            self.assertNotIn("ClarifyVoice", registry.types)
+            self.assertFalse(repositories.config.load().startup.autostart)
+
+    def test_windows_save_restores_registry_when_apply_fails(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            registry = _Registry()
+            registry.values["ClarifyVoice"] = r"C:\Legacy\ClarifyVoice.exe --old"
+            registry.types["ClarifyVoice"] = 42
+            controller = QmlSettingsController(repositories, registry=registry)
+            controller.setAutostart(True)
+            with (
+                patch("spikes.pyside6.qml_settings._is_windows", return_value=True),
+                patch.object(
+                    repositories.config,
+                    "apply",
+                    side_effect=OSError("simulated config write failure"),
+                ),
+            ):
+                self.assertFalse(controller.save())
+
+            self.assertEqual(
+                registry.values["ClarifyVoice"],
+                r"C:\Legacy\ClarifyVoice.exe --old",
+            )
+            self.assertEqual(registry.types["ClarifyVoice"], 42)
+            self.assertFalse(repositories.config.load().startup.autostart)
+            self.assertTrue(controller.dirty)
+            self.assertIn("simulated config write failure", controller.lastError)
 
     def test_failed_atomic_apply_keeps_the_draft_and_does_not_write(self):
         with TemporaryDirectory() as directory:

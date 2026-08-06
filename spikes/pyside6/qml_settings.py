@@ -3,13 +3,17 @@
 The controller keeps an :class:`repositories.AppConfig` draft and exposes
 only typed scalar properties and workflow-route mappings to QML.  Persistence
 is delegated to ``ApplicationRepositories.config.apply`` so route validation
-and atomic storage remain owned by the existing repository boundary.
+and atomic storage remain owned by the existing repository boundary.  Windows
+autostart is handled by a small, local Run-key boundary.
 """
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, cast
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
@@ -30,13 +34,127 @@ from workflow_config import (
 )
 
 
+AUTOSTART_REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_VALUE_NAME = "ClarifyVoice"
+
+
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _registry_module(registry: Any | None = None) -> Any:
+    if registry is not None:
+        return registry
+    import winreg
+
+    return winreg
+
+
+def _autostart_command(executable: str | None = None) -> str:
+    executable = str(executable or sys.executable)
+    arguments = [executable]
+    if not getattr(sys, "frozen", False):
+        arguments.append(str(Path(__file__).with_name("qml_app.py").resolve()))
+    return subprocess.list2cmdline(arguments)
+
+
+def _set_autostart(enabled: bool, registry: Any | None = None) -> None:
+    """Create or remove the current user's QML startup entry."""
+
+    if not _is_windows():
+        return
+    registry = _registry_module(registry)
+    with registry.CreateKey(
+        registry.HKEY_CURRENT_USER,
+        AUTOSTART_REGISTRY_PATH,
+    ) as key:
+        if enabled:
+            registry.SetValueEx(
+                key,
+                AUTOSTART_VALUE_NAME,
+                0,
+                registry.REG_SZ,
+                _autostart_command(),
+            )
+        else:
+            try:
+                registry.DeleteValue(key, AUTOSTART_VALUE_NAME)
+            except FileNotFoundError:
+                pass
+
+
+def _autostart_registry_state(
+    registry: Any | None = None,
+) -> tuple[bool, Any | None, Any | None]:
+    """Capture the current Run value, including its Registry type."""
+
+    if not _is_windows():
+        return False, None, None
+    registry = _registry_module(registry)
+    try:
+        with registry.OpenKey(
+            registry.HKEY_CURRENT_USER,
+            AUTOSTART_REGISTRY_PATH,
+        ) as key:
+            value, kind = registry.QueryValueEx(key, AUTOSTART_VALUE_NAME)
+        return True, value, kind
+    except OSError:
+        return False, None, None
+
+
+def _restore_autostart_registry_state(
+    state: tuple[bool, Any | None, Any | None],
+    registry: Any | None = None,
+) -> None:
+    """Restore a captured Run value without changing its Registry type."""
+
+    if not _is_windows():
+        return
+    registry = _registry_module(registry)
+    exists, value, kind = state
+    with registry.CreateKey(
+        registry.HKEY_CURRENT_USER,
+        AUTOSTART_REGISTRY_PATH,
+    ) as key:
+        if exists:
+            registry.SetValueEx(key, AUTOSTART_VALUE_NAME, 0, kind, value)
+        else:
+            try:
+                registry.DeleteValue(key, AUTOSTART_VALUE_NAME)
+            except FileNotFoundError:
+                pass
+
+
+def _apply_config_with_autostart_transaction(
+    config: AppConfig,
+    repositories: ApplicationRepositories,
+    registry: Any | None = None,
+) -> AppConfig:
+    """Persist QML settings and the Windows Run entry as one operation."""
+
+    if not _is_windows():
+        return repositories.config.apply(config)
+
+    previous_registry_state = _autostart_registry_state(registry)
+    try:
+        _set_autostart(config.startup.autostart, registry)
+        return repositories.config.apply(config)
+    except Exception:
+        try:
+            _restore_autostart_registry_state(previous_registry_state, registry)
+        except OSError:
+            pass
+        raise
+
+
 class QmlSettingsController(QObject):
     """Expose the typed application configuration to Qt Quick.
 
     The object owns an editable draft only.  ``load`` replaces that draft
     from the configured repository, while ``save`` delegates the complete
-    ``AppConfig`` to the repository's atomic ``apply`` operation.  No UI
-    toolkit, legacy window, or compatibility runtime is involved here.
+    ``AppConfig`` to the repository's atomic ``apply`` operation.  No legacy
+    window or frontend is involved; Windows startup is handled by the local
+    Run-key transaction only when settings are saved.
     """
 
     configChanged = Signal()
@@ -51,10 +169,13 @@ class QmlSettingsController(QObject):
         self,
         repositories: ApplicationRepositories,
         parent: QObject | None = None,
+        *,
+        registry: Any | None = None,
     ) -> None:
         super().__init__(parent)
         self.repositories = repositories
         self._config_repository: ConfigRepository = repositories.config
+        self._autostart_registry = registry
         self._selected_scope = WorkflowScope.TRANSCRIPTION.value
         self._config = self._config_repository.load()
         self._dirty = False
@@ -355,7 +476,11 @@ class QmlSettingsController(QObject):
     @Slot(result=bool)
     def save(self) -> bool:
         try:
-            persisted_config = self._config_repository.apply(self._config)
+            persisted_config = _apply_config_with_autostart_transaction(
+                self._config,
+                self.repositories,
+                self._autostart_registry,
+            )
         except Exception as error:  # Validation/storage errors are user-facing.
             self._set_error(error)
             return False
