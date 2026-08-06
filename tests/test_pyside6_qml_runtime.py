@@ -15,6 +15,12 @@ from unittest.mock import patch
 
 try:
     from PySide6.QtCore import QCoreApplication
+except (ImportError, ModuleNotFoundError):
+    PYSIDE6_AVAILABLE = False
+else:
+    PYSIDE6_AVAILABLE = True
+
+if PYSIDE6_AVAILABLE:
     from spikes.pyside6.qml_bridge import QmlWorkflowBridge
     from spikes.pyside6.qml_runtime import (
         QtProviderGateway,
@@ -41,10 +47,6 @@ try:
         WorkflowService,
         WorkflowState,
     )
-
-    PYSIDE6_AVAILABLE = True
-except (ImportError, ModuleNotFoundError):
-    PYSIDE6_AVAILABLE = False
 
 
 class DeterministicWorkflowService:
