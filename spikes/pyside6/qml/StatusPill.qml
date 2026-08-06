@@ -19,7 +19,7 @@ Window {
     property string label: workflow.status
     property bool successVisible: false
 
-    // app.py keeps the compact success confirmation visible for 850 ms before
+    // The shell keeps the compact success confirmation visible for 850 ms before
     // returning to the main shell. The QML shell stays on the success surface
     // so its View button remains available, but this separate top-level pill
     // must not remain visible beside it indefinitely.

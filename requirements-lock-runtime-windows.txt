@@ -10,20 +10,27 @@ cffi==2.1.0
     # via sounddevice
 charset-normalizer==3.4.9
     # via requests
-customtkinter==6.0.0
-    # via -r requirements.txt
-darkdetect==0.8.0
-    # via customtkinter
 idna==3.18
     # via requests
-packaging==26.2
-    # via customtkinter
 pillow==12.3.0
     # via -r requirements.txt
 pycparser==3.0
     # via cffi
+pyside6==6.11.1
+    # via -r requirements.txt
+pyside6-addons==6.11.1
+    # via pyside6
+pyside6-essentials==6.11.1
+    # via
+    #   pyside6
+    #   pyside6-addons
 requests==2.34.2
     # via -r requirements.txt
+shiboken6==6.11.1
+    # via
+    #   pyside6
+    #   pyside6-addons
+    #   pyside6-essentials
 sounddevice==0.5.5
     # via -r requirements.txt
 urllib3==2.7.0

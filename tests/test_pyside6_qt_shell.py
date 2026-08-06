@@ -379,7 +379,7 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
         self.assertEqual(registrations[0][1], 123)
         self.assertTrue(registrations[0][3])
         self.assertIsInstance(registrations[0][2], HotkeySettings)
-        self.assertNotIn(HotkeyAction.VOICE_TRANSLATION, registrations[0][2].hotkeys)
+        self.assertIn(HotkeyAction.VOICE_TRANSLATION, registrations[0][2].hotkeys)
         self.assertEqual(len(target.installed), 1)
 
         target.installed[0].nativeEventFilter(b"windows_generic_MSG", object())
@@ -455,7 +455,7 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
         self.assertEqual(escape_unregistrations, [("fake-user32", 123)])
         self.assertFalse(backend.registered_ids)
 
-    def test_backend_does_not_register_unsupported_voice_translation_action(self):
+    def test_backend_registers_all_configured_workflow_actions(self):
         target = FakeNativeEventTarget()
         registration_settings = []
         unregistrations = []
@@ -483,21 +483,20 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
         self.assertEqual(len(registration_settings), 1)
         self.assertEqual(
             set(registration_settings[0].hotkeys),
-            {HotkeyAction.RECORDING, HotkeyAction.VISIBILITY},
+            {
+                HotkeyAction.RECORDING,
+                HotkeyAction.REWRITE,
+                HotkeyAction.TRANSLATION,
+                HotkeyAction.VOICE_TRANSLATION,
+                HotkeyAction.VISIBILITY,
+            },
         )
-        self.assertNotIn(HotkeyAction.REWRITE, registration_settings[0].hotkeys)
-        self.assertNotIn(HotkeyAction.TRANSLATION, registration_settings[0].hotkeys)
-        self.assertNotIn(
-            HotkeyAction.VOICE_TRANSLATION,
-            registration_settings[0].hotkeys,
-        )
-        for unsupported_action in (
+        for action in (
             HotkeyAction.REWRITE,
             HotkeyAction.TRANSLATION,
             HotkeyAction.VOICE_TRANSLATION,
         ):
-            with self.assertRaises(KeyError):
-                registration_settings[0].definition(unsupported_action)
+            self.assertIsNotNone(registration_settings[0].definition(action))
         self.assertEqual(backend.registered_ids, {0x5101, 0x5104})
 
         backend.stop()
@@ -791,10 +790,8 @@ class QtShellSourceTests(unittest.TestCase):
 
         source = MODULE.read_text(encoding="utf-8")
         self.assertIn("_UNSUPPORTED_SHELL_HOTKEY_ACTIONS", source)
-        self.assertIn("HotkeyAction.REWRITE", source)
-        self.assertIn("HotkeyAction.TRANSLATION", source)
         self.assertIn("voice", source.lower())
-        self.assertIn("translation in this slice", source.lower())
+        self.assertNotIn("translation in this slice", source.lower())
 
 
 if __name__ == "__main__":

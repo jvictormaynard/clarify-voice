@@ -210,6 +210,27 @@ class QtRecordingSessionTests(unittest.TestCase):
         )
         recorder.stop()
 
+    def test_recorder_resolves_sox_from_a_frozen_bundle(self):
+        from spikes.pyside6 import qml_runtime
+
+        with TemporaryDirectory() as directory:
+            bundle_root = Path(directory)
+            bundled_sox = bundle_root / "extra" / "sox-14.4.2" / "sox.exe"
+            bundled_sox.parent.mkdir(parents=True)
+            bundled_sox.write_bytes(b"sox")
+            with (
+                patch.object(
+                    qml_runtime.sys, "_MEIPASS", str(bundle_root), create=True
+                ),
+                patch.object(qml_runtime.sys, "frozen", True, create=True),
+                patch.object(qml_runtime.platform, "system", return_value="Windows"),
+                patch.object(qml_runtime, "_sounddevice", None),
+                patch.object(qml_runtime.shutil, "which", return_value=None),
+            ):
+                recorder = QtRecorder()
+
+        self.assertEqual(recorder.sox, str(bundled_sox))
+
     def test_recorder_rejects_waveaudio_prefix_collision(self):
         from microphone_controls import MicrophoneDevice, MicrophoneInventory
 
@@ -396,6 +417,43 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
         self.assertTrue(bridge.handleHotkey("voice_translation_hotkey"))
         handler.assert_called_once_with()
         self.assertEqual(service.commands, [])
+
+    def test_bridge_keeps_audio_import_exclusive_until_it_stops(self):
+        class SignalProxy:
+            def __init__(self):
+                self.callbacks = []
+
+            def connect(self, callback):
+                self.callbacks.append(callback)
+
+            def emit(self):
+                for callback in tuple(self.callbacks):
+                    callback()
+
+        class AudioBatch:
+            def __init__(self):
+                self.running = False
+                self.runningChanged = SignalProxy()
+
+        service = DeterministicWorkflowService()
+        audio_batch = AudioBatch()
+        bridge = QmlWorkflowBridge(
+            service,
+            audio_batch_controller=audio_batch,
+        )
+
+        bridge.openFiles()
+        self.assertEqual(bridge.surface, "files")
+        audio_batch.running = True
+        audio_batch.runningChanged.emit()
+        self.assertTrue(bridge.busy)
+        bridge.closeFiles()
+        self.assertEqual(bridge.surface, "files")
+
+        audio_batch.running = False
+        audio_batch.runningChanged.emit()
+        bridge.closeFiles()
+        self.assertEqual(bridge.surface, "idle")
 
     def test_bridge_exposes_translation_options_and_dispatches_picker_choices(self):
         service = DeterministicWorkflowService()
@@ -849,15 +907,12 @@ class QtClipboardGatewayTests(unittest.TestCase):
     def test_xclip_failure_is_reported_to_copy_bridge(self):
         from spikes.pyside6.qml_runtime import QtClipboardGateway
 
-        gateway = QtClipboardGateway()
-        gateway.adapter.is_windows = False
         failure = subprocess.CalledProcessError(1, ["xclip", "-selection", "clipboard"])
-        with (
-            patch("spikes.pyside6.qml_runtime.platform.system", return_value="Linux"),
-            patch(
-                "spikes.pyside6.qml_runtime.subprocess.run", side_effect=failure
-            ) as run,
-        ):
+        with patch(
+            "spikes.pyside6.qml_clipboard.subprocess.run", side_effect=failure
+        ) as run:
+            gateway = QtClipboardGateway()
+            gateway.adapter.is_windows = False
             with self.assertRaises(subprocess.CalledProcessError):
                 gateway.write_dictation_result(None, "Visible result")
 

@@ -146,7 +146,7 @@ class SecretStoreContractTests(unittest.TestCase):
             self.assertIsInstance(store, DpapiSecretStore)
             self.assertEqual(store.path, Path(directory) / "secrets.dpapi.json")
 
-    def test_packaged_cli_self_test_reports_only_safe_metadata(self):
+    def test_secret_store_cli_reports_only_safe_metadata(self):
         import app
 
         output = StringIO()
@@ -164,7 +164,7 @@ class SecretStoreContractTests(unittest.TestCase):
         self.assertTrue(payload["delete_verified"])
         self.assertNotIn("clarifyvoice-self-test", output.getvalue())
 
-    def test_packaged_cli_self_test_can_write_windowed_result_file(self):
+    def test_secret_store_cli_can_write_result_file(self):
         import app
 
         with tempfile.TemporaryDirectory() as directory:
@@ -186,7 +186,7 @@ class SecretStoreContractTests(unittest.TestCase):
             self.assertNotIn("clarifyvoice-self-test", result_file.read_text(
                 encoding="utf-8"))
 
-    def test_packaged_cli_self_test_succeeds_without_stdout(self):
+    def test_secret_store_cli_succeeds_without_stdout(self):
         import app
 
         original_stdout = app.sys.stdout

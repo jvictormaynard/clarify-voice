@@ -17,7 +17,7 @@ short aliases for maintainers working from WSL.
 git clone https://github.com/jvictormaynard/clarify-voice.git
 cd clarify-voice
 .\scripts\setup.ps1 -Dev
-.\.venv\Scripts\python.exe app.py
+.\.venv\Scripts\python.exe spikes\pyside6\qml_app.py
 ```
 
 The setup script creates `.venv` and installs runtime dependencies. `-Dev` also
@@ -72,14 +72,14 @@ Run the same core checks used in CI:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q app.py workflows.py repositories.py workflow_config.py workflow_settings.py voice_translation.py voice_translation_runtime.py dictionary_snippets.py dictionary_settings.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py audio_file_batch_ui.py history_store.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
+.\.venv\Scripts\python.exe -m compileall -q spikes\pyside6\qml_app.py spikes\pyside6\qml_bridge.py spikes\pyside6\qml_runtime.py spikes\pyside6\qml_settings.py spikes\pyside6\qml_audio_batch.py spikes\pyside6\qml_clipboard.py spikes\pyside6\qml_voice_translation.py spikes\pyside6\qt_shell.py workflows.py repositories.py workflow_config.py workflow_settings.py voice_translation.py voice_translation_runtime.py dictionary_snippets.py dictionary_settings.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py audio_file_batch_ui.py history_store.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
 ```
 
 From Linux or WSL with the dependencies installed:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q app.py workflows.py repositories.py workflow_config.py workflow_settings.py voice_translation.py voice_translation_runtime.py dictionary_snippets.py dictionary_settings.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py audio_file_batch_ui.py history_store.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
+python3 -m compileall -q spikes/pyside6/qml_app.py spikes/pyside6/qml_bridge.py spikes/pyside6/qml_runtime.py spikes/pyside6/qml_settings.py spikes/pyside6/qml_audio_batch.py spikes/pyside6/qml_clipboard.py spikes/pyside6/qml_voice_translation.py spikes/pyside6/qt_shell.py workflows.py repositories.py workflow_config.py workflow_settings.py voice_translation.py voice_translation_runtime.py dictionary_snippets.py dictionary_settings.py microphone_controls.py secret_store.py update_security.py version.py desktop_state.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py audio_file_batch_ui.py history_store.py scripts/create_release_manifest.py scripts/local_asr_harness.py tests
 ```
 
 Repository-specific tests live in `tests/test_repositories.py` and
@@ -296,16 +296,14 @@ packaged and may require Accessibility permission for simulated paste.
 Contributions that improve these platforms are welcome when they preserve the
 Windows path and include platform-specific validation.
 
-## Decision spikes
+## Qt Quick frontend
 
-The isolated [PySide6 decision spike](pyside6-decision.md) is not part of
-startup, runtime requirements, or production packaging. Run its Windows-only
-build, benchmark, and manual validation protocol from `spikes/pyside6/` before
-using its provisional recommendation. The package script records a locked
-runtime, exact artifact hashes, and tool versions; use the
-[`evidence-template.md`](../spikes/pyside6/evidence-template.md) to attach
-Windows CSVs, screenshots, and video without committing machine-specific
-artifacts.
+The production frontend is the PySide6/Qt Quick implementation under
+`spikes/pyside6/`. The directory name is retained for repository history, but
+`qml_app.py`, `qml_runtime.py`, `qml_bridge.py`, and the QML assets are the
+runtime used by `start.bat`, PyInstaller, CI, and releases. The old widget
+comparison scripts remain only as historical measurement tooling and are not
+part of startup or packaging.
 
 ## Release process
 

@@ -17,6 +17,7 @@ try:
         _connect_shutdown,
         _branding_icon_path,
         _load_branding_icon,
+        _qml_root,
         _register_qml_context,
         _hidden_start_requested,
         _show_translation_picker_if_needed,
@@ -43,6 +44,8 @@ class PySide6QmlFrontendTests(unittest.TestCase):
 
         qml_files = sorted(QML_ROOT.rglob("*.qml"))
         self.assertTrue(qml_files, "the QML frontend must contain QML assets")
+        self.assertTrue((QML_ROOT / "AppButton.qml").is_file())
+        self.assertFalse((QML_ROOT / "PilotButton.qml").exists())
         main_files = [path for path in qml_files if path.name.casefold() == "main.qml"]
         self.assertEqual(main_files, [QML_ROOT / "Main.qml"])
         qml_source = "\n".join(path.read_text(encoding="utf-8") for path in qml_files)
@@ -63,6 +66,9 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("readonly property int windowHeight: 48", theme_source)
 
         main_source = (QML_ROOT / "Main.qml").read_text(encoding="utf-8")
+        self.assertIn('objectName: "clarifyVoiceMainWindow"', main_source)
+        self.assertIn('objectName: "appPages"', main_source)
+        self.assertNotIn("PilotButton", main_source)
         status_pill_source = (QML_ROOT / "StatusPill.qml").read_text(encoding="utf-8")
         self.assertIn('color: "transparent"', main_source)
         self.assertIn(
@@ -265,6 +271,21 @@ class PySide6QmlFrontendTests(unittest.TestCase):
             self.assertIsInstance(frozen_qicon, QIcon)
             self.assertFalse(frozen_qicon.isNull())
 
+    @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+    def test_qml_assets_load_from_source_and_frozen_bundle_paths(self):
+        self.assertEqual(_qml_root(), QML_ROOT)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            bundle_root = Path(temporary_directory)
+            frozen_qml = bundle_root / "qml"
+            frozen_qml.mkdir()
+            shutil.copyfile(QML_ROOT / "Main.qml", frozen_qml / "Main.qml")
+            with (
+                patch.object(qml_app.sys, "_MEIPASS", str(bundle_root), create=True),
+                patch.object(qml_app.sys, "frozen", True, create=True),
+            ):
+                self.assertEqual(_qml_root(), frozen_qml)
+
     def test_qml_bridge_hydrates_persisted_preferences(self):
         bridge_source = (SPIKE / "qml_bridge.py").read_text(encoding="utf-8")
         self.assertIn("app_config: Any | None = None", bridge_source)
@@ -314,7 +335,7 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("self.repositories = repositories", runtime_source)
         self.assertIn("repositories=active", runtime_source)
         self.assertIn("PROVIDER_REGISTRY", runtime_source)
-        self.assertIn("WindowsClipboardAdapter", runtime_source)
+        self.assertIn("QmlClipboardGateway", runtime_source)
         self.assertNotIn("import app", runtime_source)
         self.assertNotIn("to_legacy_mapping", runtime_source)
 

@@ -1,34 +1,42 @@
-# PySide6 UI decision record (issue #24)
+# PySide6 UI adoption record (issue #24)
 
-Status: **provisional defer**. This spike answers whether PySide6 is worth a measured follow-up; it does not authorize a production rewrite.
+Status: **adopted for production**. The Qt Quick/QML frontend now replaces the
+old CustomTkinter runtime. This record remains the home for Windows
+performance, accessibility, DPI, and packaging evidence that must continue to
+be collected after the migration.
 
-Execution status for this PR: **no Windows measurements, screenshots/video, or
-manual UI validation were performed**. The Linux worktree only validates the
-fake model, source isolation, Python compilation, and PowerShell syntax. Every
-Windows evidence row below remains pending; the recommendation is deliberately
-scoped to that limitation.
+Execution status for this migration: the real QML entrypoint, provider/audio/
+clipboard adapters, settings, hotkeys, tray, voice translation, and file
+import are wired into the production start and packaging paths. The Linux
+worktree validates the source runtime and QML load; final Windows executable
+and manual UI acceptance still run in CI and on the target Windows machine.
 
-## Scope and isolation
+## Scope and integration
 
-The prototype lives in `spikes/pyside6/`. It has its own optional dependency
-file, a Qt-free fake workflow model, and two standalone visual entry points:
-the original Qt Widgets comparison surface (`app.py`) and the declarative Qt
-Quick/QML pilot (`qml_app.py`). Production startup, provider/audio/clipboard
-logic, `requirements.txt`, and the normal PyInstaller scripts are unchanged.
-The spike's package script writes only below `spikes/pyside6/`; the QML pilot
-is currently source-run visual evidence and is not yet included in the
-comparable package artifacts.
+The production entrypoint is `spikes/pyside6/qml_app.py`. It composes the real
+`WorkflowService`, typed provider registry, recording session, native clipboard
+transaction, persisted settings, system tray, global hotkeys, voice translation,
+and audio-file import controllers. `requirements.txt`, `start.bat`, the
+PyInstaller scripts, CI, and release workflows all select PySide6 and this
+entrypoint.
 
-The fake workflow covers the idle surface, recording/processing/success pill, result panel, settings page, tray show/quit, frameless dragging, rounded corners, transparency, always-on-top, and no-activate overlay flags. It deliberately does not duplicate provider or recording logic and does not register a global hotkey.
+The old widget implementation and the Electron prototype are not imported,
+started, or included in the production executable. The remaining comparison
+scripts under `spikes/pyside6/` are historical measurement tooling only.
+
+The original fake workflow remains useful for deterministic visual checks. The
+production QML surface now uses the real runtime and additionally covers
+settings persistence, native hotkeys, file import, translation flows, and the
+provider/audio/clipboard boundaries.
 
 ## Evidence protocol
 
-The comparable-build protocol is `spikes/pyside6/package.ps1`; it first refuses
-a dirty or untracked repository tree, then installs the locked Windows runtime
-requirements plus the optional spike dependency into one disposable
-environment. It packages the current CustomTkinter entry point and the PySide6
-prototype as separate one-file windowed executables with identical PyInstaller
-switches. The script writes `build-environment.txt` and
+The comparable-build protocol in `spikes/pyside6/package.ps1` is historical
+evidence tooling. It can still compare the old widget build with the Qt
+implementation, but it is not the production build path. Production packaging
+uses `scripts/build.ps1`, which packages the QML entrypoint and its QML assets
+as the single `ClarifyVoice.exe` artifact. The scripts write
+`build-environment.txt` and
 `artifacts-manifest.json` containing the commit, dependency-file hashes, tool
 versions, package sizes, and SHA-256 hashes. This makes a later CSV row
 auditable against the exact binaries that were measured. The manifest is
@@ -64,9 +72,10 @@ far as a practical Windows spike can, but it does not prove a perfectly cold
 OS/filesystem/antivirus state. No single run or target order is sufficient for
 a framework comparison.
 
-The following evidence must be captured on one Windows 10/11 machine before adopting anything:
+The following evidence remains a post-migration acceptance backlog for one
+Windows 10/11 machine:
 
-| Evidence | CustomTkinter | PySide6 | Status |
+| Evidence | Baseline reference | Qt Quick production | Status |
 | --- | --- | --- | --- |
 | Cold-start observation (ms) | pending independent rounds | pending independent rounds | blocked in this Linux worktree |
 | Idle working set/private memory | pending Windows run | pending Windows run | blocked in this Linux worktree |
@@ -94,13 +103,13 @@ become source artifacts.
 | Accessibility | Qt exposes accessible names, keyboard focus, tab order, and platform bridges. | Every production surface needs an accessibility audit; the spike only establishes a starting point. |
 | DPI and window behavior | Qt 6 has built-in high-DPI handling and native window flags. | Windows no-activate, layered transparency, taskbar/tray, and global hotkey coexistence are OS-level behaviors that mocks cannot establish. |
 | Packaging | PyInstaller can package a Python Qt app using the same broad delivery shape. | Qt DLL/plugin payloads increase package size and redistribution obligations; startup time must be measured. |
-| Migration | A UI-only seam could preserve providers, workflow controller, and clipboard safety. | The current `app.py` owns UI and core responsibilities; extracting stable interfaces is a multi-stage project with rollback risk. |
+| Migration | Qt Quick keeps provider, workflow, recording, and clipboard responsibilities behind typed runtime seams. | Windows focus, DPI, accessibility, and packaging acceptance still need real-device evidence. |
 
 ## Licensing and redistribution
 
 Qt for Python documents PySide6 as available under LGPLv3/GPLv3 and the Qt commercial license: <https://doc.qt.io/qtforpython-6/>. The detailed component notices are maintained by Qt for Python at <https://doc.qt.io/qtforpython-6/licenses.html>. Qt's commercial-use guidance warns commercial users not to use the community `pip install pyside6` distribution as a substitute for a commercial Qt license: <https://doc.qt.io/qtforpython-6.10/commercial/index.html>.
 
-If PySide6 were adopted, release engineering would need to:
+Production release engineering must:
 
 - choose and record the applicable Community LGPLv3/GPLv3 or commercial path before shipping;
 - ship the required Qt DLLs/plugins and the corresponding license/third-party notices;
@@ -108,7 +117,8 @@ If PySide6 were adopted, release engineering would need to:
 - audit PyInstaller output and every Qt add-on for its own license and notice requirements; and
 - keep the production MIT license and Qt notices clearly separate.
 
-This is a release gate, not legal advice. No Qt binary is included by this PR.
+This is a release gate, not legal advice. The Windows package now includes the
+PySide6 runtime selected by the locked dependency set.
 
 Before any production adoption, record a component-level license inventory for
 the exact PySide6/Qt wheels and plugins selected by the package manifest. The
@@ -117,75 +127,21 @@ LGPLv3/GPLv3 path or a commercial Qt agreement, include the applicable notices,
 and document how users can replace/relink the LGPL-covered components. The
 MIT-licensed ClarifyVoice code remains independent of those obligations.
 
-## Migration and rollback outline
+## Migration result and remaining acceptance
 
-The existing `WorkflowService`, `ProviderGateway`, `RecordingSessionGateway`,
-`ClipboardGateway`, `WorkflowConfig`, and `StatisticsGateway` protocols are the
-preferred compatibility seams. The UI adapter should consume state and issue
-commands through those boundaries rather than importing provider, recording,
-or clipboard implementations directly.
+The migration is deliberately direct: there is no runtime feature flag, dual
+frontend selection, rollback implementation, or compatibility path in the
+production startup. `start.bat`, `start.sh`, PyInstaller, CI, and release all
+select the QML entrypoint. The frontend consumes typed workflow/runtime
+boundaries instead of importing the old UI.
 
-The planning estimate below is deliberately a range, not a commitment. It
-assumes one engineer familiar with the codebase and excludes Windows lab
-queueing, legal review, and any new product requirements:
+Remaining work is validation, not a second implementation:
 
-| Stage | Estimate | Exit evidence |
-| --- | --- | --- |
-| Stabilize/extract UI-facing protocols | 3–5 engineer-days | existing Tk path passes full suite; no provider behavior change |
-| Port settings/result pilot behind a flag | 2–3 engineer-days | side-by-side Windows screenshots and focus/accessibility checks |
-| Port overlay, tray, DPI, and hotkey integration | 3–5 engineer-days | manual matrix passes on supported Windows builds |
-| Packaging, notices, and release plumbing | 2–3 engineer-days | artifact manifest, license inventory, clean install/upgrade check |
-| Soak, rollback rehearsal, and two-release observation | 2–4 engineer-days | no critical regressions; rollback toggle verified |
+- run the packaged executable on Windows 10/11 at 100%, 125%, and 150% DPI;
+- verify focus-safe paste, global hotkeys, tray activation, audio recording,
+  file import, translation, and settings persistence on the target device;
+- record cold-start, memory, thread-count, and package-size evidence; and
+- complete the PySide6/Qt license and notices inventory for the exact release.
 
-Expected total: **12–20 engineer-days**, with a separate review buffer for
-Windows-specific defects. This estimate does not justify starting the
-migration; it makes the cost of an eventual adoption explicit.
-
-Migration stages:
-
-1. Extract provider/audio/clipboard/workflow protocols from `app.py` behind
-   tests, without changing the existing Tk implementation.
-2. Port one non-critical settings/result surface behind a feature flag and
-   compare Windows evidence.
-3. Port the overlay and tray, then manually validate focus, hotkeys, DPI, and
-   accessibility on supported Windows versions.
-4. Keep the Tk path as the rollback implementation until two release cycles of
-   equivalent evidence pass.
-5. Remove the flag and legacy path only after a separately approved migration
-   issue.
-
-Rollback triggers are a failed focus/no-activate or hotkey check, a critical
-accessibility regression, an unrecoverable packaging/license constraint, or a
-resource regression beyond the decision budgets below. Rollback is deleting
-the feature flag and returning to the unchanged CustomTkinter entry point; no
-provider data or user configuration format should depend on the Qt surface.
-
-## Decision gate
-
-The current decision is **defer**, not adopt. Once the evidence sheet is
-complete, use this gate:
-
-| Gate | Adopt only if | Reject if |
-| --- | --- | --- |
-| Functional behavior | every required manual row passes at 100%, 125%, and 150% DPI, including focus/no-activate, tray, and production hotkeys | any critical row fails or remains untestable |
-| Cold start | PySide6 median is no more than 10% slower than CustomTkinter | more than 10% slower without a documented UX/maintenance benefit |
-| Idle resources | working set and private memory are no more than 15% above CustomTkinter | either exceeds 15% without a compensating benefit |
-| Package/operations | package size is no more than 25% larger, and notices/relink path are release-ready | Qt payload or licensing path cannot be shipped and supported |
-| Maintainability | pilot preserves the listed protocol seams and has a rehearsed rollback | production UI would need provider/recording duplication |
-
-These are planning budgets, not measurements. A result inside the budgets is
-necessary but not sufficient: visual, accessibility, hotkey, and licensing
-evidence still controls the decision. If the gate cannot be completed on the
-supported Windows matrix, keep the issue open rather than treating missing
-evidence as a pass.
-
-## Recommendation
-
-**Defer adoption pending Windows evidence.** The prototype shows that the
-requested surfaces can be expressed without rewriting the core, and Qt has
-plausible benefits for accessibility, DPI, and animation. It is not a clear
-improvement until the comparable package/memory/startup measurements and
-manual focus/hotkey/tray/DPI checks are recorded. If the completed evidence
-does not satisfy the decision gate, reject a production migration and close
-issue #24 with the attached record. No production migration is part of this
-PR.
+These checks are release acceptance criteria. They do not restore or preserve
+the removed frontend as an alternate runtime.

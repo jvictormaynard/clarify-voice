@@ -55,9 +55,41 @@ def _load_branding_icon() -> QIcon:
     return icon
 
 
+def _qml_root() -> Path:
+    """Resolve the QML asset directory for source and frozen launches."""
+
+    roots: list[Path] = []
+    bundled_root = getattr(sys, "_MEIPASS", None)
+    if bundled_root:
+        roots.append(Path(bundled_root))
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve().parent)
+    roots.extend(
+        (Path(__file__).resolve().parent, _REPOSITORY_ROOT / "spikes" / "pyside6")
+    )
+
+    seen: set[Path] = set()
+    for root in roots:
+        resolved_root = root.resolve()
+        if resolved_root in seen:
+            continue
+        seen.add(resolved_root)
+        candidate = resolved_root / "qml"
+        if (candidate / "Main.qml").is_file():
+            return candidate
+
+    raise FileNotFoundError(
+        f"ClarifyVoice QML assets were not found under: {', '.join(map(str, roots))}"
+    )
+
+
 try:
+    from .qml_audio_batch import QmlAudioFileImportController  # noqa: E402
     from .qml_bridge import QmlWorkflowBridge  # noqa: E402
     from .qml_settings import QmlSettingsController  # noqa: E402
+    from .qml_voice_translation import (  # noqa: E402
+        create_qml_voice_translation_controller,
+    )
     from .qml_runtime import (  # noqa: E402
         QtRuntimeError,
         QtWorkflowScheduler,
@@ -65,8 +97,12 @@ try:
     )
     from .qt_shell import QtShell, WindowsGlobalHotkeyBackend  # noqa: E402
 except ImportError:  # PyInstaller analyzes this file as a standalone entry point.
+    from qml_audio_batch import QmlAudioFileImportController  # noqa: E402
     from qml_bridge import QmlWorkflowBridge  # noqa: E402
     from qml_settings import QmlSettingsController  # noqa: E402
+    from qml_voice_translation import (  # noqa: E402
+        create_qml_voice_translation_controller,
+    )
     from qml_runtime import (  # noqa: E402
         QtRuntimeError,
         QtWorkflowScheduler,
@@ -114,12 +150,22 @@ def _start_shell_if_available(shell) -> ShellStartResult:
     )
 
 
-def _register_qml_context(engine, workflow, settings) -> None:
-    """Expose the two real Qt-facing controllers before QML is loaded."""
+def _register_qml_context(
+    engine,
+    workflow,
+    settings,
+    voice_translation=None,
+    audio_batch=None,
+) -> None:
+    """Expose the real Qt-facing controllers before QML is loaded."""
 
     context = engine.rootContext()
     context.setContextProperty("workflow", workflow)
     context.setContextProperty("settings", settings)
+    if voice_translation is not None:
+        context.setContextProperty("voiceTranslation", voice_translation)
+    if audio_batch is not None:
+        context.setContextProperty("audioBatch", audio_batch)
 
 
 def _connect_preference_sync(bridge, settings) -> None:
@@ -189,9 +235,19 @@ def _sync_recording_escape_hotkey(bridge, hotkeys) -> None:
         hotkeys.set_recording_active(bridge.surface == "recording")
 
 
-def _connect_shutdown(app, shell, runtime) -> None:
+def _connect_shutdown(
+    app,
+    shell,
+    runtime,
+    voice_translation=None,
+    audio_batch=None,
+) -> None:
     """Stop shell-owned native resources before the workflow runtime."""
 
+    if voice_translation is not None:
+        app.aboutToQuit.connect(voice_translation.cancel)
+    if audio_batch is not None:
+        app.aboutToQuit.connect(audio_batch.cancel)
     app.aboutToQuit.connect(shell.stop)
     app.aboutToQuit.connect(runtime.shutdown)
 
@@ -231,19 +287,58 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     loaded_config = repositories.config.load()
+    voice_translation = create_qml_voice_translation_controller(
+        repositories.config.load,
+        runtime.recording_audio,
+        runtime.clipboard,
+        scheduler,
+        parent=app,
+    )
+    audio_batch = QmlAudioFileImportController(
+        runtime.audio_batch_service,
+        selection_factory=runtime.audio_file_selection,
+        scheduler=scheduler,
+        parent=app,
+    )
+
+    def toggle_voice_translation() -> bool:
+        """Toggle the dedicated voice route from the global hotkey."""
+
+        if workflow_service.state.phase.value != "ready":
+            return False
+        if voice_translation.active:
+            return (
+                voice_translation.stop()
+                if voice_translation.phase == "recording"
+                else voice_translation.cancel()
+            )
+        target = runtime.clipboard.capture_target()
+        if target is None:
+            return False
+        return voice_translation.startForTarget(target)
+
     bridge = QmlWorkflowBridge(
         workflow_service,
         app_config=loaded_config,
         dispatch_runner=scheduler.run_dispatch,
         copy_runner=runtime.copy_result,
+        voice_translation_handler=toggle_voice_translation,
+        voice_translation_controller=voice_translation,
+        audio_batch_controller=audio_batch,
         parent=app,
     )
     settings = QmlSettingsController(repositories, parent=app)
     _connect_preference_sync(bridge, settings)
     engine = QQmlApplicationEngine()
-    _register_qml_context(engine, bridge, settings)
+    _register_qml_context(
+        engine,
+        bridge,
+        settings,
+        voice_translation,
+        audio_batch,
+    )
 
-    qml_root = Path(__file__).with_name("qml")
+    qml_root = _qml_root()
     engine.addImportPath(str(qml_root))
     engine.load(QUrl.fromLocalFile(str(qml_root / "Main.qml")))
     if not engine.rootObjects():
@@ -276,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     bridge.surfaceChanged.connect(
         lambda: _show_translation_picker_if_needed(bridge, shell)
     )
-    _connect_shutdown(app, shell, runtime)
+    _connect_shutdown(app, shell, runtime, voice_translation, audio_batch)
 
     shell_result = _start_shell_if_available(shell)
     if shell_result is ShellStartResult.SECONDARY_INSTANCE:

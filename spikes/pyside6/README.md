@@ -1,13 +1,14 @@
 # Qt Quick frontend
 
-This directory contains the Qt Quick/QML frontend entrypoint for ClarifyVoice.
-The QML process uses the real `WorkflowService` and does not construct the
-CustomTkinter `App` or show a Tk window. Provider, recording, clipboard,
-configuration, statistics, and Qt scheduling are composed by the UI-free
-`qml_runtime.py` module.
+This directory contains the production Qt Quick/QML frontend for ClarifyVoice.
+The QML process uses the real `WorkflowService` and does not construct the old
+widget frontend or show a Tk window. Provider, recording, clipboard,
+configuration, statistics, voice translation, file import, and Qt scheduling
+are composed by the UI-free runtime/controller modules.
 
-The old widget spike remains only as historical benchmark material in this
-directory. It is not imported by the QML entrypoint.
+The old widget implementation remains only as historical benchmark material in
+this directory. It is not imported, started, or packaged by the production
+entrypoint.
 
 ## Run the frontend on Windows
 
@@ -20,12 +21,13 @@ spikes\pyside6\.venv\Scripts\python.exe -m pip install -r spikes\pyside6\require
 spikes\pyside6\.venv\Scripts\python.exe -m spikes.pyside6.qml_app
 ```
 
-The QML frontend exercises real idle, recording, processing, success, and
-result states. Runtime, provider, microphone, and local-ASR failures surface
-as actionable workflow errors; there is no fake-runtime flag or fallback path.
-The local button starts/stops dictation. Global hotkeys, settings persistence,
-file import, and translation remain later extraction steps and are not
-silently claimed by this entrypoint.
+The QML frontend exercises the real idle, recording, processing, success,
+result, settings, translation, voice-translation, and file-import states.
+Runtime, provider, microphone, and local-ASR failures surface as actionable
+workflow errors; there is no fake-runtime flag or alternate frontend path.
+The local controls and Windows shell use the same production recording,
+hotkey, tray, settings, clipboard, and provider boundaries as the packaged
+executable.
 
 ## Comparable builds and measurements
 

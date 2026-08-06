@@ -46,13 +46,10 @@ ACTIVATION_EVENT_NAME = r"Local\ClarifyVoice.ShowExisting.v1"
 _WINDOWS_NATIVE_EVENT_TYPES = frozenset(
     {"windows_generic_MSG", "windows_dispatcher_MSG"}
 )
-_UNSUPPORTED_SHELL_HOTKEY_ACTIONS = frozenset(
-    {
-        HotkeyAction.REWRITE,
-        HotkeyAction.TRANSLATION,
-        HotkeyAction.VOICE_TRANSLATION,
-    }
-)
+# Every persisted action now has a real QML bridge handler.  Keep the filter as
+# an explicit composition seam for future actions, but do not silently drop
+# existing rewrite, translation, or voice-translation shortcuts.
+_UNSUPPORTED_SHELL_HOTKEY_ACTIONS = frozenset()
 
 
 class QtShellError(RuntimeError):
@@ -146,13 +143,7 @@ class _WindowsSingleInstanceActivationApi:
 def _supported_shell_hotkey_settings(
     settings: HotkeySettings | Mapping[str, Any] | None,
 ) -> HotkeySettings:
-    """Filter actions with no real QML runtime handler before registration.
-
-    ``QtClipboardGateway`` cannot capture a selection yet, and the QML runtime
-    does not implement voice translation in this slice.  These actions are
-    deliberately unsupported here, so the Windows shell must not reserve
-    their bindings until their boundaries exist.
-    """
+    """Filter only actions without a real QML runtime handler."""
 
     configured = (
         settings

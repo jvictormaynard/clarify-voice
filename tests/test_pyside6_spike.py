@@ -219,13 +219,10 @@ class PySide6SpikeTests(unittest.TestCase):
             self.assertTrue((SPIKE / relative).is_file(), relative)
         decision = (ROOT / "docs" / "pyside6-decision.md").read_text(encoding="utf-8")
         for phrase in (
-            "provisional defer",
+            "adopted for production",
             "Licensing and redistribution",
-            "Migration and rollback outline",
-            "Recommendation",
+            "Migration result and remaining acceptance",
             "pending independent rounds",
-            "12–20 engineer-days",
-            "Decision gate",
             "artifacts-manifest.json",
         ):
             self.assertIn(phrase, decision)
@@ -253,10 +250,10 @@ class PySide6SpikeTests(unittest.TestCase):
         self.assertIn("status --porcelain --untracked-files=all", package)
         self.assertIn("Refusing to package a dirty working tree", package)
 
-    def test_production_requirements_do_not_gain_optional_qt_dependency(self):
+    def test_production_requirements_use_qt_runtime_without_customtkinter(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-        self.assertNotIn("PySide6", requirements)
-        self.assertNotIn("pyside6", requirements)
+        self.assertIn("PySide6>=6.8,<7", requirements)
+        self.assertNotIn("customtkinter", requirements.casefold())
 
 
 if __name__ == "__main__":

@@ -47,10 +47,26 @@ jobs:
         run: python scripts/check_runtime_lock.py
 
       - name: Run Ruff lint
-        run: ruff check desktop_state.py windows_hotkeys.py scripts/dependency_audit.py tests/test_repository.py
+        run: >-
+          ruff check desktop_state.py windows_hotkeys.py scripts/dependency_audit.py
+          spikes/pyside6/qml_app.py spikes/pyside6/qml_bridge.py spikes/pyside6/qml_runtime.py
+          spikes/pyside6/qml_settings.py spikes/pyside6/qml_audio_batch.py
+          spikes/pyside6/qml_clipboard.py spikes/pyside6/qml_voice_translation.py
+          spikes/pyside6/qt_shell.py tests/test_repository.py tests/test_pyside6_qml.py
+          tests/test_pyside6_qml_runtime.py tests/test_pyside6_qml_audio_batch.py
+          tests/test_pyside6_qml_clipboard.py tests/test_pyside6_qml_voice_translation.py
+          tests/test_pyside6_qt_shell.py
 
       - name: Run Ruff format check
-        run: ruff format --check scripts/dependency_audit.py tests/test_dependency_lock.py tests/test_repository.py
+        run: >-
+          ruff format --check scripts/dependency_audit.py tests/test_dependency_lock.py
+          tests/test_repository.py spikes/pyside6/qml_app.py spikes/pyside6/qml_bridge.py
+          spikes/pyside6/qml_runtime.py spikes/pyside6/qml_settings.py
+          spikes/pyside6/qml_audio_batch.py spikes/pyside6/qml_clipboard.py
+          spikes/pyside6/qml_voice_translation.py spikes/pyside6/qt_shell.py
+          tests/test_pyside6_qml.py tests/test_pyside6_qml_runtime.py
+          tests/test_pyside6_qml_audio_batch.py tests/test_pyside6_qml_clipboard.py
+          tests/test_pyside6_qml_voice_translation.py tests/test_pyside6_qt_shell.py
 
       - name: Run targeted type checks
         run: mypy desktop_state.py windows_hotkeys.py
@@ -62,7 +78,18 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Compile Python sources
-        run: python -m compileall -q app.py desktop_state.py version.py windows_hotkeys.py audio_file_batch.py audio_file_batch_ui.py history_store.py workflow_settings.py tests scripts
+        run: >-
+          python -m compileall -q spikes/pyside6/qml_app.py spikes/pyside6/qml_bridge.py
+          spikes/pyside6/qml_runtime.py spikes/pyside6/qml_settings.py
+          spikes/pyside6/qml_audio_batch.py spikes/pyside6/qml_clipboard.py
+          spikes/pyside6/qml_voice_translation.py spikes/pyside6/qt_shell.py
+          desktop_state.py version.py windows_hotkeys.py audio_file_batch.py
+          audio_file_batch_ui.py history_store.py workflow_settings.py tests scripts
+
+      - name: Validate QML assets
+        run: >-
+          python -c "from pathlib import Path; qml = Path('spikes/pyside6/qml');
+          assert qml.is_dir() and (qml / 'Main.qml').is_file() and any(qml.glob('*.qml'))"
 
       - name: Build portable executable
         shell: pwsh

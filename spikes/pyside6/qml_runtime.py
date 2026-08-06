@@ -11,6 +11,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -25,6 +26,13 @@ except (ImportError, OSError):
     _sounddevice = None
 
 try:
+    from audio_file_batch import (
+        AudioFileBatchService,
+        DictionaryAwareAudioTranscriptionGateway,
+        FileTranscriptionSelection,
+        RegistryAudioTranscriptionGateway,
+        SoxAudioConverter,
+    )
     from dictionary_snippets import (
         DictionarySnippetService,
         LocalDictionarySnippetsRepository,
@@ -58,19 +66,23 @@ try:
     )
     from workflow_config import WorkflowScope
     from workflows import (
-        ClipboardGateway,
         MicrophoneUnavailableError,
         NoUsableAudioError,
         RecordingSessionGateway,
         RecordingSnapshot,
         SelectionDisposition,
-        SelectionTarget,
         WorkflowKind,
         WorkflowPhase,
         WorkflowService,
     )
-    from windows_clipboard import WindowsClipboardAdapter
 except ImportError:  # PyInstaller analyzes this file as a standalone entry point.
+    from ...audio_file_batch import (  # type: ignore[no-redef]
+        AudioFileBatchService,
+        DictionaryAwareAudioTranscriptionGateway,
+        FileTranscriptionSelection,
+        RegistryAudioTranscriptionGateway,
+        SoxAudioConverter,
+    )
     from ...dictionary_snippets import (  # type: ignore[no-redef]
         DictionarySnippetService,
         LocalDictionarySnippetsRepository,
@@ -104,18 +116,20 @@ except ImportError:  # PyInstaller analyzes this file as a standalone entry poin
     )
     from ...workflow_config import WorkflowScope  # type: ignore[no-redef]
     from ...workflows import (  # type: ignore[no-redef]
-        ClipboardGateway,
         MicrophoneUnavailableError,
         NoUsableAudioError,
         RecordingSessionGateway,
         RecordingSnapshot,
         SelectionDisposition,
-        SelectionTarget,
         WorkflowKind,
         WorkflowPhase,
         WorkflowService,
     )
-    from ...windows_clipboard import WindowsClipboardAdapter  # type: ignore[no-redef]
+
+try:
+    from .qml_clipboard import QmlClipboardGateway
+except ImportError:  # PyInstaller analyzes this module as top-level source.
+    from qml_clipboard import QmlClipboardGateway
 
 
 FAITHFUL_REWRITE_INSTRUCTION = (
@@ -588,14 +602,23 @@ class QtRecorder:
         config: QtWorkflowConfig | None = None,
         microphone_inventory_source: Any | None = None,
     ) -> None:
-        root = Path(__file__).resolve().parents[2]
-        bundled = (
-            root
-            / "extra"
-            / "sox-14.4.2"
-            / ("sox.exe" if platform.system() == "Windows" else "sox")
+        roots: list[Path] = []
+        bundled_root = getattr(sys, "_MEIPASS", None)
+        if bundled_root:
+            roots.append(Path(bundled_root))
+        if getattr(sys, "frozen", False):
+            roots.append(Path(sys.executable).resolve().parent)
+        roots.append(Path(__file__).resolve().parents[2])
+        sox_name = "sox.exe" if platform.system() == "Windows" else "sox"
+        bundled = next(
+            (
+                root / "extra" / "sox-14.4.2" / sox_name
+                for root in roots
+                if (root / "extra" / "sox-14.4.2" / sox_name).is_file()
+            ),
+            None,
         )
-        self.sox = str(bundled if bundled.is_file() else shutil.which("sox") or "")
+        self.sox = str(bundled or shutil.which("sox") or "")
         self.config = config
         self.microphone_inventory_source = microphone_inventory_source
         if self.microphone_inventory_source is None and _sounddevice is not None:
@@ -924,50 +947,8 @@ class QtRecordingAudioGateway:
         return active.shutdown_complete.wait(timeout=max(0.0, float(timeout_seconds)))
 
 
-class QtClipboardGateway(ClipboardGateway):
-    """Copy results without taking focus from the QML shell."""
-
-    def __init__(self) -> None:
-        self.adapter = WindowsClipboardAdapter()
-
-    def capture_target(self) -> SelectionTarget | None:
-        return None
-
-    def is_target_current(self, target: SelectionTarget) -> bool:
-        return False
-
-    def capture_selection(self, target: SelectionTarget):
-        return None
-
-    def restore(self, capture) -> None:
-        return None
-
-    def apply_result(self, capture, result: str) -> SelectionDisposition:
-        self.write_dictation_result(None, result)
-        return SelectionDisposition.COPIED
-
-    def write_dictation_result(
-        self,
-        target: SelectionTarget | None,
-        text: str,
-    ) -> SelectionDisposition:
-        if self.adapter.is_windows:
-            self.adapter.write_text(text)
-        elif platform.system() == "Darwin":
-            subprocess.run(["pbcopy"], input=text.encode(), check=True)
-        else:
-            subprocess.run(
-                ["xclip", "-selection", "clipboard"],
-                input=text.encode(),
-                check=True,
-            )
-        return SelectionDisposition.COPIED
-
-    def activate(self, target: SelectionTarget) -> None:
-        return None
-
-    def alt_pressed(self) -> bool:
-        return False
+class QtClipboardGateway(QmlClipboardGateway):
+    """Runtime-named facade over the concrete QML clipboard transaction."""
 
 
 class QtStatisticsGateway:
@@ -1122,6 +1103,7 @@ class QtWorkflowRuntime:
         repositories: ApplicationRepositories | None = None,
         provider_registry=PROVIDER_REGISTRY,
         history_recorder: QtHistoryRecorder | None = None,
+        audio_batch_service: AudioFileBatchService | None = None,
     ) -> None:
         self.workflow_service = workflow_service
         self.recording_audio = recording_audio
@@ -1130,7 +1112,65 @@ class QtWorkflowRuntime:
         self.repositories = repositories
         self.provider_registry = provider_registry
         self.history_recorder = history_recorder
+        self.audio_batch_service = audio_batch_service
         self._shutdown = False
+
+    def audio_file_selection(
+        self,
+        provider_id: str = "",
+        model: str = "",
+        language: str = "",
+        mode: str = "transcription",
+    ) -> FileTranscriptionSelection:
+        """Build the current persisted transcription route for file imports."""
+
+        if self.repositories is None:
+            raise QtRuntimeError("The QML audio import route requires repositories")
+        current = self.repositories.config.load()
+        route = current.workflow(WorkflowScope.TRANSCRIPTION)
+        selected_provider = str(provider_id or route.provider_id).strip().lower()
+        selected_model = str(model or route.model_id).strip()
+        selected_language = (
+            str(language or getattr(current.ui, "language", "en") or "en")
+            .strip()
+            .lower()
+        )
+        selected_mode = str(mode or "transcription").strip().lower()
+        if selected_mode not in {"prompt", "transcription"}:
+            selected_mode = "transcription"
+        metadata = self.provider_registry.describe(selected_provider)
+        provider_config = getattr(current, selected_provider)
+        connection = ProviderConnection(
+            api_key=str(getattr(provider_config, "api_key", "") or "").strip(),
+            base_url=(
+                str(getattr(provider_config, "base_url", "") or "").strip()
+                or str(metadata.default_base_url or "").strip()
+            ),
+        )
+        custom_endpoint = (
+            route.custom_endpoint if selected_provider == route.provider_id else ""
+        )
+        connection = self.provider_registry.connection_for_route(
+            selected_provider,
+            connection,
+            custom_endpoint,
+        )
+        language_label = _language_display_name(selected_language)
+        instruction = (
+            TRANSCRIPTION_INSTRUCTION
+            if selected_mode == "transcription"
+            else PROMPT_INSTRUCTION
+        ).format(lang=language_label)
+        return FileTranscriptionSelection(
+            provider_id=selected_provider,
+            model=selected_model,
+            language=selected_language,
+            mode=selected_mode,
+            connection=connection,
+            instruction=instruction,
+            prompt=route.prompt or instruction,
+            temperature=0.0 if selected_mode == "transcription" else 0.1,
+        )
 
     def copy_result(self, text: str) -> SelectionDisposition:
         """Copy a visible QML result through the real clipboard adapter."""
@@ -1172,6 +1212,14 @@ def create_real_workflow_runtime(
     )
     recording_audio = QtRecordingAudioGateway(QtRecorder(config), config)
     clipboard = QtClipboardGateway()
+    audio_batch_gateway = DictionaryAwareAudioTranscriptionGateway(
+        RegistryAudioTranscriptionGateway(PROVIDER_REGISTRY),
+        dictionary_service,
+    )
+    audio_batch_service = AudioFileBatchService(
+        audio_batch_gateway,
+        SoxAudioConverter(),
+    )
     history_recorder = QtHistoryRecorder(active, scheduler)
     service = WorkflowService(
         QtProviderGateway(config, dictionary_service),
@@ -1189,6 +1237,7 @@ def create_real_workflow_runtime(
         clipboard,
         repositories=active,
         history_recorder=history_recorder,
+        audio_batch_service=audio_batch_service,
     )
 
 

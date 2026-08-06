@@ -1,18 +1,25 @@
 import QtQuick 6.5
 import QtQuick.Controls 6.5
+import QtQuick.Dialogs 6.5
 import QtQuick.Layouts 6.5
 import QtQuick.Window 6.5
 
 ApplicationWindow {
     id: root
-    objectName: "clarifyVoiceQmlPilot"
-    width: workflow.surface === "result" ? theme.resultWidth
+    objectName: "clarifyVoiceMainWindow"
+    width: workflow.surface === "result"
+           || workflow.surface === "voice_result"
+           || workflow.surface === "voice_error" ? theme.resultWidth
            : (workflow.surface === "settings"
+              || workflow.surface === "files"
               || workflow.surface === "translation_picker")
              ? theme.panelWidth : theme.windowWidth
     height: workflow.surface === "result"
+            || workflow.surface === "voice_result"
+            || workflow.surface === "voice_error"
             ? theme.resultHeight
             : (workflow.surface === "settings"
+               || workflow.surface === "files"
                || workflow.surface === "translation_picker")
               ? theme.panelHeight : theme.windowHeight
     minimumWidth: theme.windowWidth
@@ -27,7 +34,7 @@ ApplicationWindow {
 
     // The production shell uses the 380x48 card as its idle surface and a
     // separate 142x42 transient pill while recording/processing. Keep that
-    // relationship visible in the pilot without introducing a dashboard.
+    // relationship visible in the production shell without introducing a dashboard.
     StatusPill {
         id: pill
         theme: theme
@@ -65,6 +72,7 @@ ApplicationWindow {
         radius: workflow.surface === "idle"
                 || workflow.surface === "recording"
                 || workflow.surface === "processing"
+                || workflow.surface === "voice_processing"
                 || workflow.surface === "success"
             ? height / 2 : theme.panelRadius
         color: theme.card
@@ -95,12 +103,15 @@ ApplicationWindow {
 
         StackLayout {
             id: pages
-            objectName: "pilotPages"
+            objectName: "appPages"
             anchors.fill: parent
             currentIndex: workflow.surface === "result"
                           ? 1
                           : workflow.surface === "settings" ? 2
-                          : workflow.surface === "translation_picker" ? 3 : 0
+                          : workflow.surface === "files" ? 3
+                          : workflow.surface === "translation_picker" ? 4
+                          : (workflow.surface === "voice_result"
+                             || workflow.surface === "voice_error") ? 1 : 0
 
             Item {
                 id: homePage
@@ -141,6 +152,7 @@ ApplicationWindow {
                                 text: workflow.surface === "idle" ? "Ready"
                                       : workflow.surface === "recording" ? "Recording"
                                       : workflow.surface === "processing" ? "Processing…"
+                                      : workflow.surface === "voice_processing" ? workflow.status
                                       : workflow.surface === "error" ? workflow.status
                                       : "Done"
                                 color: theme.text
@@ -206,7 +218,7 @@ ApplicationWindow {
                         visible: workflow.surface === "idle"
                         spacing: 4
 
-                        PilotButton {
+                        AppButton {
                             id: languageButton
                             objectName: "languageButton"
                             readonly property var supportedLanguages: [
@@ -233,7 +245,7 @@ ApplicationWindow {
                             }
                         }
 
-                        PilotButton {
+                        AppButton {
                             id: modeButton
                             objectName: "modeButton"
                             text: homePage.promptMode ? "Prompt" : "Transcribe"
@@ -249,7 +261,7 @@ ApplicationWindow {
                             }
                         }
 
-                        PilotButton {
+                        AppButton {
                             id: fileButton
                             objectName: "fileButton"
                             text: "Files"
@@ -257,9 +269,10 @@ ApplicationWindow {
                             Layout.preferredWidth: 48
                             Layout.preferredHeight: 26
                             Accessible.name: "Import audio files"
+                            onClicked: workflow.openFiles()
                         }
 
-                        PilotButton {
+                        AppButton {
                             id: settingsButton
                             objectName: "settingsButton"
                             text: "☰"
@@ -271,7 +284,7 @@ ApplicationWindow {
                             onClicked: workflow.openSettings()
                         }
 
-                        PilotButton {
+                        AppButton {
                             id: closeButton
                             objectName: "closeButton"
                             text: "—"
@@ -289,7 +302,7 @@ ApplicationWindow {
                         visible: workflow.surface === "error"
                         spacing: 4
 
-                        PilotButton {
+                        AppButton {
                             text: "Dismiss"
                             theme: theme
                             Layout.preferredWidth: 60
@@ -301,7 +314,7 @@ ApplicationWindow {
                         Item { Layout.fillWidth: true }
                     }
 
-                    PilotButton {
+                    AppButton {
                         id: resultButton
                         objectName: "resultButton"
                         visible: workflow.surface === "success"
@@ -368,7 +381,7 @@ ApplicationWindow {
 
                         Item { Layout.fillWidth: true }
 
-                        PilotButton {
+                        AppButton {
                             text: "—"
                             theme: theme
                             quiet: true
@@ -407,7 +420,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         spacing: 4
 
-                        PilotButton {
+                        AppButton {
                             text: resultPage.copyLabel
                             theme: theme
                             Layout.preferredWidth: 52
@@ -416,7 +429,7 @@ ApplicationWindow {
                             onClicked: workflow.copyResult()
                         }
 
-                        PilotButton {
+                        AppButton {
                             text: "Dismiss"
                             theme: theme
                             quiet: true
@@ -452,7 +465,7 @@ ApplicationWindow {
 
                         Item { Layout.fillWidth: true }
 
-                        PilotButton {
+                        AppButton {
                             text: "—"
                             theme: theme
                             quiet: true
@@ -952,7 +965,7 @@ ApplicationWindow {
 
                         Item { Layout.fillWidth: true }
 
-                        PilotButton {
+                        AppButton {
                             text: "Load"
                             theme: theme
                             quiet: true
@@ -962,7 +975,7 @@ ApplicationWindow {
                             onClicked: settings.load()
                         }
 
-                        PilotButton {
+                        AppButton {
                             text: "Save"
                             theme: theme
                             enabled: settings.dirty
@@ -972,7 +985,7 @@ ApplicationWindow {
                             onClicked: settings.save()
                         }
 
-                        PilotButton {
+                        AppButton {
                             text: "Close"
                             theme: theme
                             quiet: true
@@ -980,6 +993,229 @@ ApplicationWindow {
                             Layout.preferredHeight: 26
                             Accessible.name: "Close settings"
                             onClicked: workflow.closeSettings()
+                        }
+                    }
+                }
+            }
+
+            Item {
+                id: filesPage
+                objectName: "filesPage"
+
+                FileDialog {
+                    id: audioFileDialog
+                    title: "Import audio files"
+                    fileMode: FileDialog.OpenFiles
+                    nameFilters: [
+                        "Audio files (*.wav *.aif *.aiff *.au *.flac *.oga *.ogg *.wv)",
+                        "All files (*)"
+                    ]
+                    onAccepted: {
+                        var paths = []
+                        for (var index = 0; index < selectedFiles.length; ++index)
+                            paths.push(selectedFiles[index].toLocalFile())
+                        audioBatch.setSelectedFiles(paths)
+                    }
+                }
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 6
+
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 1
+
+                            Label {
+                                text: "Import audio"
+                                color: theme.text
+                                font.pixelSize: 13
+                                font.weight: Font.Bold
+                            }
+
+                            Label {
+                                text: audioBatch.running
+                                      ? "Transcribing selected files"
+                                      : "Select local files to transcribe"
+                                color: theme.dim
+                                font.pixelSize: 10
+                            }
+                        }
+
+                        AppButton {
+                            text: "—"
+                            theme: theme
+                            quiet: true
+                            enabled: !audioBatch.running
+                            Layout.preferredWidth: 26
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Close audio import"
+                            onClicked: workflow.closeFiles()
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 1
+                        color: theme.border
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 5
+
+                        AppButton {
+                            text: "Choose files"
+                            theme: theme
+                            enabled: !audioBatch.running
+                            Layout.preferredWidth: 94
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Choose local audio files"
+                            onClicked: audioFileDialog.open()
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: audioBatch.selectedFiles.length === 0
+                                  ? "No files selected"
+                                  : audioBatch.selectedFiles.length + " file(s) selected"
+                            color: theme.secondaryText
+                            font.pixelSize: 10
+                            elide: Text.ElideRight
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        radius: 10
+                        color: theme.resultSurface
+                        border.color: theme.border
+                        border.width: 1
+                        clip: true
+
+                        ScrollView {
+                            anchors.fill: parent
+                            anchors.margins: 6
+                            clip: true
+
+                            Column {
+                                width: parent.width
+                                spacing: 4
+
+                                Repeater {
+                                    model: audioBatch.results
+
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        width: parent.width
+                                        height: 34
+                                        radius: 7
+                                        color: theme.control
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 8
+                                            anchors.rightMargin: 8
+                                            spacing: 6
+
+                                            Label {
+                                                Layout.fillWidth: true
+                                                text: modelData.name
+                                                color: theme.text
+                                                font.pixelSize: 10
+                                                elide: Text.ElideMiddle
+                                            }
+
+                                            Label {
+                                                text: modelData.status
+                                                color: modelData.status === "failed"
+                                                       ? theme.secondaryText : theme.dim
+                                                font.pixelSize: 9
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    visible: audioBatch.results.length === 0
+                                    width: parent.width
+                                    text: "Your selected files will appear here."
+                                    color: theme.dim
+                                    font.pixelSize: 10
+                                    horizontalAlignment: Text.AlignHCenter
+                                }
+                            }
+                        }
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        visible: audioBatch.lastError !== ""
+                        text: audioBatch.lastError
+                        color: theme.secondaryText
+                        font.pixelSize: 10
+                        wrapMode: Text.WordWrap
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 5
+
+                        AppButton {
+                            text: "Start"
+                            theme: theme
+                            enabled: !audioBatch.running
+                                     && audioBatch.selectedFiles.length > 0
+                            Layout.preferredWidth: 54
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Start audio transcription"
+                            onClicked: audioBatch.start(
+                                audioBatch.selectedFiles,
+                                "",
+                                "",
+                                workflow.language,
+                                workflow.mode
+                            )
+                        }
+
+                        AppButton {
+                            text: "Cancel"
+                            theme: theme
+                            quiet: true
+                            enabled: audioBatch.running
+                            Layout.preferredWidth: 58
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Cancel audio transcription"
+                            onClicked: audioBatch.cancel()
+                        }
+
+                        AppButton {
+                            text: "Retry"
+                            theme: theme
+                            quiet: true
+                            enabled: !audioBatch.running && audioBatch.canRetry
+                            Layout.preferredWidth: 52
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Retry failed audio files"
+                            onClicked: audioBatch.retry()
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        AppButton {
+                            text: "Close"
+                            theme: theme
+                            quiet: true
+                            enabled: !audioBatch.running
+                            Layout.preferredWidth: 56
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Close audio import"
+                            onClicked: workflow.closeFiles()
                         }
                     }
                 }
@@ -1015,7 +1251,7 @@ ApplicationWindow {
                             }
                         }
 
-                        PilotButton {
+                        AppButton {
                             text: "—"
                             theme: theme
                             quiet: true
@@ -1042,7 +1278,7 @@ ApplicationWindow {
                         Repeater {
                             model: workflow.translationOptions
 
-                            delegate: PilotButton {
+                            delegate: AppButton {
                                 required property var modelData
                                 text: modelData.label
                                 theme: root.visualTheme
@@ -1060,7 +1296,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Item { Layout.fillWidth: true }
 
-                        PilotButton {
+                        AppButton {
                             text: "Cancel"
                             theme: theme
                             quiet: true

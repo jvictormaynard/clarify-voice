@@ -38,7 +38,7 @@ git clone https://github.com/jvictormaynard/clarify-voice.git
 cd clarify-voice
 .\scripts\setup.ps1 -Dev
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe app.py
+.\.venv\Scripts\python.exe spikes\pyside6\qml_app.py
 ```
 
 Read [docs/development.md](docs/development.md) for builds, platform notes, and
@@ -63,7 +63,7 @@ Use clear commit messages. Conventional prefixes such as `fix:`, `feat:`,
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q app.py workflows.py repositories.py dictionary_snippets.py dictionary_settings.py secret_store.py desktop_state.py version.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py history_store.py scripts/local_asr_harness.py tests
+.\.venv\Scripts\python.exe -m compileall -q spikes\pyside6\qml_app.py spikes\pyside6\qml_bridge.py spikes\pyside6\qml_runtime.py spikes\pyside6\qml_settings.py spikes\pyside6\qml_audio_batch.py spikes\pyside6\qml_clipboard.py spikes\pyside6\qml_voice_translation.py spikes\pyside6\qt_shell.py workflows.py repositories.py dictionary_snippets.py dictionary_settings.py secret_store.py desktop_state.py version.py windows_hotkeys.py windows_clipboard.py provider_types.py provider_adapters.py provider_http.py provider_registry.py local_asr.py audio_file_batch.py audio_file_batch_ui.py history_store.py scripts/local_asr_harness.py tests
 ruff check desktop_state.py windows_hotkeys.py scripts/dependency_audit.py tests/test_repository.py
 mypy desktop_state.py windows_hotkeys.py
 python scripts/dependency_audit.py
@@ -108,7 +108,7 @@ stays respectful and evidence-based.
 
 When adding a new interface language:
 
-1. Add the language and flag mapping in `app.py`.
+1. Add the language and accessible labels in the QML surface under `spikes/pyside6/qml/`.
 2. Translate every key in the interface catalog.
 3. Add tests showing that the catalog is complete and the flag renders.
 4. Check controls at normal and scaled DPI because translated labels vary in

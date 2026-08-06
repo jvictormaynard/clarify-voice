@@ -26,27 +26,27 @@ Focus and selection safety check
     +---- changed ------> keep result in clipboard and show result panel
 ```
 
-All UI updates return to the Tk event loop. Provider calls and audio processing
-run outside that loop so the floating window remains responsive.
+The Qt/QML event loop owns the desktop surface. Provider calls, audio
+processing, and clipboard transactions run through scheduled workers so the
+floating window remains responsive.
 
 ## Current modules
 
-### `app.py`
+### `spikes/pyside6/qml_app.py`, `qml_bridge.py`, and `qml_runtime.py`
 
-The application entry point currently owns:
+These modules are the production desktop entrypoint and Qt integration layer:
 
-- desktop workflows and UI integration. Configuration and local statistics are
-  accessed through the repository boundary in `repositories.py` (the legacy
-  `APP_CONFIG` mapping remains as a compatibility adapter);
-- audio capture and conversion;
-- clipboard and focus safety, including serialized rich-format snapshots;
-- the CustomTkinter interface, tray, pill, and result surfaces;
-- the headless transcription commands.
+- `qml_app.py` creates `QApplication`, registers the real QML controllers,
+  starts the tray/single-instance shell, and wires shutdown ownership;
+- `qml_bridge.py` exposes typed workflow state, commands, settings, files, and
+  voice-translation surfaces to QML;
+- `qml_runtime.py` composes provider, recording, clipboard, statistics, and
+  audio-file gateways without importing the old widget frontend; and
+- `spikes/pyside6/qml/` contains the compact black-and-white theme, overlay,
+  settings, result, translation, and file-import surfaces.
 
-This is intentionally documented as a known concentration of responsibilities.
-New contributions should extract cohesive, testable units when doing so makes a
-change safer, but broad rewrites of stable UI code should be proposed in an
-issue before implementation.
+The old widget entrypoint is not used by `start.bat`, PyInstaller, CI, or
+release packaging. The Electron implementation remains historical only.
 
 ### Provider layer
 
@@ -63,8 +63,8 @@ Provider code is split into three UI-independent modules:
 
 The desktop asks the registry whether a provider supports multimodal audio,
 text generation, model discovery, or custom base URLs. It does not select a
-workflow by comparing provider names. Compatibility functions in `app.py`
-retain the existing public call surface while delegating to typed requests.
+workflow by comparing provider names. The QML runtime delegates operations to
+typed requests and keeps provider-specific behavior out of the UI.
 
 The HTTP dependency is intentionally the narrow `HttpClient` protocol with a
 single `request` method and guarded JSON decoding. Adapters preserve the
@@ -93,14 +93,13 @@ URLs at rest. Its
 `test_workflow_configuration` result is local and diagnostic-safe: it makes no
 provider request and does not persist prompt text.
 
-`workflow_settings.py` is the UI-free settings controller used by the desktop
+`workflow_settings.py` is the UI-free settings controller used by the QML
 surface. It keeps an immutable typed draft, changes one scope at a time, and
 delegates Apply, Reset, and Test to `LocalConfigRepository` so validation and
-atomic persistence remain outside Tk. The controller exposes only redacted
+atomic persistence remain outside the Qt event loop. The controller exposes only redacted
 effective-route summaries (provider, model, endpoint, and local/cloud state).
 `AppWorkflowProvider` resolves the route for each operation, including the
-rewrite and translation-specific prompt and endpoint, while `app.py` retains
-flat selectors only as a compatibility bridge for older settings files.
+rewrite and translation-specific prompt and endpoint.
 
 ### Dedicated voice translation (`voice_translation.py`, `voice_translation_runtime.py`)
 
@@ -172,7 +171,7 @@ release waits for a blocked external gateway so the UI cannot announce `READY`
 before its effect has returned.
 
 ```text
-Tk command dispatcher                 Tk state renderer
+Qt/QML command bridge                 QML state renderer
           |                                  ^
           v                                  |
    WorkflowService ---- immutable WorkflowState
@@ -196,18 +195,14 @@ from issue #18 through `RecordingAudioGateway`. A stop waits for startup to
 become terminal and returns an immutable `RecordingSnapshot` containing both
 the owned path and in-memory bytes. The session can therefore complete cleanup
 as soon as the snapshot exists without tying its temporary WAV to a slow
-provider request. The active Tk path uses the same stop/snapshot/terminal
-methods, so the scaffolding does not duplicate start-stop or cleanup policy.
-
-The runtime adapters in `app.py` connect the service to the typed provider
-registry, the real `RecordingSession`, and the focus-safe Windows clipboard.
-The hotkeys capture the original `SelectionTarget` before Tk can take focus and
-dispatch explicit workflow commands; legacy helpers remain only for narrow
-compatibility tests until their callers are retired.
+provider request. `qml_runtime.py` connects the service to the typed provider
+registry, the real recording session, and the focus-safe native clipboard.
+Windows hotkeys capture the original `SelectionTarget` before the QML window
+can take focus and dispatch explicit workflow commands.
 
 ### `audio_file_batch.py`
 
-Defines the UI-independent local-file import boundary staged for issue #54.
+Defines the UI-independent local-file import boundary from issue #54.
 `AudioFileBatchService` validates a finite local path list, exposes explicit
 provider/model/language selection, snapshots WAV inputs, and normalizes other
 allowlisted SoX formats into a private temporary WAV. `AudioBatchJob` submits
@@ -218,12 +213,11 @@ another file fails. `RegistryAudioTranscriptionGateway` reuses the typed
 
 Imported paths remain user-owned. The service never deletes an original,
 resolves a URL, or creates a persistent queue; conversion directories are
-removed in a bounded `TemporaryDirectory` scope. `audio_file_batch_ui.py`
-owns only the file-picker lifecycle and retry snapshot; `app.py` marshals
-service callbacks onto the Tk loop and builds the explicit local/cloud route
-selection. Standard Tk drag-and-drop is not bundled, so DnD and representative
-Windows format/offline acceptance remain follow-up evidence, not a claim of
-this source integration.
+removed in a bounded `TemporaryDirectory` scope. `qml_audio_batch.py` owns the
+QML file-picker lifecycle, retry snapshot, and scheduler handoff while
+`qml_runtime.py` builds the explicit local/cloud route selection. Standard
+drag-and-drop and representative Windows format/offline acceptance remain
+follow-up evidence, not a claim of this source integration.
 
 ### `microphone_controls.py`
 
@@ -261,9 +255,9 @@ this module must not be read as a product-level history claim.
 
 ### `desktop_state.py`
 
-Contains the legacy `WorkflowController` used by the current Tk path to prevent
-rewrite and translation from overlapping. It remains until `app.py` dispatches
-the explicit commands from `workflows.py`.
+Contains the older `WorkflowController` retained for backend and contract tests.
+The production QML entrypoint uses the explicit command/state model in
+`workflows.py` and does not instantiate this controller.
 
 ### `provider_http.py`
 
@@ -336,8 +330,8 @@ The unit suite tests provider routing, URL construction, configuration,
 clipboard safety, workflow state, usage statistics, and geometry calculations.
 `tests/test_workflows.py` is deliberately separate from the provider suite and
 runs the core application services without importing or constructing Tk.
-Windows UI acceptance still requires a real installed build because mocked
-tests cannot reveal transparency, focus, DPI, or hotkey integration defects.
+Windows UI acceptance still requires a real packaged build because mocked tests
+cannot reveal transparency, focus, DPI, or hotkey integration defects.
 
 Repository behavior is covered separately by configuration, migration, and
 statistics tests. Every repository write is JSON-encoded to a same-directory
@@ -462,7 +456,7 @@ immediate restart from reusing the recorder concurrently.
 ## Packaging
 
 PyInstaller creates a one-file Windows executable containing the Python runtime,
-application modules, visual assets, immutable distribution policy, and the
+PySide6/Qt Quick modules, QML assets, immutable distribution policy, and the
 vendored SoX runtime. `.env` is
 never bundled. End-user provider settings are read from the user data directory.
 

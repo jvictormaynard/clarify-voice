@@ -66,11 +66,26 @@ jobs:
 
       - name: Run Ruff lint
         if: matrix.os == 'ubuntu-latest'
-        run: ruff check desktop_state.py windows_hotkeys.py scripts/dependency_audit.py tests/test_repository.py
+        run: >-
+          ruff check desktop_state.py windows_hotkeys.py scripts/dependency_audit.py
+          spikes/pyside6/qml_app.py spikes/pyside6/qml_bridge.py spikes/pyside6/qml_runtime.py
+          spikes/pyside6/qml_settings.py spikes/pyside6/qml_audio_batch.py
+          spikes/pyside6/qml_clipboard.py spikes/pyside6/qml_voice_translation.py
+          spikes/pyside6/qt_shell.py tests/test_repository.py tests/test_pyside6_qml.py
+          tests/test_pyside6_qml_runtime.py tests/test_pyside6_qml_audio_batch.py
+          tests/test_pyside6_qml_clipboard.py tests/test_pyside6_qml_voice_translation.py
+          tests/test_pyside6_qt_shell.py
 
       - name: Run Ruff format check
         if: matrix.os == 'ubuntu-latest'
-        run: ruff format --check scripts/dependency_audit.py tests/test_repository.py
+        run: >-
+          ruff format --check scripts/dependency_audit.py tests/test_repository.py
+          spikes/pyside6/qml_app.py spikes/pyside6/qml_bridge.py spikes/pyside6/qml_runtime.py
+          spikes/pyside6/qml_settings.py spikes/pyside6/qml_audio_batch.py
+          spikes/pyside6/qml_clipboard.py spikes/pyside6/qml_voice_translation.py
+          spikes/pyside6/qt_shell.py tests/test_pyside6_qml.py tests/test_pyside6_qml_runtime.py
+          tests/test_pyside6_qml_audio_batch.py tests/test_pyside6_qml_clipboard.py
+          tests/test_pyside6_qml_voice_translation.py tests/test_pyside6_qt_shell.py
 
       - name: Run targeted type checks
         if: matrix.os == 'ubuntu-latest'
@@ -84,12 +99,21 @@ jobs:
 
       - name: Compile Python sources
         run: >-
-          python -m compileall -q app.py workflows.py desktop_state.py repositories.py workflow_config.py workflow_settings.py
+          python -m compileall -q spikes/pyside6/qml_app.py spikes/pyside6/qml_bridge.py
+          spikes/pyside6/qml_runtime.py spikes/pyside6/qml_settings.py
+          spikes/pyside6/qml_audio_batch.py spikes/pyside6/qml_clipboard.py
+          spikes/pyside6/qml_voice_translation.py spikes/pyside6/qt_shell.py
+          workflows.py desktop_state.py repositories.py workflow_config.py workflow_settings.py
           voice_translation.py
           secret_store.py update_security.py version.py windows_clipboard.py
           windows_hotkeys.py provider_types.py provider_adapters.py provider_http.py
           provider_registry.py scripts/create_release_manifest.py tests
           local_asr.py audio_file_batch.py audio_file_batch_ui.py history_store.py scripts/local_asr_harness.py
+
+      - name: Validate QML assets
+        run: >-
+          python -c "from pathlib import Path; qml = Path('spikes/pyside6/qml');
+          assert qml.is_dir() and (qml / 'Main.qml').is_file() and any(qml.glob('*.qml'))"
 
   package:
     name: Package Windows executable
@@ -145,43 +169,26 @@ jobs:
             -SourceExe dist\ClarifyVoice.exe `
             -OutputPath dist\ClarifyVoice-windows-x64.msi
 
-      - name: Validate packaged secret store
+      - name: Smoke-test packaged QML entrypoint
         shell: pwsh
         run: |
-          $resultFile = Join-Path $env:RUNNER_TEMP "clarifyvoice-secret-store-self-test.json"
-          Remove-Item $resultFile -Force -ErrorAction SilentlyContinue
           $executable = (Resolve-Path .\dist\ClarifyVoice.exe).Path
-          $selfTest = Start-Process -FilePath $executable `
-            -ArgumentList @('secret-store-self-test', '--result-file', $resultFile) `
-            -Wait -PassThru
-          $selfTestExitCode = $selfTest.ExitCode
-          if (-not (Test-Path $resultFile -PathType Leaf)) {
-            throw "Packaged secret-store self-test did not write its result file (exit code $selfTestExitCode)."
+          $process = Start-Process -FilePath $executable `
+            -ArgumentList @('--hidden') -PassThru
+          try {
+            Start-Sleep -Seconds 5
+            if ($process.HasExited) {
+              throw "Packaged QML entrypoint exited during hidden launch (exit code $($process.ExitCode))."
+            }
+          } finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
           }
-          $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
-          if (-not $result.ok) {
-            throw "Packaged secret-store self-test reported failure: $($result.error) (exit code $selfTestExitCode)."
-          }
-          if ($selfTestExitCode -ne 0) {
-            throw "Packaged secret-store self-test returned exit code $selfTestExitCode after reporting success."
-          }
-          $providers = @($result.providers)
-          if ($providers.Count -ne 3 -or ($providers -join ",") -cne "gemini,openai,groq") {
-            throw "Packaged secret-store self-test did not cover all providers."
-          }
-          if ($result.config_contains_provider_keys -ne $false) {
-            throw "Packaged secret-store self-test found provider keys in config.json."
-          }
-          if ($result.restart_read -ne $true) {
-            throw "Packaged secret-store self-test did not verify restart reads."
-          }
-          if ($result.provider_connections_ready -ne $true) {
-            throw "Packaged secret-store self-test did not verify provider use."
-          }
-          if ($result.delete_verified -ne $true) {
-            throw "Packaged secret-store self-test did not verify credential deletion."
-          }
-          Remove-Item $resultFile -Force
+
+      - name: Validate secret-store contract
+        run: >-
+          python -c "import app; raise SystemExit(app._run_cli(['secret-store-self-test']))"
 
       - name: Test install, upgrade, repair, rollback, and uninstall
         shell: pwsh

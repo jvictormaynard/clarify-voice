@@ -41,6 +41,12 @@ except ImportError:  # PyInstaller may analyze the spike as a standalone file.
     )
 
 
+try:
+    from voice_translation import VoiceTranslationPhase
+except ImportError:  # PyInstaller may analyze the spike as a package module.
+    from ...voice_translation import VoiceTranslationPhase  # type: ignore[no-redef]
+
+
 class QmlWorkflowBridge(QObject):
     """Expose one injected :class:`WorkflowService` to QML.
 
@@ -55,6 +61,7 @@ class QmlWorkflowBridge(QObject):
     resultChanged = Signal()
     busyChanged = Signal()
     canShowResultChanged = Signal()
+    voiceChanged = Signal()
     modeChanged = Signal()
     languageChanged = Signal()
     copyCompleted = Signal(bool)
@@ -110,6 +117,8 @@ class QmlWorkflowBridge(QObject):
         dispatch_runner: Callable[[Callable[[], None]], None] | None = None,
         copy_runner: Callable[[str], Any] | None = None,
         voice_translation_handler: Callable[[], Any] | None = None,
+        voice_translation_controller: Any | None = None,
+        audio_batch_controller: Any | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -120,9 +129,17 @@ class QmlWorkflowBridge(QObject):
             default_copy_runner if callable(default_copy_runner) else lambda _text: None
         )
         self._voice_translation_handler = voice_translation_handler
+        self._voice_translation_controller = voice_translation_controller
+        self._audio_batch_controller = audio_batch_controller
+        self._voice_state = (
+            getattr(voice_translation_controller, "state", None)
+            if voice_translation_controller is not None
+            else None
+        )
         self._state = workflow_service.state
         self._result_visible = False
         self._settings_visible = False
+        self._files_visible = False
         self._finishing = False
         saved_config = app_config
         if saved_config is None:
@@ -136,6 +153,14 @@ class QmlWorkflowBridge(QObject):
             getattr(ui_preferences, "language", "en")
         )
         workflow_service.subscribe(self._on_workflow_state)
+        if voice_translation_controller is not None:
+            voice_translation_controller.stateChanged.connect(
+                self._on_voice_translation_state
+            )
+        if audio_batch_controller is not None:
+            audio_batch_controller.runningChanged.connect(
+                self._on_audio_batch_running_changed
+            )
 
     @Property(str, notify=surfaceChanged)
     def surface(self) -> str:
@@ -143,12 +168,20 @@ class QmlWorkflowBridge(QObject):
             return "settings"
         if self._result_visible:
             return "result"
+        if self._files_visible:
+            return "files"
+        voice_surface = self._voice_surface()
+        if voice_surface:
+            return voice_surface
         if self._finishing:
             return "idle"
         return self._surface_for_phase(self._state.phase)
 
     @Property(str, notify=statusChanged)
     def status(self) -> str:
+        voice_status = self._voice_status()
+        if voice_status:
+            return voice_status
         if self._finishing:
             return self._STATUS[WorkflowPhase.READY]
         if self._state.status_key in self._STATUS_KEYS:
@@ -160,14 +193,23 @@ class QmlWorkflowBridge(QObject):
 
     @Property(str, notify=resultChanged)
     def result(self) -> str:
+        voice_result = self._voice_result()
+        if self.surface in {"voice_result", "voice_error"}:
+            return voice_result or self._voice_status()
         return self._state.result_text or ""
 
     @Property(bool, notify=busyChanged)
     def busy(self) -> bool:
-        return self._state.phase in self._BUSY_PHASES
+        return bool(
+            self._state.phase in self._BUSY_PHASES
+            or getattr(self._voice_translation_controller, "active", False)
+            or getattr(self._audio_batch_controller, "running", False)
+        )
 
     @Property(bool, notify=canShowResultChanged)
     def canShowResult(self) -> bool:
+        if self.surface == "voice_result":
+            return bool(self._voice_result())
         return self._state.phase is WorkflowPhase.COMPLETED and bool(
             self._state.result_text
         )
@@ -185,6 +227,62 @@ class QmlWorkflowBridge(QObject):
         """Return the supported target languages in a QML-friendly shape."""
 
         return [dict(option) for option in self._TRANSLATION_OPTIONS]
+
+    def _voice_runtime_state(self) -> Any | None:
+        return self._voice_state
+
+    def _voice_phase(self) -> VoiceTranslationPhase | None:
+        state = self._voice_runtime_state()
+        return getattr(state, "phase", None)
+
+    def _voice_workflow_state(self) -> Any | None:
+        state = self._voice_runtime_state()
+        return getattr(state, "workflow_state", None)
+
+    def _voice_result(self) -> str:
+        state = self._voice_workflow_state()
+        if state is None:
+            return ""
+        return str(
+            getattr(state, "published_text", "")
+            or getattr(state, "translated_text", "")
+            or getattr(state, "raw_transcript", "")
+            or ""
+        )
+
+    def _voice_surface(self) -> str:
+        phase = self._voice_phase()
+        controller = self._voice_translation_controller
+        if phase is None or controller is None:
+            return ""
+        if bool(getattr(controller, "active", False)):
+            return "voice_processing"
+        if phase is VoiceTranslationPhase.COMPLETED:
+            return "voice_result" if self._voice_result() else "voice_error"
+        if phase is VoiceTranslationPhase.FAILED:
+            return "voice_result" if self._voice_result() else "voice_error"
+        return ""
+
+    def _voice_status(self) -> str:
+        phase = self._voice_phase()
+        if phase is None or self._voice_translation_controller is None:
+            return ""
+        statuses = {
+            VoiceTranslationPhase.RECORDING: "Listening for voice translation",
+            VoiceTranslationPhase.TRANSCRIBING: "Transcribing voice translation",
+            VoiceTranslationPhase.TRANSLATING: "Translating your words",
+            VoiceTranslationPhase.PUBLISHING: "Publishing your translation",
+            VoiceTranslationPhase.COMPLETED: "Voice translation is ready",
+            VoiceTranslationPhase.FAILED: "Voice translation could not be completed",
+            VoiceTranslationPhase.CANCELLED: "Voice translation cancelled",
+        }
+        state = self._voice_runtime_state()
+        error = str(getattr(state, "error", "") or "")
+        return (
+            error
+            if phase is VoiceTranslationPhase.FAILED and error
+            else statuses.get(phase, "")
+        )
 
     @staticmethod
     def _surface_for_phase(phase: WorkflowPhase) -> str:
@@ -212,6 +310,7 @@ class QmlWorkflowBridge(QObject):
         self.resultChanged.emit()
         self.busyChanged.emit()
         self.canShowResultChanged.emit()
+        self.voiceChanged.emit()
 
     @Slot(object)
     def _on_workflow_state(self, state: WorkflowState) -> None:
@@ -219,6 +318,15 @@ class QmlWorkflowBridge(QObject):
         self._finishing = False
         if state.phase is not WorkflowPhase.COMPLETED:
             self._result_visible = False
+        self._notify_all()
+
+    @Slot(object)
+    def _on_voice_translation_state(self, state: Any) -> None:
+        self._voice_state = state
+        self._notify_all()
+
+    @Slot()
+    def _on_audio_batch_running_changed(self) -> None:
         self._notify_all()
 
     def _submit(self, callback: Callable[[], None]) -> None:
@@ -383,8 +491,23 @@ class QmlWorkflowBridge(QObject):
 
     @Slot()
     def reset(self) -> None:
+        controller = self._voice_translation_controller
+        if controller is not None:
+            voice_surface = self._voice_surface()
+            if bool(getattr(controller, "active", False)):
+                controller.cancel()
+                return
+            if voice_surface in {"voice_result", "voice_error"}:
+                clear = getattr(controller, "clear", None)
+                if callable(clear):
+                    clear()
+                self._notify_all()
+                return
         if self._settings_visible:
             self.closeSettings()
+            return
+        if self._files_visible:
+            self.closeFiles()
             return
         if self._state.phase is WorkflowPhase.RECORDING:
             self.cancelRecording()
@@ -404,6 +527,7 @@ class QmlWorkflowBridge(QObject):
     def openSettings(self) -> None:
         if self.busy or self._state.phase is not WorkflowPhase.READY:
             return
+        self._files_visible = False
         self._settings_visible = True
         self._result_visible = False
         self._notify_all()
@@ -413,4 +537,22 @@ class QmlWorkflowBridge(QObject):
         if not self._settings_visible:
             return
         self._settings_visible = False
+        self._notify_all()
+
+    @Slot()
+    def openFiles(self) -> None:
+        if self.busy or self._state.phase is not WorkflowPhase.READY:
+            return
+        self._settings_visible = False
+        self._files_visible = True
+        self._result_visible = False
+        self._notify_all()
+
+    @Slot()
+    def closeFiles(self) -> None:
+        if not self._files_visible:
+            return
+        if bool(getattr(self._audio_batch_controller, "running", False)):
+            return
+        self._files_visible = False
         self._notify_all()
