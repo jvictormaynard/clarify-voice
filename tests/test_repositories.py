@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import get_type_hints
 from unittest.mock import patch
 
 import repositories
@@ -15,6 +16,7 @@ from repositories import (
     AppConfig,
     LocalConfigRepository,
     LocalUsageStatsRepository,
+    ConfigRepository,
     UnsupportedSchemaVersionError,
     migrate_config_payload,
 )
@@ -46,6 +48,22 @@ class DeleteReadbackStore(MemorySecretStore):
 
 
 class ConfigurationRepositoryTests(unittest.TestCase):
+    def test_config_repository_declares_typed_atomic_apply_contract(self):
+        self.assertIn("apply", ConfigRepository.__abstractmethods__)
+        annotations = get_type_hints(ConfigRepository.apply)
+        self.assertIs(annotations["config"], AppConfig)
+        self.assertIs(annotations["return"], AppConfig)
+
+        class LoadAndSaveOnly(ConfigRepository):
+            def load(self):
+                return AppConfig()
+
+            def save(self, _config):
+                return None
+
+        with self.assertRaises(TypeError):
+            LoadAndSaveOnly()
+
     def test_voice_translation_preferences_survive_repository_round_trip(self):
         config = AppConfig.from_mapping({
             "voice_translation": VoiceTranslationConfig(

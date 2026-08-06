@@ -1,6 +1,21 @@
 import ast
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+try:
+    from PySide6.QtCore import QObject, QTimer
+    from PySide6.QtQml import QQmlApplicationEngine
+    from PySide6.QtWidgets import QApplication
+    from spikes.pyside6.qml_app import (
+        _connect_shutdown,
+        _register_qml_context,
+        _start_shell_if_available,
+    )
+except (ImportError, ModuleNotFoundError):
+    PYSIDE6_AVAILABLE = False
+else:
+    PYSIDE6_AVAILABLE = True
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,6 +117,31 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("workflow.setLanguage", main_source)
         self.assertIn("workflow.setMode", main_source)
         self.assertIn("workflow.copyResult()", main_source)
+        self.assertNotIn("Global shortcuts and settings will be connected", main_source)
+        self.assertIn('objectName: "settingsPage"', main_source)
+        for binding in (
+            "settings.mode",
+            "settings.language",
+            "settings.autostart",
+            "settings.historyEnabled",
+            "settings.historyRetentionDays",
+            "settings.selectedScope",
+            "settings.routeProviderId",
+            "settings.routeModelId",
+            "settings.routePrompt",
+            "settings.routeCustomEndpoint",
+            "settings.routeEnabled",
+            "settings.lastError",
+            "settings.dirty",
+            "settings.load()",
+            "settings.save()",
+        ):
+            self.assertIn(binding, main_source)
+        self.assertIn('workflow.surface === "translation_picker"', main_source)
+        self.assertIn('objectName: "translationPickerPage"', main_source)
+        self.assertIn("workflow.translationOptions", main_source)
+        self.assertIn("workflow.chooseTranslation(modelData.code)", main_source)
+        self.assertIn("workflow.cancelTranslation()", main_source)
         self.assertNotIn("Alt+L", main_source)
 
     def test_qml_entrypoint_uses_qt_quick_and_stays_production_isolated(self):
@@ -123,12 +163,28 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertNotIn("windows_hotkeys", imported_roots)
         self.assertNotIn("windows_clipboard", imported_roots)
         self.assertIn("QQmlApplicationEngine", source)
-        self.assertIn("QGuiApplication", source)
+        self.assertIn("QApplication", source)
+        self.assertNotIn("QGuiApplication", source)
+        self.assertIn("QSystemTrayIcon", source)
         self.assertIn("create_real_workflow_runtime", source)
+        self.assertIn("QmlSettingsController", source)
+        self.assertIn('setContextProperty("settings", settings)', source)
+        self.assertIn("runtime.repositories", source)
+        self.assertIn("QtShell", source)
+        self.assertIn("WindowsGlobalHotkeyBackend", source)
+        self.assertIn('if sys.platform == "win32"', source)
+        self.assertIn("shell.hotkeyTriggered.connect(bridge.handleHotkey)", source)
         self.assertIn("QmlWorkflowBridge(", source)
         self.assertIn("dispatch_runner=scheduler.run_dispatch", source)
         self.assertIn("copy_runner=runtime.copy_result", source)
+        self.assertIn("app.aboutToQuit.connect(shell.stop)", source)
         self.assertIn("app.aboutToQuit.connect(runtime.shutdown)", source)
+        self.assertLess(
+            source.index("app.aboutToQuit.connect(shell.stop)"),
+            source.index("app.aboutToQuit.connect(runtime.shutdown)"),
+        )
+        self.assertLess(source.index("engine.rootObjects()"), source.index("QtShell("))
+        self.assertIn("_start_shell_if_available", source)
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("--fake", source)
 
@@ -178,10 +234,31 @@ class PySide6QmlFrontendTests(unittest.TestCase):
             "QtStatisticsGateway",
         ):
             self.assertIn(f"class {symbol}", runtime_source)
+        self.assertIn("self.repositories = repositories", runtime_source)
+        self.assertIn("repositories=active", runtime_source)
         self.assertIn("PROVIDER_REGISTRY", runtime_source)
         self.assertIn("WindowsClipboardAdapter", runtime_source)
         self.assertNotIn("import app", runtime_source)
         self.assertNotIn("to_legacy_mapping", runtime_source)
+
+    def test_qml_bridge_routes_native_hotkeys_to_real_commands(self):
+        bridge_source = (SPIKE / "qml_bridge.py").read_text(encoding="utf-8")
+        self.assertIn("def handleHotkey(self, action: str) -> bool:", bridge_source)
+        self.assertIn('normalized == "recording_hotkey"', bridge_source)
+        self.assertIn('normalized == "rewrite_hotkey"', bridge_source)
+        self.assertIn('normalized == "translation_hotkey"', bridge_source)
+        self.assertIn("StartRewrite()", bridge_source)
+        self.assertIn("StartTranslation()", bridge_source)
+        self.assertIn("CancelTranslation()", bridge_source)
+        self.assertIn("ChooseTranslationLanguage", bridge_source)
+        self.assertIn(
+            "def chooseTranslation(self, language: str) -> bool:", bridge_source
+        )
+        self.assertIn("def cancelTranslation(self) -> bool:", bridge_source)
+        self.assertIn(
+            "def translationOptions(self) -> list[dict[str, str]]:", bridge_source
+        )
+        self.assertIn('return "translation_picker"', bridge_source)
 
     def test_real_entrypoint_has_no_fake_or_legacy_runtime(self):
         source = (SPIKE / "qml_app.py").read_text(encoding="utf-8")
@@ -190,6 +267,79 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("legacy_adapters", runtime_source)
         self.assertNotIn("QmlRuntimeUnavailableError", runtime_source)
+
+
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+class QmlEntrypointIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_uses_qapplication_and_registers_real_context_properties(self):
+        self.assertIsInstance(self.app, QApplication)
+        engine = QQmlApplicationEngine()
+        workflow = QObject()
+        settings = QObject()
+
+        _register_qml_context(engine, workflow, settings)
+
+        self.assertIs(engine.rootContext().contextProperty("workflow"), workflow)
+        self.assertIs(engine.rootContext().contextProperty("settings"), settings)
+
+    def test_shutdown_connections_stop_shell_before_runtime(self):
+        events = []
+
+        class Shell(QObject):
+            def stop(self):
+                events.append("shell")
+
+        class Runtime:
+            def shutdown(self):
+                events.append("runtime")
+
+        shell = Shell()
+        runtime = Runtime()
+        _connect_shutdown(self.app, shell, runtime)
+        QTimer.singleShot(0, self.app.quit)
+        self.app.exec()
+
+        self.assertEqual(events[-2:], ["shell", "runtime"])
+
+    def test_shell_failure_is_cleaned_up_and_tray_absence_is_non_fatal(self):
+        class Shell:
+            def __init__(self):
+                self.stop_calls = 0
+
+            def start(self):
+                raise RuntimeError("event filter failed")
+
+            def stop(self):
+                self.stop_calls += 1
+
+        class Hotkeys:
+            def __init__(self):
+                self.stop_calls = 0
+
+            def stop(self):
+                self.stop_calls += 1
+
+        shell = Shell()
+        hotkeys = Hotkeys()
+        with patch(
+            "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
+            return_value=True,
+        ):
+            self.assertFalse(_start_shell_if_available(shell, hotkeys))
+        self.assertEqual(shell.stop_calls, 1)
+        self.assertEqual(hotkeys.stop_calls, 1)
+
+        shell = Shell()
+        with patch(
+            "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
+            return_value=False,
+        ):
+            self.assertIsNone(_start_shell_if_available(shell, hotkeys))
+        self.assertEqual(shell.stop_calls, 0)
 
 
 if __name__ == "__main__":

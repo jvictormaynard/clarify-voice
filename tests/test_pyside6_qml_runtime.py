@@ -42,9 +42,13 @@ if PYSIDE6_AVAILABLE:
     from workflow_config import WorkflowConfig, WorkflowRoute
     from workflows import (
         CancelDictation,
+        CancelTranslation,
+        ChooseTranslationLanguage,
         DismissMicrophoneUnavailable,
         MicrophoneUnavailableError,
         StartDictation,
+        StartRewrite,
+        StartTranslation,
         StopDictation,
         RecordingSnapshot,
         WorkflowPhase,
@@ -358,6 +362,59 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
 
         self.assertTrue(bridge.copyResult())
         self.assertEqual(completed, [False])
+
+    def test_bridge_routes_shell_hotkeys_to_workflow_commands(self):
+        service = DeterministicWorkflowService()
+        bridge = QmlWorkflowBridge(service)
+
+        self.assertTrue(bridge.handleHotkey("recording_hotkey"))
+        self.assertIsInstance(service.commands[-1], StartDictation)
+        self.assertTrue(bridge.handleHotkey("recording_hotkey"))
+        self.assertIsInstance(service.commands[-1], StopDictation)
+
+        bridge.reset()
+        self.assertTrue(bridge.handleHotkey("rewrite_hotkey"))
+        self.assertIsInstance(service.commands[-1], StartRewrite)
+        self.assertTrue(bridge.handleHotkey("translation_hotkey"))
+        self.assertIsInstance(service.commands[-1], StartTranslation)
+
+        service.publish(
+            WorkflowState(phase=WorkflowPhase.TRANSLATION_PICKER, operation_id=3)
+        )
+        self.assertTrue(bridge.handleHotkey("escape"))
+        self.assertIsInstance(service.commands[-1], CancelTranslation)
+        self.assertFalse(bridge.handleHotkey("toggle_visibility"))
+
+    def test_bridge_exposes_translation_options_and_dispatches_picker_choices(self):
+        service = DeterministicWorkflowService()
+        bridge = QmlWorkflowBridge(service)
+
+        self.assertFalse(bridge.chooseTranslation("de"))
+        self.assertEqual(
+            bridge.translationOptions,
+            [
+                {"code": "en", "label": "English"},
+                {"code": "pt", "label": "Portuguese"},
+                {"code": "es", "label": "Spanish"},
+                {"code": "de", "label": "German"},
+                {"code": "ru", "label": "Russian"},
+            ],
+        )
+
+        service.publish(
+            WorkflowState(phase=WorkflowPhase.TRANSLATION_PICKER, operation_id=4)
+        )
+        self.assertEqual(bridge.surface, "translation_picker")
+        self.assertTrue(bridge.chooseTranslation("DE"))
+        self.assertIsInstance(service.commands[-1], ChooseTranslationLanguage)
+        self.assertEqual(service.commands[-1].language, "de")
+        self.assertFalse(bridge.chooseTranslation("fr"))
+
+        service.publish(
+            WorkflowState(phase=WorkflowPhase.TRANSLATION_PICKER, operation_id=4)
+        )
+        self.assertTrue(bridge.cancelTranslation())
+        self.assertIsInstance(service.commands[-1], CancelTranslation)
 
     def test_bridge_cancel_and_error_states_are_non_terminal_for_qml(self):
         service = DeterministicWorkflowService()
@@ -715,6 +772,7 @@ class QmlRuntimeFactoryTests(unittest.TestCase):
                 runtime = create_real_workflow_runtime(object())
 
         self.assertIsInstance(runtime.workflow_service, WorkflowService)
+        self.assertIs(runtime.repositories, runtime.history_recorder.repositories)
         self.assertNotIn("app", sys.modules)
 
     def test_factory_constructs_opt_in_history_recorder(self):

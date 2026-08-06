@@ -1007,6 +1007,11 @@ class ConfigRepository(ABC):
     def save(self, config: AppConfig | Mapping[str, Any]) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def apply(self, config: AppConfig) -> AppConfig:
+        """Validate and atomically persist a complete application config."""
+        raise NotImplementedError
+
 
 class UsageStatsRepository(ABC):
     """Application-facing anonymous usage persistence interface."""
