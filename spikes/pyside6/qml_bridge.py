@@ -406,6 +406,12 @@ class QmlWorkflowBridge(QObject):
             return
         self._submit(lambda: self._workflow_service.dispatch(CancelDictation()))
 
+    def _dismiss_files_before_workflow(self) -> bool:
+        if not self._files_visible:
+            return True
+        self.closeFiles()
+        return not self._files_visible
+
     @Slot(str, result=bool)
     def handleHotkey(self, action: str) -> bool:
         """Dispatch a native-shell action through the real workflow service."""
@@ -432,6 +438,8 @@ class QmlWorkflowBridge(QObject):
             if self.busy:
                 return False
             if self._state.phase is WorkflowPhase.READY:
+                if not self._dismiss_files_before_workflow():
+                    return False
                 self.startRecording()
                 return True
             return False
@@ -439,11 +447,15 @@ class QmlWorkflowBridge(QObject):
         if normalized == "rewrite_hotkey":
             if self.busy or self._state.phase is not WorkflowPhase.READY:
                 return False
+            if not self._dismiss_files_before_workflow():
+                return False
             self._submit(lambda: self._workflow_service.dispatch(StartRewrite()))
             return True
 
         if normalized == "translation_hotkey":
             if self.busy or self._state.phase is not WorkflowPhase.READY:
+                return False
+            if not self._dismiss_files_before_workflow():
                 return False
             self._submit(lambda: self._workflow_service.dispatch(StartTranslation()))
             return True

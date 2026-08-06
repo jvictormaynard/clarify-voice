@@ -498,6 +498,69 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
         self.assertIsInstance(service.commands[-1], CancelTranslation)
         self.assertFalse(bridge.handleHotkey("toggle_visibility"))
 
+    def test_workflow_hotkeys_dismiss_files_before_dispatch(self):
+        cases = (
+            ("recording_hotkey", StartDictation),
+            ("rewrite_hotkey", StartRewrite),
+            ("translation_hotkey", StartTranslation),
+        )
+
+        for action, command_type in cases:
+            with self.subTest(action=action):
+                service = DeterministicWorkflowService()
+                dispatched_surfaces = []
+                bridge = None
+
+                def dispatch_runner(callback):
+                    dispatched_surfaces.append(bridge.surface)
+                    callback()
+
+                bridge = QmlWorkflowBridge(
+                    service,
+                    dispatch_runner=dispatch_runner,
+                )
+                bridge.openFiles()
+                self.assertEqual(bridge.surface, "files")
+
+                self.assertTrue(bridge.handleHotkey(action))
+                self.assertEqual(dispatched_surfaces, ["idle"])
+                self.assertNotEqual(bridge.surface, "files")
+                self.assertIsInstance(service.commands[-1], command_type)
+
+    def test_workflow_hotkeys_do_not_overlap_a_running_file_batch(self):
+        class SignalProxy:
+            def connect(self, callback):
+                self.callback = callback
+
+            def emit(self):
+                self.callback()
+
+        class AudioBatch:
+            def __init__(self):
+                self.running = False
+                self.runningChanged = SignalProxy()
+
+        service = DeterministicWorkflowService()
+        audio_batch = AudioBatch()
+        bridge = QmlWorkflowBridge(
+            service,
+            audio_batch_controller=audio_batch,
+        )
+        bridge.openFiles()
+        audio_batch.running = True
+        audio_batch.runningChanged.emit()
+
+        for action in (
+            "recording_hotkey",
+            "rewrite_hotkey",
+            "translation_hotkey",
+        ):
+            with self.subTest(action=action):
+                self.assertFalse(bridge.handleHotkey(action))
+
+        self.assertEqual(bridge.surface, "files")
+        self.assertEqual(service.commands, [])
+
     def test_bridge_routes_voice_translation_hotkey_to_dedicated_handler(self):
         service = DeterministicWorkflowService()
         handler = Mock()

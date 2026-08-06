@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 from hotkey_config import HotkeyAction, HotkeySettings
-from windows_hotkeys import ESCAPE_HOTKEY_ID
+from windows_hotkeys import ESCAPE_HOTKEY_ID, HotkeyRegistrationError
 
 try:
     from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal
@@ -604,6 +604,45 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
         self.assertFalse(backend.is_running)
         self.assertEqual(target.installed, [])
 
+    def test_failed_start_retries_with_corrected_settings_on_reconfigure(self):
+        target = FakeNativeEventTarget()
+        registrations = []
+
+        def register(_user32, _hwnd, settings, *, strict):
+            self.assertTrue(strict)
+            registrations.append(settings)
+            if len(registrations) == 1:
+                raise HotkeyRegistrationError([HotkeyAction.RECORDING.value])
+            return {0x5101}
+
+        backend = WindowsGlobalHotkeyBackend(
+            target,
+            user32="fake-user32",
+            register_hotkeys=register,
+            unregister_hotkeys=lambda *_args: None,
+        )
+        restarted = []
+        backend.restarted.connect(lambda: restarted.append(True))
+        window = FakeWindow()
+
+        with self.assertRaises(HotkeyRegistrationError):
+            backend.start(window)
+
+        corrected = HotkeySettings.defaults().with_hotkey(
+            HotkeyAction.RECORDING,
+            {"modifiers": ["ctrl"], "key": "Q"},
+        )
+        self.assertEqual(backend.reconfigure(corrected), {0x5101})
+        self.assertTrue(backend.is_running)
+        self.assertEqual(restarted, [True])
+        self.assertEqual(len(target.installed), 1)
+        self.assertEqual(
+            registrations[-1].definition(HotkeyAction.RECORDING).display,
+            "Ctrl+Q",
+        )
+
+        backend.stop()
+
     @unittest.skipUnless(sys.platform == "linux", "Linux-only user32 seam test")
     def test_linux_requires_an_injected_user32_seam(self):
         backend = WindowsGlobalHotkeyBackend(FakeNativeEventTarget())
@@ -819,6 +858,47 @@ class QtShellTests(unittest.TestCase):
         self.assertTrue(shell._instance_guard.is_primary)
         self.assertFalse(hotkeys.is_running)
         self.assertEqual(hotkeys.stop_calls, 1)
+
+        shell.stop()
+        self.assertFalse(shell._instance_guard.is_primary)
+
+    def test_shell_restores_tray_after_corrected_hotkey_reconfigure(self):
+        target = FakeNativeEventTarget()
+        registrations = []
+
+        def register(_user32, _hwnd, _settings, *, strict):
+            self.assertTrue(strict)
+            registrations.append(True)
+            if len(registrations) == 1:
+                raise HotkeyRegistrationError([HotkeyAction.RECORDING.value])
+            return {0x5101}
+
+        backend = WindowsGlobalHotkeyBackend(
+            target,
+            user32="fake-user32",
+            register_hotkeys=register,
+            unregister_hotkeys=lambda *_args: None,
+        )
+        shell = self._shell(hotkeys=backend)
+
+        with self.assertRaises(HotkeyRegistrationError):
+            shell.start()
+
+        self.assertFalse(shell.is_running)
+        self.assertTrue(shell._instance_guard.is_primary)
+        self.assertIsNone(shell.tray)
+
+        corrected = HotkeySettings.defaults().with_hotkey(
+            HotkeyAction.RECORDING,
+            {"modifiers": ["ctrl"], "key": "Q"},
+        )
+        backend.reconfigure(corrected)
+
+        self.assertTrue(shell.is_running)
+        self.assertIsNotNone(shell.tray)
+        self.assertTrue(shell.tray.visible)
+        self.assertEqual(shell._window.removed_event_filters, [shell])
+        self.assertIs(shell._window.event_filters[-1], shell)
 
         shell.stop()
         self.assertFalse(shell._instance_guard.is_primary)
