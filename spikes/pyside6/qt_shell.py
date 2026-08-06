@@ -294,9 +294,17 @@ class QtSingleInstanceGuard:
 
         self._activation_listening = False
         worker = self._activation_listener_thread
+        if worker is None:
+            return
+        if worker is threading.current_thread():
+            self._activation_listener_thread = None
+            return
+
+        handle = self._activation_event
+        if handle is not None:
+            self._activation_event_api().set_event(handle)
+        worker.join()
         self._activation_listener_thread = None
-        if worker is not None and worker is not threading.current_thread():
-            worker.join(timeout=0.2)
 
     def _activation_event_api(self) -> Any | None:
         if self._activation_api is None and sys.platform == "win32":

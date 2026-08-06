@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -81,6 +82,29 @@ class FakeActivationApi:
 
     def close(self, handle):
         self.close_calls.append(handle)
+
+
+class BlockingActivationApi(FakeActivationApi):
+    def __init__(self):
+        super().__init__()
+        self.waiting = threading.Event()
+        self.wait_returned = threading.Event()
+        self.woken = threading.Event()
+
+    def wait_for_event(self, _handle):
+        self.waiting.set()
+        self.woken.wait(timeout=2)
+        self.wait_returned.set()
+        return self.WAIT_OBJECT_0
+
+    def set_event(self, handle):
+        result = super().set_event(handle)
+        self.woken.set()
+        return result
+
+    def close(self, handle):
+        self.assert_wait_finished = self.wait_returned.is_set()
+        super().close(handle)
 
 
 class FakeWindow:
@@ -283,6 +307,28 @@ class QtSingleInstanceGuardTests(unittest.TestCase):
             activation_api.close_calls,
             [activation_api.handle, activation_api.handle],
         )
+
+    def test_release_wakes_and_joins_activation_listener_before_closing_handle(self):
+        activation_api = BlockingActivationApi()
+        guard = QtSingleInstanceGuard(
+            "clarifyvoice-test",
+            lock_path=Path(tempfile.gettempdir()) / "clarifyvoice-test.lock",
+            lock_factory=FakeLock,
+            activation_api=activation_api,
+        )
+
+        self.assertTrue(guard.acquire())
+        guard.start_activation_listener(lambda: None)
+        worker = guard._activation_listener_thread
+        self.assertIsNotNone(worker)
+        self.assertTrue(activation_api.waiting.wait(timeout=1))
+
+        guard.release()
+
+        self.assertTrue(activation_api.woken.is_set())
+        self.assertTrue(activation_api.wait_returned.is_set())
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(activation_api.assert_wait_finished)
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
