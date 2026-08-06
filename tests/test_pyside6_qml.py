@@ -60,6 +60,8 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         )
         self.assertIn("copyResetTimer", main_source)
         self.assertIn("copyResetTimer.restart()", main_source)
+        self.assertIn("function onCopyCompleted(success)", main_source)
+        self.assertIn("onClicked: workflow.copyResult()", main_source)
         self.assertIn("onVisibleChanged: resetCopyConfirmation()", main_source)
         self.assertIn('resultPage.copyLabel = "Copy"', main_source)
         self.assertIn("workflow.stopRecording()", main_source)

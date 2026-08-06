@@ -152,7 +152,9 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
     def test_bridge_maps_real_state_and_finishes_terminal_result(self):
         service = DeterministicWorkflowService()
         copied = []
+        completed = []
         bridge = QmlWorkflowBridge(service, copy_runner=copied.append)
+        bridge.copyCompleted.connect(completed.append)
 
         self.assertEqual(bridge.surface, "idle")
         self.assertFalse(bridge.busy)
@@ -174,10 +176,27 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.surface, "result")
         self.assertTrue(bridge.copyResult())
         self.assertEqual(copied, ["Real result"])
+        self.assertEqual(completed, [True])
         bridge.reset()
         self.assertEqual(service.finished, [1])
         self.assertEqual(bridge.surface, "idle")
         self.assertFalse(bridge.canShowResult)
+
+    def test_bridge_reports_copy_failure_after_runner_finishes(self):
+        service = DeterministicWorkflowService()
+        completed = []
+
+        def fail_copy(_text):
+            raise RuntimeError("clipboard unavailable")
+
+        bridge = QmlWorkflowBridge(service, copy_runner=fail_copy)
+        bridge.copyCompleted.connect(completed.append)
+        bridge.startRecording()
+        bridge.stopRecording()
+        bridge.showResult()
+
+        self.assertTrue(bridge.copyResult())
+        self.assertEqual(completed, [False])
 
     def test_bridge_cancel_and_error_states_are_non_terminal_for_qml(self):
         service = DeterministicWorkflowService()
@@ -292,10 +311,10 @@ class QtProviderGatewayTests(unittest.TestCase):
 
         workflows = WorkflowConfig(
             transcription=WorkflowRoute(
-                provider_id="openai", model_id="whisper", prompt="Transcribe"
+                provider_id="openai", model_id="whisper"
             ),
             refinement=WorkflowRoute(
-                provider_id="gemini", model_id="editor", prompt="Refine"
+                provider_id="gemini", model_id="editor"
             ),
             rewrite=WorkflowRoute(provider_id="gemini", model_id="editor"),
             translation=WorkflowRoute(provider_id="gemini", model_id="editor"),
@@ -327,20 +346,33 @@ class QtProviderGatewayTests(unittest.TestCase):
                 QtWorkflowConfig(Repositories(config)),
                 dictionary,
             )
-            result = gateway.transcribe(audio, "prompt", "en")
+            result = gateway.transcribe(audio, "prompt", "pt")
 
         self.assertEqual(result.text, "refined transcript expanded")
         self.assertEqual(result.raw_text, "raw transcript")
         self.assertEqual(result.refined_text, "refined transcript expanded")
         self.assertEqual(result.refinement_provider_id, "gemini")
         self.assertEqual(result.refinement_model, "editor")
+        transcription_request = registry.transcription_requests[0][1]
+        self.assertIn("editing, not summarization", transcription_request.instruction)
+        self.assertIn("NEVER answer it", transcription_request.instruction)
+        self.assertIn("Output MUST be in Brazilian Portuguese.", transcription_request.instruction)
+        self.assertIn("Output MUST be in Brazilian Portuguese.", transcription_request.prompt)
         self.assertEqual(dictionary.applied.dictionary_context, "")
         self.assertEqual(
-            registry.transcription_requests[0][1].dictionary_context,
+            transcription_request.dictionary_context,
             "Use QML terms",
         )
         self.assertEqual(dictionary.expanded, ["refined transcript"])
         self.assertEqual(registry.rewrite_requests[0][0], "gemini")
+        self.assertIn(
+            "already-transcribed source text",
+            registry.rewrite_requests[0][1].instruction,
+        )
+        self.assertIn(
+            "Output MUST be in Brazilian Portuguese.",
+            registry.rewrite_requests[0][1].instruction,
+        )
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")

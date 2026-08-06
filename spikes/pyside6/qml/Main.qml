@@ -321,6 +321,15 @@ ApplicationWindow {
                     function onSurfaceChanged() {
                         resultPage.resetCopyConfirmation()
                     }
+
+                    function onCopyCompleted(success) {
+                        if (success) {
+                            resultPage.copyLabel = "OK!"
+                            copyResetTimer.restart()
+                        } else {
+                            resultPage.resetCopyConfirmation()
+                        }
+                    }
                 }
 
                 ColumnLayout {
@@ -385,12 +394,7 @@ ApplicationWindow {
                             Layout.preferredWidth: 52
                             Layout.preferredHeight: 26
                             Accessible.name: "Copy result"
-                            onClicked: {
-                                if (workflow.copyResult()) {
-                                    resultPage.copyLabel = "OK!"
-                                    copyResetTimer.restart()
-                                }
-                            }
+                            onClicked: workflow.copyResult()
                         }
 
                         PilotButton {

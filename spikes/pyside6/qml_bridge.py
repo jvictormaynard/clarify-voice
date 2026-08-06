@@ -47,6 +47,7 @@ class QmlWorkflowBridge(QObject):
     resultChanged = Signal()
     busyChanged = Signal()
     canShowResultChanged = Signal()
+    copyCompleted = Signal(bool)
 
     _STATUS = {
         WorkflowPhase.READY: "Ready to capture your voice",
@@ -94,10 +95,9 @@ class QmlWorkflowBridge(QObject):
         super().__init__(parent)
         self._workflow_service = workflow_service
         self._dispatch_runner = dispatch_runner or (lambda callback: callback())
-        self._copy_runner = copy_runner or getattr(
-            workflow_service,
-            "copy_result",
-            lambda _text: None,
+        default_copy_runner = getattr(workflow_service, "copy_result", None)
+        self._copy_runner = copy_runner or (
+            default_copy_runner if callable(default_copy_runner) else lambda _text: None
         )
         self._state = workflow_service.state
         self._result_visible = False
@@ -228,7 +228,16 @@ class QmlWorkflowBridge(QObject):
         if not self.canShowResult:
             return False
         result = self.result
-        self._submit(lambda: self._copy_runner(result))
+
+        def copy() -> None:
+            try:
+                self._copy_runner(result)
+            except Exception:
+                self.copyCompleted.emit(False)
+            else:
+                self.copyCompleted.emit(True)
+
+        self._submit(copy)
         return True
 
     @Slot()
