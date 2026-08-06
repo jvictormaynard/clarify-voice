@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from array import array
 import threading
 import unittest
 from pathlib import Path
@@ -26,6 +27,12 @@ if PYSIDE6_AVAILABLE:
         TranscriptionResult,
     )
     from repositories import AppConfig, ProviderConfig
+    from microphone_controls import (
+        RecordingBoundaryPolicy,
+        RecordingBoundaryReason,
+        RecordingControls,
+        VADSettings,
+    )
     from voice_translation import (
         VoiceTranslationConfigurationError,
         VoiceTranslationConfig,
@@ -338,6 +345,121 @@ class QtVoiceTranslationRecordingTests(unittest.TestCase):
                 "cancel",
             ],
         )
+
+    class _BoundarySession:
+        def __init__(self, controls):
+            self._boundary_policy = RecordingBoundaryPolicy(controls)
+            self.boundary_callback = None
+            self.cancel_event = threading.Event()
+            self.recorder = SimpleNamespace(
+                microphone_inventory=lambda: None,
+                config=None,
+            )
+            self.cancelled = False
+
+        def set_boundary_callback(self, callback):
+            self.boundary_callback = callback
+
+        def start(self):
+            self._boundary_policy.start(0.0)
+
+        def wait_until_started(self):
+            return None
+
+        def stop(self):
+            return "snapshot"
+
+        def complete(self):
+            return True
+
+        def fail(self, _error):
+            return True
+
+        def request_cancel(self):
+            self.cancel_event.set()
+            return True
+
+        def cancel(self):
+            self.cancel_event.set()
+            self.cancelled = True
+            return True
+
+        def observe_duration(self, now):
+            decision = self._boundary_policy.observe_duration(now)
+            if decision.should_stop and self.boundary_callback is not None:
+                self.boundary_callback(decision.reason)
+            return decision
+
+    def test_max_duration_uses_the_session_boundary_policy(self):
+        controls = RecordingControls(max_duration_seconds=2.0, warning_seconds=0.0)
+        session = self._BoundarySession(controls)
+        recording = QtVoiceTranslationRecording(session)
+        reasons = []
+        recording.set_boundary_callback(reasons.append)
+
+        recording.start()
+        decision = session.observe_duration(2.0)
+
+        self.assertTrue(decision.should_stop)
+        self.assertEqual(reasons, [RecordingBoundaryReason.MAX_DURATION])
+        recording.cancel()
+
+    def test_vad_feeds_real_input_levels_and_stops_after_silence(self):
+        class Stream:
+            instance = None
+
+            def __init__(self, **kwargs):
+                self.callback = kwargs["callback"]
+                self.stopped = False
+                self.closed = False
+                Stream.instance = self
+
+            def start(self):
+                return None
+
+            def emit(self, samples):
+                self.callback(samples, len(samples), None, None)
+
+            def stop(self):
+                self.stopped = True
+
+            def close(self):
+                self.closed = True
+
+        controls = RecordingControls(
+            vad=VADSettings(
+                enabled=True,
+                level_threshold=0.1,
+                minimum_speech_seconds=0.2,
+                silence_duration_seconds=0.2,
+            )
+        )
+        session = self._BoundarySession(controls)
+        clock_values = iter((0.1, 0.3, 0.4, 0.61))
+        recording = QtVoiceTranslationRecording(
+            session,
+            monotonic=lambda: next(clock_values),
+            sounddevice_module=SimpleNamespace(RawInputStream=Stream),
+        )
+        boundary = threading.Event()
+        reasons = []
+        recording.set_boundary_callback(
+            lambda reason: (reasons.append(reason), boundary.set())
+        )
+        recording.start()
+        stream = Stream.instance
+
+        stream.emit(array("h", [10000] * 256))
+        stream.emit(array("h", [10000] * 256))
+        stream.emit(array("h", [0] * 256))
+        stream.emit(array("h", [0] * 256))
+
+        self.assertTrue(boundary.wait(timeout=1.0))
+        self.assertEqual(reasons, [RecordingBoundaryReason.SILENCE])
+        self.assertTrue(session._boundary_policy.terminal)
+        recording.cancel()
+        self.assertTrue(stream.stopped)
+        self.assertTrue(stream.closed)
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")

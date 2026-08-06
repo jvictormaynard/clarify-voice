@@ -853,6 +853,7 @@ class QtRecordingSession(RecordingSessionGateway):
         self._workers: set[threading.Thread] = set()
         self._lock = threading.RLock()
         self._started = False
+        self._started_at: float | None = None
         self._terminal = False
         self._error: Exception | None = None
         self._boundary_callback: Callable[[Any], None] | None = None
@@ -957,6 +958,7 @@ class QtRecordingSession(RecordingSessionGateway):
             self.recorder.start(self.audio_path, self.cancel_event)
             with self._lock:
                 self._started = True
+                self._started_at = time.monotonic()
             self._start_boundary_monitor(controls)
         except Exception as error:
             with self._lock:
@@ -974,6 +976,7 @@ class QtRecordingSession(RecordingSessionGateway):
         self.wait_until_started()
         self._stop_boundary_monitor()
         self.recorder.stop()
+        stopped_at = time.monotonic()
         time.sleep(0.3)
         try:
             audio_bytes = self.audio_path.read_bytes()
@@ -983,10 +986,16 @@ class QtRecordingSession(RecordingSessionGateway):
         if len(audio_bytes) < 1000:
             self.fail(NoUsableAudioError("Recording produced no audio"))
             raise NoUsableAudioError("Recording produced no audio")
+        with self._lock:
+            started_at = self._started_at
+        duration_seconds = (
+            max(0.0, stopped_at - started_at) if started_at is not None else 0.0
+        )
         return RecordingSnapshot(
             self.audio_path,
             audio_bytes,
             cancel_token=self.provider_cancel_token,
+            duration_seconds=duration_seconds,
         )
 
     def cancel(self) -> None:
@@ -1057,6 +1066,235 @@ class QtClipboardGateway(QmlClipboardGateway):
     """Runtime-named facade over the concrete QML clipboard transaction."""
 
 
+_QT_AUDIO_COST_USD_PER_MINUTE = {
+    ("openai", "whisper-1"): 0.006,
+    ("openai", "gpt-4o-mini-transcribe"): 0.003,
+    ("openai", "gpt-4o-transcribe"): 0.006,
+    ("openai", "gpt-4o-transcribe-diarize"): 0.006,
+    ("groq", "whisper-large-v3-turbo"): 0.04 / 60,
+    ("groq", "whisper-large-v3"): 0.111 / 60,
+    # Gemini audio is token-priced; this uses the same 32 audio tokens/sec
+    # approximation as the production statistics implementation.
+    ("gemini", "gemini-2.5-flash"): 1.00 * 32 * 60 / 1_000_000,
+    ("gemini", "gemini-2.5-flash-lite"): 0.30 * 32 * 60 / 1_000_000,
+}
+
+_QT_TEXT_COST_USD_PER_MILLION_TOKENS = {
+    ("openai", "gpt-4o-mini"): (0.15, 0.60),
+    ("groq", "llama-3.3-70b-versatile"): (0.59, 0.79),
+    ("gemini", "gemini-2.5-flash"): (0.30, 2.50),
+    ("gemini", "gemini-2.5-flash-lite"): (0.10, 0.40),
+}
+
+
+def _qt_word_count(text: str) -> int:
+    return len(str(text or "").split())
+
+
+def _qt_estimated_text_cost(
+    provider: str,
+    model: str,
+    input_characters: int,
+    output_characters: int,
+) -> tuple[float, bool]:
+    rates = _QT_TEXT_COST_USD_PER_MILLION_TOKENS.get((provider, model))
+    if rates is None:
+        return 0.0, False
+    input_tokens = max(0, input_characters) / 4
+    output_tokens = max(0, output_characters) / 4
+    return (
+        (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000,
+        True,
+    )
+
+
+def _build_qt_recording_usage_event(
+    context: dict[str, Any],
+    duration_seconds: float,
+    result: str,
+) -> dict[str, Any]:
+    """Build the production usage event for a completed dictation."""
+
+    context = dict(context or {})
+    provider = str(context.get("provider", "") or "")
+    model = str(context.get("model", "") or "")
+    result = str(result or "")
+    duration = max(0.0, float(duration_seconds))
+    models = [{"provider": provider, "model": model, "purpose": "transcription"}]
+    audio_rate = _QT_AUDIO_COST_USD_PER_MINUTE.get((provider, model))
+    cost = 0.0 if audio_rate is None else audio_rate * duration / 60
+    cost_complete = audio_rate is not None
+
+    output_characters = len(result)
+    refinement_provider = str(context.get("refinement_provider", "") or "")
+    refinement_model = str(context.get("refinement_model", "") or "")
+    if refinement_provider and refinement_model:
+        models.append(
+            {
+                "provider": refinement_provider,
+                "model": refinement_model,
+                "purpose": "refinement",
+            }
+        )
+        text_cost, text_complete = _qt_estimated_text_cost(
+            refinement_provider,
+            refinement_model,
+            output_characters,
+            output_characters,
+        )
+        cost += text_cost
+        cost_complete = cost_complete and text_complete
+    elif PROVIDER_REGISTRY.supports(provider, ProviderCapability.MULTIMODAL_AUDIO):
+        text_cost, text_complete = _qt_estimated_text_cost(
+            provider,
+            model,
+            0,
+            output_characters,
+        )
+        cost += text_cost
+        cost_complete = cost_complete and text_complete
+
+    return {
+        "timestamp": time.time(),
+        "type": "recording",
+        "duration_seconds": round(duration, 3),
+        "mode": str(context.get("mode", "transcription") or "transcription"),
+        "execution": str(context.get("execution", "cloud") or "cloud"),
+        "refinement_execution": str(context.get("refinement_execution", "") or ""),
+        "models": models,
+        "word_count": _qt_word_count(result),
+        "character_count": output_characters,
+        "estimated_cost_usd": round(cost, 8),
+        "cost_complete": cost_complete,
+    }
+
+
+def _build_qt_rewrite_usage_event(
+    provider: str,
+    model: str,
+    source: str,
+    result: str,
+) -> dict[str, Any]:
+    """Build the production usage event for a rewrite operation."""
+
+    provider = str(provider or "")
+    model = str(model or "")
+    source = str(source or "")
+    result = str(result or "")
+    cost, cost_complete = _qt_estimated_text_cost(
+        provider,
+        model,
+        len(source),
+        len(result),
+    )
+    return {
+        "timestamp": time.time(),
+        "type": "rewrite",
+        "duration_seconds": 0.0,
+        "mode": "rewrite",
+        "models": [{"provider": provider, "model": model, "purpose": "refinement"}],
+        "word_count": _qt_word_count(result),
+        "character_count": len(result),
+        "estimated_cost_usd": round(cost, 8),
+        "cost_complete": cost_complete,
+    }
+
+
+def _build_qt_translation_usage_event(
+    provider: str,
+    model: str,
+    source: str,
+    result: str,
+    target_language: str,
+) -> dict[str, Any]:
+    """Build the production usage event for a text translation."""
+
+    event = _build_qt_rewrite_usage_event(provider, model, source, result)
+    event.update(
+        {
+            "type": "translation",
+            "mode": "translation",
+            "target_language": str(target_language or ""),
+        }
+    )
+    return event
+
+
+def _build_qt_voice_translation_usage_event(
+    transcription_provider: str,
+    transcription_model: str,
+    translation_provider: str,
+    translation_model: str,
+    duration_seconds: float,
+    source: str,
+    result: str,
+    target_language: str,
+) -> dict[str, Any]:
+    """Build the production-compatible anonymous voice-translation event."""
+
+    transcription_provider = str(transcription_provider or "")
+    transcription_model = str(transcription_model or "")
+    translation_provider = str(translation_provider or "")
+    translation_model = str(translation_model or "")
+    source = str(source or "")
+    result = str(result or "")
+    target_language = str(target_language or "")
+    duration = max(0.0, float(duration_seconds))
+
+    transcription_cost = _QT_AUDIO_COST_USD_PER_MINUTE.get(
+        (transcription_provider, transcription_model)
+    )
+    cost = 0.0 if transcription_cost is None else transcription_cost * duration / 60
+    cost_complete = transcription_cost is not None
+    if PROVIDER_REGISTRY.supports(
+        transcription_provider, ProviderCapability.MULTIMODAL_AUDIO
+    ):
+        multimodal_cost, multimodal_complete = _qt_estimated_text_cost(
+            transcription_provider, transcription_model, 0, len(source)
+        )
+        cost += multimodal_cost
+        cost_complete = cost_complete and multimodal_complete
+
+    translation_cost, translation_complete = _qt_estimated_text_cost(
+        translation_provider,
+        translation_model,
+        len(source),
+        len(result),
+    )
+    cost += translation_cost
+    cost_complete = cost_complete and translation_complete
+
+    return {
+        "timestamp": time.time(),
+        "type": "voice_translation",
+        "mode": "voice_translation",
+        "workflow": "voice_translation",
+        "duration_seconds": round(duration, 3),
+        "transcription_provider": transcription_provider,
+        "transcription_model": transcription_model,
+        "translation_provider": translation_provider,
+        "translation_model": translation_model,
+        "target_language": target_language,
+        "models": [
+            {
+                "provider": transcription_provider,
+                "model": transcription_model,
+                "purpose": "transcription",
+            },
+            {
+                "provider": translation_provider,
+                "model": translation_model,
+                "purpose": "translation",
+            },
+        ],
+        "word_count": _qt_word_count(source),
+        "character_count": len(source),
+        "translation_character_count": len(result),
+        "estimated_cost_usd": round(cost, 8),
+        "cost_complete": cost_complete,
+    }
+
+
 class QtStatisticsGateway:
     def __init__(self, repositories: ApplicationRepositories) -> None:
         self.repositories = repositories
@@ -1070,29 +1308,12 @@ class QtStatisticsGateway:
         duration_seconds: float,
         result: str,
     ) -> None:
-        self._record(
-            {
-                "event": "dictation",
-                "provider": context.get("provider", ""),
-                "model": context.get("model", ""),
-                "mode": context.get("mode", ""),
-                "duration_seconds": max(0.0, float(duration_seconds)),
-                "result_characters": len(result),
-            }
-        )
+        self._record(_build_qt_recording_usage_event(context, duration_seconds, result))
 
     def record_rewrite(
         self, provider: str, model: str, source: str, result: str
     ) -> None:
-        self._record(
-            {
-                "event": "rewrite",
-                "provider": provider,
-                "model": model,
-                "source_characters": len(source),
-                "result_characters": len(result),
-            }
-        )
+        self._record(_build_qt_rewrite_usage_event(provider, model, source, result))
 
     def record_translation(
         self,
@@ -1103,15 +1324,35 @@ class QtStatisticsGateway:
         target_language: str,
     ) -> None:
         self._record(
-            {
-                "event": "translation",
-                "provider": provider,
-                "model": model,
-                "source_characters": len(source),
-                "result_characters": len(result),
-                "target_language": target_language,
-            }
+            _build_qt_translation_usage_event(
+                provider,
+                model,
+                source,
+                result,
+                target_language,
+            )
         )
+
+    def record_voice_translation(
+        self,
+        config: Any,
+        state: Any,
+        duration_seconds: float,
+    ) -> None:
+        """Persist one production-schema event containing both provider legs."""
+
+        route = getattr(config, "route", None)
+        event = _build_qt_voice_translation_usage_event(
+            getattr(state, "transcription_provider", ""),
+            getattr(state, "transcription_model", ""),
+            getattr(route, "provider_id", ""),
+            getattr(route, "model_id", ""),
+            duration_seconds,
+            getattr(state, "raw_transcript", ""),
+            getattr(state, "translated_text", ""),
+            getattr(config, "target_language", ""),
+        )
+        self._record(event)
 
 
 def _history_path_for_repositories(repositories: ApplicationRepositories) -> Path:

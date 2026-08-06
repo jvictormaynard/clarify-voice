@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import unittest
 from types import SimpleNamespace
 
@@ -30,9 +31,12 @@ class _Scheduler:
 class _Recording:
     def __init__(self):
         self.snapshot = SimpleNamespace(
-            cancel_token=CancellationToken(), duration_seconds=12.5)
+            cancel_token=CancellationToken(), duration_seconds=12.5
+        )
+        self.boundary_callback = None
         self.started = False
         self.stopped = False
+        self.stop_calls = 0
         self.completed = False
         self.failed = None
         self.cancelled = False
@@ -40,12 +44,21 @@ class _Recording:
     def start(self):
         self.started = True
 
+    def set_boundary_callback(self, callback):
+        self.boundary_callback = callback
+
+    def trigger_boundary(self, reason="max_duration"):
+        if self.boundary_callback is None:
+            return False
+        return self.boundary_callback(reason)
+
     def wait_until_started(self):
         if not self.started:
             raise AssertionError("recording was not started")
 
     def stop(self):
         self.stopped = True
+        self.stop_calls += 1
         return self.snapshot
 
     def complete(self):
@@ -146,7 +159,8 @@ class VoiceTranslationRuntimeTests(unittest.TestCase):
             _config,
             on_state=self.events.append,
             on_usage=lambda config, state, duration: self.usage.append(
-                (config, state, duration)),
+                (config, state, duration)
+            ),
         )
 
     def test_start_stop_runs_once_with_dedicated_route_and_publication(self):
@@ -175,6 +189,31 @@ class VoiceTranslationRuntimeTests(unittest.TestCase):
             self.clipboard.published,
             [("Hello", "target", VoiceTranslationPublication.PASTED)],
         )
+
+    def test_boundary_and_manual_stop_have_one_linearized_winner(self):
+        self.assertTrue(self.runtime.start("target"))
+        barrier = threading.Barrier(3)
+        results = []
+
+        def invoke(callback):
+            barrier.wait()
+            results.append(callback())
+
+        threads = [
+            threading.Thread(target=invoke, args=(self.runtime.stop,)),
+            threading.Thread(target=invoke, args=(self.recording.trigger_boundary,)),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=1)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(sum(bool(result) for result in results), 1)
+        self.assertEqual(self.recording.stop_calls, 1)
+        self.assertFalse(self.runtime.active)
+        self.assertEqual(self.provider.requests[0].route.prompt, "literal")
 
     def test_translation_failure_publishes_raw_copy_only(self):
         self.provider.error = RuntimeError("translation unavailable")
@@ -216,8 +255,7 @@ class VoiceTranslationRuntimeTests(unittest.TestCase):
         self.assertFalse(runtime.active)
         self.assertEqual(self.events[-1].phase, VoiceTranslationPhase.FAILED)
         self.assertIsNone(self.events[-1].workflow_state)
-        self.assertEqual(
-            self.events[-1].error_code, "MicrophoneUnavailableError")
+        self.assertEqual(self.events[-1].error_code, "MicrophoneUnavailableError")
         self.assertIsInstance(recording.failed, MicrophoneUnavailableError)
         self.assertEqual(self.provider.requests, [])
 
@@ -238,8 +276,7 @@ class VoiceTranslationRuntimeTests(unittest.TestCase):
         self.assertFalse(runtime.active)
         self.assertEqual(self.events[-1].phase, VoiceTranslationPhase.FAILED)
         self.assertIsNone(self.events[-1].workflow_state)
-        self.assertEqual(
-            self.events[-1].error_code, "RecordingEncodingError")
+        self.assertEqual(self.events[-1].error_code, "RecordingEncodingError")
         self.assertIsInstance(recording.failed, RecordingEncodingError)
         self.assertEqual(self.provider.requests, [])
 

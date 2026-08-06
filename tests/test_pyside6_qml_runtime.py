@@ -28,6 +28,7 @@ if PYSIDE6_AVAILABLE:
         QtRecorder,
         QtRecordingSession,
         QtHistoryRecorder,
+        QtStatisticsGateway,
         QtWorkflowRuntime,
         QtWorkflowConfig,
         QtWorkflowScheduler,
@@ -145,6 +146,8 @@ class QtRecordingSessionTests(unittest.TestCase):
 
                 self.assertIs(snapshot.cancel_token, session.provider_cancel_token)
                 self.assertFalse(snapshot.cancel_token.cancelled)
+                self.assertIsNotNone(snapshot.duration_seconds)
+                self.assertGreaterEqual(snapshot.duration_seconds, 0.0)
                 self.assertTrue(session.audio_path.exists())
 
                 session.complete()
@@ -965,6 +968,101 @@ class QmlRuntimeFactoryTests(unittest.TestCase):
 
         self.assertIsInstance(runtime.history_recorder, QtHistoryRecorder)
         self.assertFalse(runtime.history_recorder.store.enabled)
+
+
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
+class QtStatisticsGatewayTests(unittest.TestCase):
+    class UsageRepository:
+        def __init__(self):
+            self.events = []
+
+        def append(self, event):
+            self.events.append(event)
+
+    def test_workflow_statistics_use_the_production_event_schema(self):
+        repository = self.UsageRepository()
+        statistics = QtStatisticsGateway(SimpleNamespace(usage_stats=repository))
+
+        with patch("spikes.pyside6.qml_runtime.time.time", return_value=1234.5):
+            statistics.record_dictation(
+                {
+                    "provider": "openai",
+                    "model": "whisper-1",
+                    "mode": "prompt",
+                },
+                12.5,
+                "Uma transcrição",
+            )
+            statistics.record_rewrite("openai", "gpt-4o-mini", "source", "rewritten")
+            statistics.record_translation(
+                "openai", "gpt-4o-mini", "source", "traduzido", "en-US"
+            )
+
+        self.assertEqual(
+            [event["type"] for event in repository.events],
+            ["recording", "rewrite", "translation"],
+        )
+        self.assertEqual(repository.events[0]["duration_seconds"], 12.5)
+        self.assertEqual(repository.events[0]["mode"], "prompt")
+        self.assertEqual(repository.events[1]["models"][0]["purpose"], "refinement")
+        self.assertEqual(repository.events[2]["target_language"], "en-US")
+
+    def test_voice_translation_matches_usage_summary_schema_and_keeps_both_legs(self):
+        from app import _usage_summary
+
+        repository = self.UsageRepository()
+        statistics = QtStatisticsGateway(SimpleNamespace(usage_stats=repository))
+        config = SimpleNamespace(
+            route=SimpleNamespace(provider_id="openai", model_id="gpt-4o-mini"),
+            target_language="de-DE",
+        )
+        state = SimpleNamespace(
+            transcription_provider="openai",
+            transcription_model="whisper-1",
+            raw_transcript="Olá do microfone",
+            translated_text="Hallo vom Mikrofon",
+        )
+
+        with patch("spikes.pyside6.qml_runtime.time.time", return_value=1234.5):
+            statistics.record_voice_translation(config, state, 45.5)
+
+        self.assertEqual(len(repository.events), 1)
+        event = repository.events[0]
+        self.assertEqual(event["timestamp"], 1234.5)
+        self.assertEqual(event["type"], "voice_translation")
+        self.assertEqual(event["mode"], "voice_translation")
+        self.assertEqual(event["workflow"], "voice_translation")
+        self.assertEqual(event["duration_seconds"], 45.5)
+        self.assertEqual(event["transcription_provider"], "openai")
+        self.assertEqual(event["transcription_model"], "whisper-1")
+        self.assertEqual(event["translation_provider"], "openai")
+        self.assertEqual(event["translation_model"], "gpt-4o-mini")
+        self.assertEqual(event["target_language"], "de-DE")
+        self.assertEqual(event["word_count"], 3)
+        self.assertEqual(event["character_count"], len("Olá do microfone"))
+        self.assertEqual(
+            event["translation_character_count"], len("Hallo vom Mikrofon")
+        )
+        self.assertGreater(event["estimated_cost_usd"], 0.0045)
+        self.assertTrue(event["cost_complete"])
+        self.assertEqual(
+            [
+                (entry["provider"], entry["model"], entry["purpose"])
+                for entry in event["models"]
+            ],
+            [
+                ("openai", "whisper-1", "transcription"),
+                ("openai", "gpt-4o-mini", "translation"),
+            ],
+        )
+
+        summary = _usage_summary([event], now=1234.5)
+        self.assertEqual(summary["recordings"], 1)
+        self.assertEqual(summary["translations"], 1)
+        self.assertEqual(summary["total_seconds"], 45.5)
+        self.assertEqual(summary["total_words"], 3)
+        self.assertEqual(summary["model_calls"], 2)
+        self.assertEqual(summary["total_cost_usd"], event["estimated_cost_usd"])
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")

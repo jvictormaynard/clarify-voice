@@ -451,17 +451,21 @@ class PySide6QmlFrontendTests(unittest.TestCase):
 
         _record_voice_translation_usage(statistics, config, state, 12.5)
 
+        self.assertEqual(len(usage_repository.events), 1)
+        event = usage_repository.events[0]
+        self.assertEqual(event["type"], "voice_translation")
+        self.assertEqual(event["duration_seconds"], 12.5)
+        self.assertEqual(event["target_language"], "en-US")
         self.assertEqual(
-            [event["event"] for event in usage_repository.events],
-            ["dictation", "translation"],
+            [
+                (entry["provider"], entry["model"], entry["purpose"])
+                for entry in event["models"]
+            ],
+            [
+                ("gemini", "gemini-audio", "transcription"),
+                ("openai", "gpt-4o-mini", "translation"),
+            ],
         )
-        self.assertEqual(usage_repository.events[0]["provider"], "gemini")
-        self.assertEqual(usage_repository.events[0]["model"], "gemini-audio")
-        self.assertEqual(usage_repository.events[0]["mode"], "voice_translation")
-        self.assertEqual(usage_repository.events[0]["duration_seconds"], 12.5)
-        self.assertEqual(usage_repository.events[1]["provider"], "openai")
-        self.assertEqual(usage_repository.events[1]["model"], "gpt-4o-mini")
-        self.assertEqual(usage_repository.events[1]["target_language"], "en-US")
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")

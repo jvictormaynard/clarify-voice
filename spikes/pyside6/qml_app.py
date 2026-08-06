@@ -259,26 +259,9 @@ def _record_voice_translation_usage(
     state,
     duration_seconds,
 ) -> None:
-    """Record both voice-translation legs through the QML stats boundary."""
+    """Record one production-schema event through the UI-free Qt gateway."""
 
-    source = str(getattr(state, "raw_transcript", "") or "")
-    statistics.record_dictation(
-        {
-            "provider": str(getattr(state, "transcription_provider", "") or ""),
-            "model": str(getattr(state, "transcription_model", "") or ""),
-            "mode": "voice_translation",
-        },
-        duration_seconds,
-        source,
-    )
-    route = getattr(config, "route", None)
-    statistics.record_translation(
-        str(getattr(route, "provider_id", "") or ""),
-        str(getattr(route, "model_id", "") or ""),
-        source,
-        str(getattr(state, "translated_text", "") or ""),
-        str(getattr(config, "target_language", "") or ""),
-    )
+    statistics.record_voice_translation(config, state, duration_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:

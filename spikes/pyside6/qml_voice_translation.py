@@ -10,10 +10,18 @@ own the feature without importing the legacy frontend.
 from __future__ import annotations
 
 from collections.abc import Callable
+import math
 from pathlib import Path
+import threading
+import time
 from typing import Any
 
 from PySide6.QtCore import Property, QObject, Qt, Signal, Slot
+
+try:
+    import sounddevice as _sounddevice
+except (ImportError, OSError):
+    _sounddevice = None
 
 from provider_http import ProviderCancelledError
 from provider_registry import PROVIDER_REGISTRY
@@ -276,10 +284,218 @@ class QmlVoiceTranslationProvider(VoiceTranslationProvider):
 
 
 class QtVoiceTranslationRecording(VoiceTranslationRecording):
-    """Add the cancellation request seam to an existing Qt recording session."""
+    """Add boundary, level, and cancellation seams to a Qt recording session."""
 
-    def __init__(self, session: Any) -> None:
+    def __init__(
+        self,
+        session: Any,
+        *,
+        monotonic: Callable[[], float] | None = None,
+        sounddevice_module: Any | None = None,
+    ) -> None:
         self.session = session
+        self._monotonic = monotonic or time.monotonic
+        self._sounddevice = (
+            _sounddevice if sounddevice_module is None else sounddevice_module
+        )
+        self._boundary_lock = threading.RLock()
+        self._boundary_callback: Callable[[Any], None] | None = None
+        self._boundary_claimed = False
+        self._vad_stop = threading.Event()
+        self._vad_boundary = threading.Event()
+        self._vad_worker: threading.Thread | None = None
+        self._vad_stream: Any | None = None
+        self._vad_reason: Any = None
+
+    def set_boundary_callback(self, callback: Callable[[Any], None] | None) -> None:
+        """Route session policy notifications through this recording owner."""
+
+        if callback is not None and not callable(callback):
+            raise TypeError("recording boundary callback must be callable")
+        with self._boundary_lock:
+            self._boundary_callback = callback
+            self._boundary_claimed = False
+        set_callback = getattr(self.session, "set_boundary_callback", None)
+        if callable(set_callback):
+            set_callback(self._session_boundary_callback if callback else None)
+
+    def _session_boundary_callback(self, reason: Any = None) -> None:
+        """Deliver duration boundaries from the session's lifecycle worker."""
+
+        self._notify_boundary(reason)
+
+    def _notify_boundary(self, reason: Any = None) -> None:
+        with self._boundary_lock:
+            if self._boundary_claimed:
+                return
+            self._boundary_claimed = True
+            callback = self._boundary_callback
+        if callback is not None:
+            callback(reason)
+
+    def _boundary_policy(self) -> Any | None:
+        policy = getattr(self.session, "boundary_policy", None)
+        if policy is None:
+            policy = getattr(self.session, "_boundary_policy", None)
+        return policy
+
+    def _selected_stream_device(self) -> int | str | None:
+        """Resolve the current PortAudio handle from the session's inventory."""
+
+        recorder = getattr(self.session, "recorder", None)
+        inventory_reader = getattr(recorder, "microphone_inventory", None)
+        if not callable(inventory_reader):
+            return None
+        inventory = inventory_reader()
+        if inventory is None:
+            return None
+        config = getattr(recorder, "config", None)
+        selected_id = None
+        if config is not None:
+            current = getattr(config, "current", None)
+            if callable(current):
+                current_config = current()
+                selected_id = getattr(
+                    getattr(current_config, "microphone", None),
+                    "selected_id",
+                    None,
+                )
+        selection = inventory.resolve(selected_id)
+        if not getattr(selection, "can_record", False):
+            return None
+        device = getattr(selection, "device", None)
+        backend_index = getattr(device, "backend_index", None)
+        if isinstance(backend_index, int):
+            return backend_index
+        # PortAudio can expose a usable endpoint without a numeric handle in
+        # injected/native inventory adapters. Match the recorder's existing
+        # test path and let sounddevice resolve the endpoint by name.
+        return getattr(device, "name", None) or None
+
+    @staticmethod
+    def _input_level(indata: Any) -> float | None:
+        try:
+            raw_samples = memoryview(indata)
+            try:
+                samples = raw_samples.cast("h")
+            except (TypeError, ValueError):
+                samples = memoryview(raw_samples.tobytes()).cast("h")
+        except (TypeError, ValueError):
+            return None
+        if not len(samples):
+            return 0.0
+        mean_square = sum(sample * sample for sample in samples) / len(samples)
+        return min(1.0, math.sqrt(mean_square) / 32768.0 * 16)
+
+    def _start_vad_monitor(self) -> None:
+        policy = self._boundary_policy()
+        controls = getattr(policy, "controls", None)
+        vad = getattr(controls, "vad", None)
+        with self._boundary_lock:
+            callback_registered = self._boundary_callback is not None
+        if (
+            policy is None
+            or not getattr(vad, "enabled", False)
+            or not callback_registered
+        ):
+            return
+        sounddevice_module = self._sounddevice
+        stream_type = getattr(sounddevice_module, "RawInputStream", None)
+        if not callable(stream_type):
+            raise RuntimeError("VAD requires the sounddevice input-level monitor")
+
+        self._vad_stop.clear()
+        self._vad_boundary.clear()
+        self._vad_reason = None
+
+        def observe_input(indata: Any, *_args: Any) -> None:
+            if self._vad_stop.is_set():
+                return
+            level = self._input_level(indata)
+            if level is None:
+                return
+            try:
+                decision = policy.observe(
+                    self._monotonic(),
+                    input_level=level,
+                )
+            except Exception:
+                return
+            if not getattr(decision, "should_stop", False):
+                return
+            with self._boundary_lock:
+                self._vad_reason = getattr(decision, "reason", None)
+            self._vad_boundary.set()
+
+        def wait_for_boundary() -> None:
+            try:
+                self._vad_boundary.wait()
+                if (
+                    self._vad_stop.is_set()
+                    or getattr(
+                        getattr(self.session, "cancel_event", None),
+                        "is_set",
+                        lambda: False,
+                    )()
+                ):
+                    return
+                with self._boundary_lock:
+                    reason = self._vad_reason
+                self._notify_boundary(reason)
+            finally:
+                with self._boundary_lock:
+                    if self._vad_worker is threading.current_thread():
+                        self._vad_worker = None
+
+        worker = threading.Thread(
+            target=wait_for_boundary,
+            name="ClarifyVoiceQmlVoiceTranslationVAD",
+            daemon=True,
+        )
+        with self._boundary_lock:
+            self._vad_worker = worker
+        worker.start()
+        try:
+            kwargs: dict[str, Any] = {
+                "channels": 1,
+                "samplerate": 16000,
+                "blocksize": 256,
+                "dtype": "int16",
+                "callback": observe_input,
+            }
+            device = self._selected_stream_device()
+            if device is not None:
+                kwargs["device"] = device
+            stream = stream_type(**kwargs)
+            with self._boundary_lock:
+                self._vad_stream = stream
+            stream.start()
+        except Exception:
+            self._stop_vad_monitor()
+            raise
+
+    def _stop_vad_monitor(self) -> None:
+        self._vad_stop.set()
+        self._vad_boundary.set()
+        with self._boundary_lock:
+            stream = self._vad_stream
+            worker = self._vad_worker
+            self._vad_stream = None
+        if stream is not None:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=1.0)
+        with self._boundary_lock:
+            if self._vad_worker is worker:
+                self._vad_worker = None
+
+    def _block_boundary_callbacks(self) -> None:
+        with self._boundary_lock:
+            self._boundary_claimed = True
+        self._stop_vad_monitor()
 
     def attach_worker(self, worker: Any) -> None:
         """Forward scheduler ownership to the underlying Qt session."""
@@ -294,21 +510,34 @@ class QtVoiceTranslationRecording(VoiceTranslationRecording):
         self.session.detach_worker(worker)
 
     def start(self) -> None:
-        self.session.start()
+        try:
+            self.session.start()
+            self._start_vad_monitor()
+        except Exception:
+            self._block_boundary_callbacks()
+            try:
+                self.session.cancel()
+            except Exception:
+                pass
+            raise
 
     def wait_until_started(self) -> None:
         self.session.wait_until_started()
 
     def stop(self) -> Any:
+        self._block_boundary_callbacks()
         return self.session.stop()
 
     def complete(self) -> bool | None:
+        self._block_boundary_callbacks()
         return self.session.complete()
 
     def fail(self, error: Exception) -> bool | None:
+        self._block_boundary_callbacks()
         return self.session.fail(error)
 
     def request_cancel(self) -> bool:
+        self._block_boundary_callbacks()
         request_cancel = getattr(self.session, "request_cancel", None)
         if callable(request_cancel):
             return bool(request_cancel())
@@ -325,6 +554,7 @@ class QtVoiceTranslationRecording(VoiceTranslationRecording):
         return requested
 
     def cancel(self) -> bool:
+        self._block_boundary_callbacks()
         result = self.session.cancel()
         return True if result is None else bool(result)
 
@@ -332,12 +562,28 @@ class QtVoiceTranslationRecording(VoiceTranslationRecording):
 class QtVoiceTranslationRecordingFactory:
     """Create one wrapped session from the existing Qt audio gateway."""
 
-    def __init__(self, recording_audio: QtRecordingAudioGateway) -> None:
+    def __init__(
+        self,
+        recording_audio: QtRecordingAudioGateway,
+        *,
+        monotonic: Callable[[], float] | None = None,
+        sounddevice_module: Any | None = None,
+    ) -> None:
         self.recording_audio = recording_audio
+        self.monotonic = monotonic
+        self.sounddevice_module = sounddevice_module
 
     def __call__(self) -> QtVoiceTranslationRecording | None:
         session = self.recording_audio.create_session()
-        return None if session is None else QtVoiceTranslationRecording(session)
+        return (
+            None
+            if session is None
+            else QtVoiceTranslationRecording(
+                session,
+                monotonic=self.monotonic,
+                sounddevice_module=self.sounddevice_module,
+            )
+        )
 
 
 class QmlVoiceTranslationController(QObject):
