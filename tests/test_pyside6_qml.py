@@ -171,9 +171,7 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("QApplication", source)
         self.assertNotIn("QGuiApplication", source)
         self.assertIn("QSystemTrayIcon", source)
-        self.assertIn(
-            "_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]", source
-        )
+        self.assertIn("_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]", source)
         self.assertIn("sys.path.insert(0, str(_REPOSITORY_ROOT))", source)
         self.assertIn("create_real_workflow_runtime", source)
         self.assertIn("QmlSettingsController", source)
