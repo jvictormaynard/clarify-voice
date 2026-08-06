@@ -325,6 +325,7 @@ class QtShell(QObject):
         self._menu: Any | None = None
         self._started = False
         self._hotkeys_connected = False
+        self._hotkeys_started = False
 
     @property
     def is_running(self) -> bool:
@@ -346,7 +347,7 @@ class QtShell(QObject):
         if not self._instance_guard.acquire():
             return False
 
-        hotkeys_started = False
+        hotkeys_start_attempted = False
         try:
             if tray_available:
                 self._create_tray()
@@ -354,16 +355,17 @@ class QtShell(QObject):
                 if not self._hotkeys_connected:
                     self._hotkeys.triggered.connect(self._handle_hotkey)
                     self._hotkeys_connected = True
+                hotkeys_start_attempted = True
                 self._hotkeys.start(self._window)
-                hotkeys_started = True
+                self._hotkeys_started = True
         except BaseException:
             try:
-                if self._hotkeys is not None and hotkeys_started:
+                if self._hotkeys is not None and hotkeys_start_attempted:
                     self._hotkeys.stop()
             finally:
+                self._hotkeys_started = False
                 self._cleanup_tray()
                 self._started = False
-                self._instance_guard.release()
             raise
 
         self._started = True
@@ -378,9 +380,10 @@ class QtShell(QObject):
 
         self._started = False
         try:
-            if self._hotkeys is not None:
+            if self._hotkeys is not None and self._hotkeys_started:
                 self._hotkeys.stop()
         finally:
+            self._hotkeys_started = False
             self._cleanup_tray()
             self._instance_guard.release()
             self.stopped.emit()

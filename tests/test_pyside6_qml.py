@@ -171,6 +171,10 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("QApplication", source)
         self.assertNotIn("QGuiApplication", source)
         self.assertIn("QSystemTrayIcon", source)
+        self.assertIn(
+            "_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]", source
+        )
+        self.assertIn("sys.path.insert(0, str(_REPOSITORY_ROOT))", source)
         self.assertIn("create_real_workflow_runtime", source)
         self.assertIn("QmlSettingsController", source)
         self.assertIn("loaded_config = repositories.config.load()", source)
@@ -415,23 +419,14 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
             def stop(self):
                 self.stop_calls += 1
 
-        class Hotkeys:
-            def __init__(self):
-                self.stop_calls = 0
-
-            def stop(self):
-                self.stop_calls += 1
-
         shell = Shell()
-        hotkeys = Hotkeys()
         with patch(
             "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
             return_value=True,
         ):
-            result = _start_shell_if_available(shell, hotkeys)
+            result = _start_shell_if_available(shell)
         self.assertIs(result, ShellStartResult.SETUP_FAILED)
-        self.assertEqual(shell.stop_calls, 1)
-        self.assertEqual(hotkeys.stop_calls, 1)
+        self.assertEqual(shell.stop_calls, 0)
 
         class NoTrayShell:
             def __init__(self):
@@ -446,7 +441,7 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
             "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
             return_value=False,
         ):
-            result = _start_shell_if_available(shell, hotkeys)
+            result = _start_shell_if_available(shell)
         self.assertIs(result, ShellStartResult.STARTED_WITHOUT_TRAY)
         self.assertEqual(shell.start_calls, [False])
 
@@ -458,7 +453,7 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
             "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
             return_value=True,
         ):
-            result = _start_shell_if_available(SecondaryShell(), None)
+            result = _start_shell_if_available(SecondaryShell())
         self.assertIs(result, ShellStartResult.SECONDARY_INSTANCE)
 
 

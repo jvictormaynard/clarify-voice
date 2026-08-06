@@ -180,6 +180,12 @@ class FakeHotkeys(QObject):
         self.is_running = False
 
 
+class FailingHotkeys(FakeHotkeys):
+    def start(self, window) -> set[int]:
+        super().start(window)
+        raise RuntimeError("hotkey setup failed")
+
+
 class FakeApplication:
     def __init__(self):
         self.quit_calls = 0
@@ -454,12 +460,15 @@ class QtShellTests(unittest.TestCase):
             shell.start()
 
         self.assertFalse(shell.is_running)
-        self.assertFalse(shell._instance_guard.is_primary)
+        self.assertTrue(shell._instance_guard.is_primary)
         self.assertIsNone(shell.tray)
         self.assertFalse(tray.visible)
         self.assertEqual(tray.hide_calls, 1)
         self.assertEqual(tray.delete_later_calls, 1)
         self.assertFalse(hotkeys.stopped)
+
+        shell.stop()
+        self.assertFalse(shell._instance_guard.is_primary)
 
     def test_partial_menu_failure_cleans_both_tray_objects(self):
         tray = FakeTray(None, None)
@@ -474,12 +483,30 @@ class QtShellTests(unittest.TestCase):
             shell.start()
 
         self.assertFalse(shell.is_running)
-        self.assertFalse(shell._instance_guard.is_primary)
+        self.assertTrue(shell._instance_guard.is_primary)
         self.assertIsNone(shell.tray)
         self.assertFalse(tray.visible)
         self.assertEqual(tray.hide_calls, 1)
         self.assertEqual(tray.delete_later_calls, 1)
         self.assertEqual(menu.delete_later_calls, 1)
+
+        shell.stop()
+        self.assertFalse(shell._instance_guard.is_primary)
+
+    def test_hotkey_setup_failure_cleans_backend_but_retains_guard(self):
+        hotkeys = FailingHotkeys()
+        shell = self._shell(hotkeys=hotkeys)
+
+        with self.assertRaisesRegex(RuntimeError, "hotkey setup failed"):
+            shell.start(tray_available=False)
+
+        self.assertFalse(shell.is_running)
+        self.assertTrue(shell._instance_guard.is_primary)
+        self.assertFalse(hotkeys.is_running)
+        self.assertEqual(hotkeys.stop_calls, 1)
+
+        shell.stop()
+        self.assertFalse(shell._instance_guard.is_primary)
 
     def test_stop_is_idempotent_after_started_shell(self):
         hotkeys = FakeHotkeys()

@@ -2,32 +2,39 @@
 
 from __future__ import annotations
 
-from enum import Enum
 import sys
+from enum import Enum
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
-from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+# Source autostart executes this file directly from ``spikes/pyside6`` while
+# the root-level workflow modules remain package imports.  Put the repository
+# root on ``sys.path`` before importing either the Qt or application modules.
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from PySide6.QtCore import QUrl  # noqa: E402
+from PySide6.QtQml import QQmlApplicationEngine  # noqa: E402
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
 
 try:
-    from .qml_bridge import QmlWorkflowBridge
-    from .qml_settings import QmlSettingsController
-    from .qml_runtime import (
+    from .qml_bridge import QmlWorkflowBridge  # noqa: E402
+    from .qml_settings import QmlSettingsController  # noqa: E402
+    from .qml_runtime import (  # noqa: E402
         QtRuntimeError,
         QtWorkflowScheduler,
         create_real_workflow_runtime,
     )
-    from .qt_shell import QtShell, WindowsGlobalHotkeyBackend
+    from .qt_shell import QtShell, WindowsGlobalHotkeyBackend  # noqa: E402
 except ImportError:  # PyInstaller analyzes this file as a standalone entry point.
-    from qml_bridge import QmlWorkflowBridge
-    from qml_settings import QmlSettingsController
-    from qml_runtime import (
+    from qml_bridge import QmlWorkflowBridge  # noqa: E402
+    from qml_settings import QmlSettingsController  # noqa: E402
+    from qml_runtime import (  # noqa: E402
         QtRuntimeError,
         QtWorkflowScheduler,
         create_real_workflow_runtime,
     )
-    from qt_shell import QtShell, WindowsGlobalHotkeyBackend
+    from qt_shell import QtShell, WindowsGlobalHotkeyBackend  # noqa: E402
 
 
 class ShellStartResult(Enum):
@@ -39,7 +46,7 @@ class ShellStartResult(Enum):
     SETUP_FAILED = "setup_failed"
 
 
-def _start_shell_if_available(shell, hotkeys) -> ShellStartResult:
+def _start_shell_if_available(shell) -> ShellStartResult:
     """Start the native shell and retain a usable QML window on setup errors.
 
     The shell always owns the single-instance guard.  Only tray construction is
@@ -53,16 +60,9 @@ def _start_shell_if_available(shell, hotkeys) -> ShellStartResult:
         if not shell.start(tray_available=tray_available):
             return ShellStartResult.SECONDARY_INSTANCE
     except Exception as error:
-        for resource in (shell, hotkeys):
-            if resource is None:
-                continue
-            try:
-                resource.stop()
-            except Exception as cleanup_error:
-                print(
-                    f"ClarifyVoice QML shell cleanup failed: {cleanup_error}",
-                    file=sys.stderr,
-                )
+        # QtShell.start() has already removed any partially-created tray or
+        # hotkey resources.  It deliberately keeps the instance guard owned so
+        # this fallback runtime remains single-instance until shutdown.
         print(
             f"ClarifyVoice QML shell unavailable: {error}",
             file=sys.stderr,
@@ -179,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     _connect_shutdown(app, shell, runtime)
 
-    shell_result = _start_shell_if_available(shell, hotkeys)
+    shell_result = _start_shell_if_available(shell)
     if shell_result is ShellStartResult.SECONDARY_INSTANCE:
         runtime.shutdown()
         return 0
