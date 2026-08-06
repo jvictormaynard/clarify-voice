@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 try:
     from PySide6.QtCore import QCoreApplication
+    from spikes.pyside6 import qml_settings
     from spikes.pyside6.qml_settings import QmlSettingsController
 
     PYSIDE6_AVAILABLE = True
@@ -282,6 +283,27 @@ class QmlSettingsControllerTests(unittest.TestCase):
                 (Path(directory) / "config.json").read_text(encoding="utf-8")
             )
             self.assertEqual(payload["workflows"]["rewrite"]["provider_id"], "groq")
+
+    def test_source_autostart_command_uses_absolute_qml_entrypoint(self):
+        executable = r"C:\Program Files\Python311\python.exe"
+        entrypoint = (SETTINGS.parent / "qml_app.py").resolve()
+
+        with patch.object(qml_settings.sys, "frozen", False, create=True):
+            command = qml_settings._autostart_command(executable)
+
+        self.assertTrue(entrypoint.is_absolute())
+        self.assertEqual(
+            command,
+            subprocess.list2cmdline([executable, str(entrypoint)]),
+        )
+
+    def test_frozen_autostart_command_does_not_append_source_script(self):
+        executable = r"C:\Program Files\ClarifyVoice\ClarifyVoice.exe"
+
+        with patch.object(qml_settings.sys, "frozen", True, create=True):
+            command = qml_settings._autostart_command(executable)
+
+        self.assertEqual(command, subprocess.list2cmdline([executable]))
 
     def test_windows_save_applies_autostart_run_key_and_config(self):
         with TemporaryDirectory() as directory:

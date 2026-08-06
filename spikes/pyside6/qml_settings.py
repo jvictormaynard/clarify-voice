@@ -50,11 +50,17 @@ def _registry_module(registry: Any | None = None) -> Any:
     return winreg
 
 
+def _source_qml_entrypoint() -> Path:
+    """Return the source-mode QML entrypoint as an absolute path."""
+
+    return Path(__file__).resolve().parent / "qml_app.py"
+
+
 def _autostart_command(executable: str | None = None) -> str:
     executable = str(executable or sys.executable)
     arguments = [executable]
     if not getattr(sys, "frozen", False):
-        arguments.append(str(Path(__file__).with_name("qml_app.py").resolve()))
+        arguments.append(str(_source_qml_entrypoint()))
     return subprocess.list2cmdline(arguments)
 
 
