@@ -20,6 +20,11 @@ from typing import Any, Callable
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 try:
+    import sounddevice as _sounddevice
+except ImportError:
+    _sounddevice = None
+
+try:
     from dictionary_snippets import (
         DictionarySnippetService,
         LocalDictionarySnippetsRepository,
@@ -37,6 +42,10 @@ try:
         TranscriptionResult,
     )
     from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
+    from microphone_controls import (
+        MicrophoneSelectionState,
+        SoundDeviceMicrophoneInventory,
+    )
     from repositories import (
         ApplicationRepositories,
         LocalConfigRepository,
@@ -63,6 +72,10 @@ except ImportError:  # PyInstaller analyzes this file as a standalone entry poin
     from ...provider_registry import PROVIDER_REGISTRY  # type: ignore[no-redef]
     from ...provider_http import CancellationToken  # type: ignore[no-redef]
     from ...local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID  # type: ignore[no-redef]
+    from ...microphone_controls import (  # type: ignore[no-redef]
+        MicrophoneSelectionState,
+        SoundDeviceMicrophoneInventory,
+    )
     from ...provider_types import (  # type: ignore[no-redef]
         ProviderCapability,
         ProviderConnection,
@@ -531,7 +544,11 @@ class QtProviderGateway:
 class QtRecorder:
     """Minimal SoX owner for the Qt recording session."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        config: QtWorkflowConfig | None = None,
+        microphone_inventory_source: Any | None = None,
+    ) -> None:
         root = Path(__file__).resolve().parents[2]
         bundled = (
             root
@@ -540,8 +557,43 @@ class QtRecorder:
             / ("sox.exe" if platform.system() == "Windows" else "sox")
         )
         self.sox = str(bundled if bundled.is_file() else shutil.which("sox") or "")
+        self.config = config
+        self.microphone_inventory_source = microphone_inventory_source
+        if self.microphone_inventory_source is None and _sounddevice is not None:
+            self.microphone_inventory_source = SoundDeviceMicrophoneInventory(
+                _sounddevice
+            )
         self.process: subprocess.Popen[bytes] | None = None
         self._lock = threading.RLock()
+
+    def _microphone_input_name(self, system: str) -> str:
+        selected_id = None
+        if self.config is not None:
+            selected_id = self.config.current().microphone.selected_id
+        if not selected_id:
+            return "default"
+        if self.microphone_inventory_source is None:
+            raise MicrophoneUnavailableError(
+                "The configured microphone is unavailable"
+            )
+        inventory = self.microphone_inventory_source.snapshot()
+        selection = inventory.resolve(selected_id)
+        if not selection.can_record:
+            raise MicrophoneUnavailableError(
+                "The configured microphone is unavailable"
+            )
+        if selection.state is not MicrophoneSelectionState.SELECTED:
+            return "default"
+        if system not in {"Windows", "Darwin"}:
+            is_default = selection.device.is_default or (
+                inventory.default_id == selection.device.stable_id
+            )
+            if not is_default:
+                raise MicrophoneUnavailableError(
+                    "Explicit microphone selection is unavailable with SoX PulseAudio"
+                )
+            return "default"
+        return selection.device.name
 
     def start(self, path: Path, cancel_event: threading.Event) -> None:
         if not self.sox:
@@ -549,12 +601,13 @@ class QtRecorder:
         if cancel_event.is_set():
             raise RuntimeError("Recording cancelled before startup")
         system = platform.system()
+        microphone_input_name = self._microphone_input_name(system)
         if system == "Windows":
-            source = ["-t", "waveaudio", "-d"]
+            source = ["-t", "waveaudio", microphone_input_name]
         elif system == "Darwin":
-            source = ["-t", "coreaudio", "default"]
+            source = ["-t", "coreaudio", microphone_input_name]
         else:
-            source = ["-t", "pulseaudio", "default"]
+            source = ["-t", "pulseaudio", microphone_input_name]
         args = [
             self.sox,
             *source,
@@ -888,7 +941,7 @@ def create_real_workflow_runtime(
             Path(active.config.path).parent / "dictionary.json"
         )
     )
-    recording_audio = QtRecordingAudioGateway(QtRecorder())
+    recording_audio = QtRecordingAudioGateway(QtRecorder(config))
     clipboard = QtClipboardGateway()
     service = WorkflowService(
         QtProviderGateway(config, dictionary_service),

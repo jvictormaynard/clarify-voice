@@ -11,7 +11,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 try:
     from PySide6.QtCore import QCoreApplication
@@ -24,6 +24,7 @@ if PYSIDE6_AVAILABLE:
     from spikes.pyside6.qml_bridge import QmlWorkflowBridge
     from spikes.pyside6.qml_runtime import (
         QtProviderGateway,
+        QtRecorder,
         QtRecordingSession,
         QtWorkflowRuntime,
         QtWorkflowConfig,
@@ -147,6 +148,60 @@ class QtRecordingSessionTests(unittest.TestCase):
             session.cancel()
             self.assertTrue(snapshot.cancel_token.cancelled)
             self.assertTrue(recorder.cancelled)
+
+    def test_recorder_uses_configured_windows_microphone(self):
+        from microphone_controls import MicrophoneDevice, MicrophoneInventory
+
+        selected = MicrophoneDevice(
+            stable_id="selected",
+            name="USB microphone",
+            is_default=False,
+            backend_index=4,
+        )
+        default = MicrophoneDevice(
+            stable_id="default",
+            name="System microphone",
+            is_default=True,
+            backend_index=1,
+        )
+        inventory = MicrophoneInventory.from_records(
+            [selected, default], default_id="default"
+        )
+
+        class Config:
+            def current(self):
+                return type(
+                    "CurrentConfig",
+                    (),
+                    {"microphone": type("Microphone", (), {"selected_id": "selected"})()},
+                )()
+
+        class InventorySource:
+            def snapshot(self):
+                return inventory
+
+        recorder = QtRecorder(Config(), InventorySource())
+        recorder.sox = "sox"
+        process = Mock()
+        process.poll.return_value = None
+        with (
+            patch(
+                "spikes.pyside6.qml_runtime.platform.system",
+                return_value="Windows",
+            ),
+            patch(
+                "spikes.pyside6.qml_runtime.subprocess.Popen",
+                return_value=process,
+            ) as popen,
+            patch("spikes.pyside6.qml_runtime.time.sleep"),
+        ):
+            recorder.start(Path("capture.wav"), threading.Event())
+
+        self.assertEqual(
+            popen.call_args.args[0][0:4],
+            ["sox", "-t", "waveaudio", "USB microphone"],
+        )
+        recorder.stop()
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
