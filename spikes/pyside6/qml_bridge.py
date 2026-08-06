@@ -109,6 +109,7 @@ class QmlWorkflowBridge(QObject):
         app_config: Any | None = None,
         dispatch_runner: Callable[[Callable[[], None]], None] | None = None,
         copy_runner: Callable[[str], Any] | None = None,
+        voice_translation_handler: Callable[[], Any] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -118,6 +119,7 @@ class QmlWorkflowBridge(QObject):
         self._copy_runner = copy_runner or (
             default_copy_runner if callable(default_copy_runner) else lambda _text: None
         )
+        self._voice_translation_handler = voice_translation_handler
         self._state = workflow_service.state
         self._result_visible = False
         self._settings_visible = False
@@ -301,6 +303,16 @@ class QmlWorkflowBridge(QObject):
         """Dispatch a native-shell action through the real workflow service."""
 
         normalized = str(action or "").strip().lower()
+        if normalized == "voice_translation_hotkey":
+            # Dedicated voice translation intentionally lives outside
+            # WorkflowService.  Keep the old runtime's toggle command as an
+            # explicit composition seam rather than silently treating voice
+            # translation as dictation or selected-text translation.
+            if self._voice_translation_handler is None:
+                return False
+            self._submit(self._voice_translation_handler)
+            return True
+
         if normalized == "recording_hotkey":
             if self._state.phase is WorkflowPhase.RECORDING:
                 self.stopRecording()

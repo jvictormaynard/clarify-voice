@@ -385,6 +385,18 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
         self.assertIsInstance(service.commands[-1], CancelTranslation)
         self.assertFalse(bridge.handleHotkey("toggle_visibility"))
 
+    def test_bridge_routes_voice_translation_hotkey_to_dedicated_handler(self):
+        service = DeterministicWorkflowService()
+        handler = Mock()
+        bridge = QmlWorkflowBridge(
+            service,
+            voice_translation_handler=handler,
+        )
+
+        self.assertTrue(bridge.handleHotkey("voice_translation_hotkey"))
+        handler.assert_called_once_with()
+        self.assertEqual(service.commands, [])
+
     def test_bridge_exposes_translation_options_and_dispatches_picker_choices(self):
         service = DeterministicWorkflowService()
         bridge = QmlWorkflowBridge(service)
