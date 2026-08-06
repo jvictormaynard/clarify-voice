@@ -40,15 +40,13 @@ ApplicationWindow {
     Shortcut {
         sequence: "Escape"
         onActivated: {
-            if (workflow.surface === "result" || workflow.surface === "settings")
+            if (workflow.surface === "recording")
+                workflow.cancelRecording()
+            else if (workflow.surface === "result" || workflow.surface === "settings")
+                workflow.reset()
+            else if (workflow.surface === "error")
                 workflow.reset()
         }
-    }
-
-    Shortcut {
-        sequence: "Alt+L"
-        enabled: workflow.surface === "idle"
-        onActivated: workflow.startRecording()
     }
 
     Rectangle {
@@ -60,7 +58,7 @@ ApplicationWindow {
                 || workflow.surface === "recording"
                 || workflow.surface === "processing"
                 || workflow.surface === "success"
-                ? height / 2 : theme.panelRadius
+            ? height / 2 : theme.panelRadius
         color: theme.card
         border.color: theme.border
         border.width: 1
@@ -97,7 +95,7 @@ ApplicationWindow {
             Item {
                 id: homePage
                 objectName: "homePage"
-                property bool promptMode: true
+                property bool promptMode: workflow.mode === "prompt"
 
                 RowLayout {
                     anchors.fill: parent
@@ -133,6 +131,7 @@ ApplicationWindow {
                                 text: workflow.surface === "idle" ? "Ready"
                                       : workflow.surface === "recording" ? "Recording"
                                       : workflow.surface === "processing" ? "Processing…"
+                                      : workflow.surface === "error" ? workflow.status
                                       : "Done"
                                 color: theme.text
                                 font.pixelSize: 13
@@ -141,22 +140,21 @@ ApplicationWindow {
                                 Accessible.name: workflow.status
                             }
 
-                            Label {
-                                id: hotkeyHint
-                                text: workflow.surface === "idle" ? "Alt+L" : ""
-                                color: theme.dim
-                                font.pixelSize: 10
-                                elide: Text.ElideRight
-                            }
                         }
 
                         MouseArea {
                             anchors.fill: parent
                             enabled: workflow.surface === "idle"
+                                     || workflow.surface === "recording"
                             hoverEnabled: true
                             cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                             Accessible.name: workflow.status
-                            onClicked: workflow.startRecording()
+                            onClicked: {
+                                if (workflow.surface === "recording")
+                                    workflow.stopRecording()
+                                else
+                                    workflow.startRecording()
+                            }
                         }
                     }
 
@@ -201,16 +199,28 @@ ApplicationWindow {
                         PilotButton {
                             id: languageButton
                             objectName: "languageButton"
-                            property string languageCode: "EN"
+                            readonly property var supportedLanguages: [
+                                "en", "pt", "es", "de", "ru"
+                            ]
+                            readonly property var languageNames: ({
+                                "en": "English",
+                                "pt": "Portuguese",
+                                "es": "Spanish",
+                                "de": "German",
+                                "ru": "Russian"
+                            })
+                            property string languageCode: workflow.language.toUpperCase()
                             text: languageCode
                             theme: theme
                             Layout.preferredWidth: 32
                             Layout.preferredHeight: 26
                             Accessible.name: "Language: "
-                                              + (languageCode === "EN"
-                                                 ? "English" : "Portuguese")
-                            onClicked: languageCode = languageCode === "EN"
-                                                       ? "PT" : "EN"
+                                              + languageNames[workflow.language]
+                            onClicked: {
+                                var currentIndex = supportedLanguages.indexOf(workflow.language)
+                                var nextIndex = (currentIndex + 1) % supportedLanguages.length
+                                workflow.setLanguage(supportedLanguages[nextIndex])
+                            }
                         }
 
                         PilotButton {
@@ -223,7 +233,10 @@ ApplicationWindow {
                             Accessible.name: "Mode: "
                                               + (homePage.promptMode
                                                  ? "Prompt" : "Transcribe")
-                            onClicked: homePage.promptMode = !homePage.promptMode
+                            onClicked: {
+                                workflow.setMode(homePage.promptMode
+                                                 ? "transcription" : "prompt")
+                            }
                         }
 
                         PilotButton {
@@ -259,6 +272,23 @@ ApplicationWindow {
                             Accessible.name: "Close ClarifyVoice"
                             onClicked: root.close()
                         }
+                    }
+
+                    RowLayout {
+                        id: errorControls
+                        visible: workflow.surface === "error"
+                        spacing: 4
+
+                        PilotButton {
+                            text: "Dismiss"
+                            theme: theme
+                            Layout.preferredWidth: 60
+                            Layout.preferredHeight: 26
+                            Accessible.name: "Dismiss workflow error"
+                            onClicked: workflow.reset()
+                        }
+
+                        Item { Layout.fillWidth: true }
                     }
 
                     PilotButton {
@@ -299,6 +329,15 @@ ApplicationWindow {
 
                     function onSurfaceChanged() {
                         resultPage.resetCopyConfirmation()
+                    }
+
+                    function onCopyCompleted(success) {
+                        if (success) {
+                            resultPage.copyLabel = "OK!"
+                            copyResetTimer.restart()
+                        } else {
+                            resultPage.resetCopyConfirmation()
+                        }
                     }
                 }
 
@@ -364,10 +403,7 @@ ApplicationWindow {
                             Layout.preferredWidth: 52
                             Layout.preferredHeight: 26
                             Accessible.name: "Copy result"
-                            onClicked: {
-                                resultPage.copyLabel = "OK!"
-                                copyResetTimer.restart()
-                            }
+                            onClicked: workflow.copyResult()
                         }
 
                         PilotButton {
@@ -423,28 +459,9 @@ ApplicationWindow {
                         color: theme.border
                     }
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        Label {
-                            text: "Hotkey"
-                            color: theme.text
-                            font.pixelSize: 12
-                        }
-
-                        Item { Layout.fillWidth: true }
-
-                        Label {
-                            text: "Alt+L"
-                            color: theme.dim
-                            font.pixelSize: 11
-                        }
-                    }
-
                     Label {
                         Layout.fillWidth: true
-                        text: "Production shell keeps global shortcuts and settings ownership."
+                        text: "Global shortcuts and settings will be connected to the production shell."
                         color: theme.dim
                         font.pixelSize: 11
                         wrapMode: Text.WordWrap
