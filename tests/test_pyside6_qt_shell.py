@@ -503,6 +503,73 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
         backend.stop()
         self.assertEqual(unregistrations, [{0x5101, 0x5104}])
 
+    def test_running_backend_reconfigures_without_replacing_native_filter(self):
+        target = FakeNativeEventTarget()
+        registrations = []
+        unregistrations = []
+
+        def register(_user32, _hwnd, settings, *, strict):
+            self.assertTrue(strict)
+            registrations.append(settings)
+            return {0x5101}
+
+        def unregister(_user32, _hwnd, registered):
+            unregistrations.append(set(registered))
+
+        backend = WindowsGlobalHotkeyBackend(
+            target,
+            user32="fake-user32",
+            register_hotkeys=register,
+            unregister_hotkeys=unregister,
+        )
+        backend.start(FakeWindow())
+        new_settings = HotkeySettings.defaults().with_hotkey(
+            HotkeyAction.RECORDING,
+            {"modifiers": ["ctrl"], "key": "Q"},
+        )
+
+        self.assertEqual(backend.reconfigure(new_settings), {0x5101})
+        self.assertEqual(len(target.installed), 1)
+        self.assertEqual(len(target.removed), 0)
+        self.assertEqual(
+            registrations[-1].definition(HotkeyAction.RECORDING).display,
+            "Ctrl+Q",
+        )
+        self.assertEqual(unregistrations, [{0x5101}])
+
+        backend.stop()
+        self.assertEqual(unregistrations, [{0x5101}, {0x5101}])
+
+    def test_failed_reconfigure_restores_the_previous_native_shortcuts(self):
+        registrations = []
+
+        def register(_user32, _hwnd, settings, *, strict):
+            self.assertTrue(strict)
+            registrations.append(settings)
+            if len(registrations) == 2:
+                raise RuntimeError("shortcut already registered")
+            return {0x5101}
+
+        backend = WindowsGlobalHotkeyBackend(
+            FakeNativeEventTarget(),
+            user32="fake-user32",
+            register_hotkeys=register,
+            unregister_hotkeys=lambda *_args: None,
+        )
+        backend.start(FakeWindow())
+        previous = registrations[0]
+        new_settings = HotkeySettings.defaults().with_hotkey(
+            HotkeyAction.RECORDING,
+            {"modifiers": ["ctrl"], "key": "Q"},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "already registered"):
+            backend.reconfigure(new_settings)
+
+        self.assertEqual(backend.registered_ids, {0x5101})
+        self.assertEqual(registrations[-1], previous)
+        backend.stop()
+
     def test_event_filter_factory_failure_unregisters_every_registered_id(self):
         target = FakeNativeEventTarget()
         registrations = {0x5101, 0x5102, 0x5103}

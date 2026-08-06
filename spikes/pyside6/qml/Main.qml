@@ -57,10 +57,39 @@ ApplicationWindow {
                 workflow.cancelRecording()
             else if (workflow.surface === "translation_picker")
                 workflow.cancelTranslation()
-            else if (workflow.surface === "result" || workflow.surface === "settings")
+            else if (workflow.surface === "result")
                 workflow.reset()
+            else if (workflow.surface === "settings") {
+                if (settings.hotkeyCaptureAction !== "")
+                    settings.cancelHotkeyCapture()
+                else
+                    workflow.reset()
+            }
             else if (workflow.surface === "error")
                 workflow.reset()
+        }
+    }
+
+    Item {
+        id: hotkeyCaptureItem
+        objectName: "hotkeyCaptureItem"
+        width: 1
+        height: 1
+        enabled: workflow.surface === "settings"
+                 && settings.hotkeyCaptureAction !== ""
+        focus: enabled
+
+        Keys.priority: Keys.BeforeItem
+        Keys.onPressed: function(event) {
+            event.accepted = true
+            if (event.isAutoRepeat)
+                return
+            if (event.key === Qt.Key_Escape) {
+                settings.cancelHotkeyCapture()
+                return
+            }
+            settings.captureHotkey(
+                settings.hotkeyCaptureAction, event.key, event.modifiers)
         }
     }
 
@@ -447,6 +476,7 @@ ApplicationWindow {
             Item {
                 id: settingsPage
                 objectName: "settingsPage"
+                focus: workflow.surface === "settings"
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -713,6 +743,153 @@ ApplicationWindow {
                             }
 
                             Label {
+                                text: "Keyboard shortcuts"
+                                color: theme.secondaryText
+                                font.pixelSize: 10
+                                font.weight: Font.DemiBold
+                                font.letterSpacing: 0.7
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: "Configure the global ClarifyVoice actions. Changes apply when you save Settings."
+                                color: theme.dim
+                                font.pixelSize: 10
+                                wrapMode: Text.WordWrap
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: settings.hotkeyCaptureAction === ""
+                                          ? (settings.hotkeyPushToTalkSupported
+                                             ? "Recording activation"
+                                             : "Recording activation · push-to-talk unavailable")
+                                          : "Press a modifier and a key. Escape cancels."
+                                    color: settings.hotkeyCaptureAction === ""
+                                           ? theme.dim : theme.secondaryText
+                                    font.pixelSize: 10
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                AppButton {
+                                    text: "Reset all"
+                                    theme: theme
+                                    quiet: true
+                                    Layout.preferredWidth: 70
+                                    Layout.preferredHeight: 26
+                                    Accessible.name: "Reset all keyboard shortcuts"
+                                    onClicked: settings.resetAllHotkeys()
+                                }
+                            }
+
+                            GridLayout {
+                                Layout.fillWidth: true
+                                columns: 2
+                                columnSpacing: 12
+                                rowSpacing: 6
+
+                                Label {
+                                    text: "Recording activation"
+                                    color: theme.dim
+                                    font.pixelSize: 11
+                                }
+
+                                ComboBox {
+                                    id: hotkeyActivationBox
+                                    objectName: "hotkeyActivationBox"
+                                    Layout.fillWidth: true
+                                    model: settings.hotkeyActivationModes
+                                    currentIndex: Math.max(
+                                        0, settings.hotkeyActivationModes.indexOf(
+                                            settings.hotkeyActivationMode))
+                                    onActivated: settings.setHotkeyActivationMode(currentText)
+                                    contentItem: Label {
+                                        leftPadding: 8
+                                        rightPadding: 24
+                                        text: hotkeyActivationBox.currentText === "push_to_talk"
+                                              ? "Push-to-talk" : "Toggle"
+                                        color: theme.text
+                                        font.pixelSize: 11
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    indicator: Label {
+                                        x: hotkeyActivationBox.width - width - 8
+                                        y: (hotkeyActivationBox.height - height) / 2
+                                        text: "⌄"
+                                        color: theme.dim
+                                        font.pixelSize: 12
+                                    }
+                                    background: Rectangle {
+                                        implicitHeight: 26
+                                        radius: theme.controlRadius
+                                        color: theme.control
+                                        border.color: theme.border
+                                        border.width: 1
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    Layout.columnSpan: 2
+                                    Layout.fillWidth: true
+                                    spacing: 4
+
+                                    Repeater {
+                                        model: settings.hotkeyActions
+
+                                        delegate: RowLayout {
+                                            required property var modelData
+                                            Layout.fillWidth: true
+                                            spacing: 6
+
+                                            Label {
+                                                Layout.fillWidth: true
+                                                text: modelData["label"]
+                                                color: theme.dim
+                                                font.pixelSize: 11
+                                                elide: Text.ElideRight
+                                            }
+
+                                            AppButton {
+                                                text: settings.hotkeyCaptureAction === modelData["id"]
+                                                      ? "Press a key…" : modelData["display"]
+                                                theme: root.visualTheme
+                                                Layout.preferredWidth: 118
+                                                Layout.preferredHeight: 26
+                                                Accessible.name: "Edit " + modelData["label"] + " shortcut"
+                                                onClicked: {
+                                                    if (settings.hotkeyCaptureAction === modelData["id"]) {
+                                                        settings.cancelHotkeyCapture()
+                                                    } else if (settings.beginHotkeyCapture(modelData["id"])) {
+                                                        hotkeyCaptureItem.forceActiveFocus()
+                                                    }
+                                                }
+                                            }
+
+                                            AppButton {
+                                                text: "Reset"
+                                                theme: root.visualTheme
+                                                quiet: true
+                                                Layout.preferredWidth: 52
+                                                Layout.preferredHeight: 26
+                                                Accessible.name: "Reset " + modelData["label"] + " shortcut"
+                                                onClicked: settings.resetHotkey(modelData["id"])
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 1
+                                color: theme.border
+                            }
+
+                            Label {
                                 text: "Microphone and recording"
                                 color: theme.secondaryText
                                 font.pixelSize: 10
@@ -802,7 +979,7 @@ ApplicationWindow {
 
                                     AppButton {
                                         text: "↻"
-                                        theme: theme
+                                                theme: root.visualTheme
                                         quiet: true
                                         Layout.preferredWidth: 28
                                         Layout.preferredHeight: 26

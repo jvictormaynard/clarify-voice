@@ -97,6 +97,10 @@ class GlobalHotkeyBackend(Protocol):
 
     def start(self, window: WindowTarget) -> set[int]: ...
 
+    def reconfigure(
+        self, settings: HotkeySettings | Mapping[str, Any] | None = None
+    ) -> set[int]: ...
+
     def stop(self) -> None: ...
 
 
@@ -437,6 +441,52 @@ class WindowsGlobalHotkeyBackend(QObject):
                     self._event_filter = None
             raise
 
+        return set(self.registered_ids)
+
+    def reconfigure(
+        self,
+        settings: HotkeySettings | Mapping[str, Any] | None = None,
+    ) -> set[int]:
+        """Apply a new typed shortcut set to the running native backend."""
+
+        selected = _supported_shell_hotkey_settings(settings)
+        if not self.is_running:
+            self._settings = selected
+            return set(self.registered_ids)
+
+        user32 = self._user32 if self._user32 is not None else _load_user32()
+        previous = self._settings
+        current_registered = set(self._registered)
+        self._unregister_hotkeys(user32, self._hwnd, current_registered)
+        self._registered.clear()
+        try:
+            registered = set(
+                self._register_hotkeys(
+                    user32,
+                    self._hwnd,
+                    selected,
+                    strict=True,
+                )
+            )
+        except BaseException:
+            self._settings = previous
+            try:
+                restored = set(
+                    self._register_hotkeys(
+                        user32,
+                        self._hwnd,
+                        previous,
+                        strict=True,
+                    )
+                )
+            except BaseException:
+                self._registered.clear()
+                raise
+            self._registered = restored
+            raise
+
+        self._settings = selected
+        self._registered = registered
         return set(self.registered_ids)
 
     def stop(self) -> None:

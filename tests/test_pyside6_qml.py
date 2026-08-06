@@ -180,8 +180,20 @@ class PySide6QmlFrontendTests(unittest.TestCase):
             "settings.dirty",
             "settings.load()",
             "settings.save()",
+            "settings.hotkeyActions",
+            "settings.captureHotkey",
+            "settings.resetHotkey",
+            "settings.resetAllHotkeys",
+            "settings.setHotkeyActivationMode",
+            "hotkeyCaptureItem.forceActiveFocus()",
         ):
             self.assertIn(binding, main_source)
+        self.assertIn(
+            "def hotkeyDefinitions",
+            (SPIKE / "qml_settings.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn("settings.hotkeyCaptureAction", main_source)
+        self.assertIn("Keyboard shortcuts", main_source)
         self.assertIn('workflow.surface === "translation_picker"', main_source)
         self.assertIn('objectName: "translationPickerPage"', main_source)
         self.assertIn("workflow.translationOptions", main_source)
@@ -248,6 +260,8 @@ class PySide6QmlFrontendTests(unittest.TestCase):
             "microphone_backend=runtime.recording_audio.recorder",
             source,
         )
+        self.assertIn("hotkey_applier=apply_qml_hotkeys", source)
+        self.assertIn("hotkeys.reconfigure(settings)", source)
         self.assertIn("app.aboutToQuit.connect(shell.stop)", source)
         self.assertIn("app.aboutToQuit.connect(runtime.shutdown)", source)
         self.assertIn("app.aboutToQuit.connect(settings.shutdown)", source)

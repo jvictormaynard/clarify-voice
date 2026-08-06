@@ -360,10 +360,17 @@ def main(argv: list[str] | None = None) -> int:
         audio_batch_controller=audio_batch,
         parent=app,
     )
+    hotkeys = None
+
+    def apply_qml_hotkeys(settings) -> None:
+        if hotkeys is not None:
+            hotkeys.reconfigure(settings)
+
     settings = QmlSettingsController(
         repositories,
         parent=app,
         microphone_backend=runtime.recording_audio.recorder,
+        hotkey_applier=apply_qml_hotkeys,
     )
     _connect_preference_sync(bridge, settings)
     engine = QQmlApplicationEngine()
@@ -385,7 +392,6 @@ def main(argv: list[str] | None = None) -> int:
     window = engine.rootObjects()[0]
     if start_hidden:
         window.hide()
-    hotkeys = None
     if sys.platform == "win32":
         hotkeys = WindowsGlobalHotkeyBackend(
             app,

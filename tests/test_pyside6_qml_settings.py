@@ -37,6 +37,7 @@ from microphone_controls import (
     MicrophoneInventory,
     RecordingControls,
 )
+from hotkey_config import HotkeyAction, HotkeySettings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -326,6 +327,165 @@ class QmlSettingsControllerTests(unittest.TestCase):
             self.assertTrue(controller.selectWorkflow("rewrite"))
             self.assertEqual(controller.routeProviderId, "groq")
             self.assertEqual(controller.routeModelId, "llama-3.3-70b-versatile")
+
+    def test_hotkey_definitions_are_exposed_with_legacy_voice_default(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            repositories.config.save(
+                AppConfig.from_mapping(
+                    {
+                        "hotkeys": {
+                            "bindings": {
+                                HotkeyAction.RECORDING.value: {
+                                    "modifiers": ["ctrl"],
+                                    "key": "Q",
+                                },
+                                HotkeyAction.REWRITE.value: {
+                                    "modifiers": ["alt"],
+                                    "key": "K",
+                                },
+                                HotkeyAction.TRANSLATION.value: {
+                                    "modifiers": ["alt"],
+                                    "key": "T",
+                                },
+                                HotkeyAction.VISIBILITY.value: {
+                                    "modifiers": ["alt"],
+                                    "key": "R",
+                                },
+                            }
+                        }
+                    }
+                )
+            )
+            controller = QmlSettingsController(repositories)
+            try:
+                self.assertEqual(
+                    [item["id"] for item in controller.hotkeyActions],
+                    [action.value for action in HotkeyAction],
+                )
+                self.assertEqual(
+                    controller.hotkeyDefinitions[HotkeyAction.RECORDING.value][
+                        "display"
+                    ],
+                    "Ctrl+Q",
+                )
+                self.assertEqual(
+                    controller.hotkeyDefinitions[HotkeyAction.VOICE_TRANSLATION.value][
+                        "display"
+                    ],
+                    "Alt+V",
+                )
+                self.assertEqual(
+                    controller.hotkeyActivationModes,
+                    ["toggle", "push_to_talk"],
+                )
+                self.assertEqual(controller.hotkeyActivationMode, "toggle")
+            finally:
+                controller.shutdown()
+
+    def test_hotkey_capture_rejects_conflicts_and_preserves_the_draft(self):
+        with TemporaryDirectory() as directory:
+            controller = QmlSettingsController(_repositories(directory))
+            try:
+                self.assertTrue(
+                    controller.beginHotkeyCapture(HotkeyAction.RECORDING.value)
+                )
+                self.assertEqual(
+                    controller.hotkeyCaptureAction,
+                    HotkeyAction.RECORDING.value,
+                )
+                self.assertFalse(
+                    controller.captureHotkey(
+                        HotkeyAction.RECORDING.value,
+                        ord("K"),
+                        134217728,  # Qt.KeyboardModifier.AltModifier
+                    )
+                )
+                self.assertIn("conflict", controller.lastError.lower())
+                self.assertEqual(
+                    controller.hotkeyDefinitions[HotkeyAction.RECORDING.value][
+                        "display"
+                    ],
+                    "Alt+L",
+                )
+                self.assertTrue(
+                    controller.captureHotkey(
+                        HotkeyAction.RECORDING.value,
+                        ord("Q"),
+                        67108864,  # Qt.KeyboardModifier.ControlModifier
+                    )
+                )
+                self.assertEqual(controller.hotkeyCaptureAction, "")
+                self.assertEqual(
+                    controller.hotkeyDefinitions[HotkeyAction.RECORDING.value][
+                        "display"
+                    ],
+                    "Ctrl+Q",
+                )
+                self.assertTrue(controller.dirty)
+            finally:
+                controller.shutdown()
+
+    def test_hotkey_save_persists_and_reset_restores_shared_defaults(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            controller = QmlSettingsController(repositories)
+            try:
+                self.assertTrue(
+                    controller.setHotkey(
+                        HotkeyAction.RECORDING.value,
+                        {"modifiers": ["ctrl"], "key": "Q"},
+                    )
+                )
+                self.assertTrue(controller.save())
+                self.assertEqual(
+                    repositories.config.load()
+                    .hotkeys.definition(HotkeyAction.RECORDING)
+                    .display,
+                    "Ctrl+Q",
+                )
+
+                self.assertTrue(controller.resetHotkey(HotkeyAction.RECORDING.value))
+                self.assertEqual(
+                    controller.hotkeyDefinitions[HotkeyAction.RECORDING.value][
+                        "display"
+                    ],
+                    HotkeySettings.defaults()
+                    .definition(HotkeyAction.RECORDING)
+                    .display,
+                )
+                self.assertTrue(controller.resetAllHotkeys())
+                self.assertTrue(controller.save())
+                self.assertEqual(
+                    repositories.config.load().hotkeys,
+                    HotkeySettings.defaults(),
+                )
+            finally:
+                controller.shutdown()
+
+    def test_hotkey_save_calls_production_applier_before_persistence(self):
+        with TemporaryDirectory() as directory:
+            applied = []
+            repositories = _repositories(directory)
+            controller = QmlSettingsController(
+                repositories,
+                hotkey_applier=applied.append,
+            )
+            try:
+                self.assertTrue(
+                    controller.setHotkey(
+                        HotkeyAction.RECORDING.value,
+                        {"modifiers": ["ctrl"], "key": "Q"},
+                    )
+                )
+                self.assertTrue(controller.save())
+                self.assertEqual(len(applied), 1)
+                self.assertEqual(
+                    applied[0].definition(HotkeyAction.RECORDING).display,
+                    "Ctrl+Q",
+                )
+            finally:
+                controller.shutdown()
 
     def test_provider_onboarding_validates_and_persists_key_in_secret_store(self):
         with TemporaryDirectory() as directory:

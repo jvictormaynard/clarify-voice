@@ -20,6 +20,14 @@ from typing import Any, cast
 
 from PySide6.QtCore import Property, QObject, Qt, Signal, Slot
 
+from hotkey_config import (
+    ActivationMode,
+    HotkeyAction,
+    HotkeyDefinition,
+    HotkeySettings,
+    HotkeySettingsController,
+    HotkeyValidationError,
+)
 from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
 from local_asr_product import (
     LocalASRProductController,
@@ -50,10 +58,88 @@ from workflow_config import (
     WorkflowRoute,
     WorkflowScope,
 )
+from windows_hotkeys import supports_push_to_talk
 
 
 AUTOSTART_REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_VALUE_NAME = "ClarifyVoice"
+
+_HOTKEY_ACTION_LABELS = {
+    HotkeyAction.RECORDING: "Record / stop",
+    HotkeyAction.REWRITE: "Rewrite selected text",
+    HotkeyAction.TRANSLATION: "Translate selected text",
+    HotkeyAction.VOICE_TRANSLATION: "Translate voice",
+    HotkeyAction.VISIBILITY: "Show / hide window",
+}
+_HOTKEY_ACTION_ORDER = tuple(_HOTKEY_ACTION_LABELS)
+
+
+def _hotkey_action(value: object) -> HotkeyAction:
+    """Parse the canonical action IDs exposed to QML."""
+
+    if isinstance(value, HotkeyAction):
+        return value
+    try:
+        return HotkeyAction(str(value or "").strip())
+    except ValueError as error:
+        raise HotkeyValidationError(
+            f"Unknown hotkey action: {value!r}", code="unknown_action"
+        ) from error
+
+
+def _qt_enum_value(value: object) -> int:
+    """Read either a Qt enum or the integer QML sends through a slot."""
+
+    raw_value = getattr(value, "value", value)
+    return int(raw_value)
+
+
+def _qml_hotkey_definition(
+    key_code: object, modifier_flags: object
+) -> HotkeyDefinition:
+    """Convert a Qt Quick key event into the shared typed hotkey value."""
+
+    key = _qt_enum_value(key_code)
+    special_keys = {
+        _qt_enum_value(Qt.Key.Key_Space): "SPACE",
+        _qt_enum_value(Qt.Key.Key_Tab): "TAB",
+        _qt_enum_value(Qt.Key.Key_Enter): "ENTER",
+        _qt_enum_value(Qt.Key.Key_Return): "ENTER",
+        _qt_enum_value(Qt.Key.Key_Escape): "ESCAPE",
+        _qt_enum_value(Qt.Key.Key_Up): "UP",
+        _qt_enum_value(Qt.Key.Key_Down): "DOWN",
+        _qt_enum_value(Qt.Key.Key_Left): "LEFT",
+        _qt_enum_value(Qt.Key.Key_Right): "RIGHT",
+    }
+    if key in special_keys:
+        key_name = special_keys[key]
+    elif ord("A") <= key <= ord("Z"):
+        key_name = chr(key)
+    elif ord("0") <= key <= ord("9"):
+        key_name = chr(key)
+    else:
+        first_function_key = _qt_enum_value(Qt.Key.Key_F1)
+        last_function_key = _qt_enum_value(Qt.Key.Key_F24)
+        if first_function_key <= key <= last_function_key:
+            key_name = f"F{key - first_function_key + 1}"
+        else:
+            raise HotkeyValidationError(
+                "Unsupported hotkey key; choose a letter, number, function key, "
+                "or navigation key",
+                code="unsupported_key",
+            )
+
+    modifiers_value = _qt_enum_value(modifier_flags)
+    modifiers = []
+    for name, modifier in (
+        ("ctrl", Qt.KeyboardModifier.ControlModifier),
+        ("alt", Qt.KeyboardModifier.AltModifier),
+        ("shift", Qt.KeyboardModifier.ShiftModifier),
+        ("win", Qt.KeyboardModifier.MetaModifier),
+    ):
+        if modifiers_value & _qt_enum_value(modifier):
+            modifiers.append(name)
+    return HotkeyDefinition(modifiers, key_name)
 
 
 def _is_windows() -> bool:
@@ -225,6 +311,7 @@ class QmlSettingsController(QObject):
     providerStateChanged = Signal()
     microphoneChanged = Signal()
     microphoneTestChanged = Signal()
+    hotkeyChanged = Signal()
     _providerValidationFinished = Signal(str, int, bool, object)
     _localStatePublished = Signal(object)
     _microphoneTestFinished = Signal(int, bool, object)
@@ -238,6 +325,7 @@ class QmlSettingsController(QObject):
         local_product: LocalASRProductController | None = None,
         microphone_backend: Any | None = None,
         microphone_inventory_source: Any | None = None,
+        hotkey_applier: Callable[[HotkeySettings], Any] | None = None,
     ) -> None:
         super().__init__(parent)
         self.repositories = repositories
@@ -245,6 +333,7 @@ class QmlSettingsController(QObject):
         self._autostart_registry = registry
         self._local_product = local_product or _default_local_asr_product()
         self._local_state: LocalASRProductState = self._local_product.state
+        self._hotkey_applier = hotkey_applier
         self._microphone_backend = microphone_backend
         self._microphone_inventory_source = (
             microphone_inventory_source
@@ -271,6 +360,11 @@ class QmlSettingsController(QObject):
             if configured_provider in PROVIDER_REGISTRY.provider_ids
             else PROVIDER_REGISTRY.provider_ids[0]
         )
+        self._hotkey_settings_controller = HotkeySettingsController(
+            self._config.hotkeys,
+            push_to_talk_supported=supports_push_to_talk(),
+        )
+        self._hotkey_capture_action = ""
         self._provider_api_key_draft = ""
         self._provider_base_url_draft = self._config_provider_base_url(
             self._selected_provider_id
@@ -310,6 +404,37 @@ class QmlSettingsController(QObject):
     @Property("QStringList", constant=True)
     def providerIds(self) -> list[str]:
         return list(PROVIDER_REGISTRY.provider_ids)
+
+    @Property("QVariantList", notify=hotkeyChanged)
+    def hotkeyActions(self) -> list[dict[str, Any]]:
+        """Return the complete, ordered hotkey catalog for the QML form."""
+
+        return [self._hotkey_mapping(action) for action in _HOTKEY_ACTION_ORDER]
+
+    @Property("QVariantMap", notify=hotkeyChanged)
+    def hotkeyDefinitions(self) -> dict[str, dict[str, Any]]:
+        """Expose canonical definitions without moving validation into QML."""
+
+        return {
+            action.value: self._hotkey_mapping(action)
+            for action in _HOTKEY_ACTION_ORDER
+        }
+
+    @Property("QStringList", constant=True)
+    def hotkeyActivationModes(self) -> list[str]:
+        return [mode.value for mode in ActivationMode]
+
+    @Property(str, notify=hotkeyChanged)
+    def hotkeyActivationMode(self) -> str:
+        return self._hotkey_settings_controller.settings.activation_mode.value
+
+    @Property(bool, constant=True)
+    def hotkeyPushToTalkSupported(self) -> bool:
+        return self._hotkey_settings_controller.push_to_talk_supported
+
+    @Property(str, notify=hotkeyChanged)
+    def hotkeyCaptureAction(self) -> str:
+        return self._hotkey_capture_action
 
     @Property("QVariantMap", notify=providerStateChanged)
     def providerStates(self) -> dict[str, dict[str, Any]]:
@@ -655,6 +780,91 @@ class QmlSettingsController(QObject):
         return self._update_config(
             replace(self._config, history_retention_days=retention)
         )
+
+    @Slot(str, result=bool)
+    def beginHotkeyCapture(self, action: str) -> bool:
+        """Put one QML row into capture mode without changing the draft."""
+
+        try:
+            parsed = _hotkey_action(action)
+        except HotkeyValidationError as error:
+            self._set_error(error)
+            return False
+        self._set_error(None)
+        next_action = parsed.value
+        if next_action != self._hotkey_capture_action:
+            self._hotkey_capture_action = next_action
+            self.hotkeyChanged.emit()
+        return True
+
+    @Slot(result=bool)
+    def cancelHotkeyCapture(self) -> bool:
+        """Leave capture mode without changing the current draft."""
+
+        if self._hotkey_capture_action:
+            self._hotkey_capture_action = ""
+            self.hotkeyChanged.emit()
+        return True
+
+    @Slot(str, object, result=bool)
+    def setHotkey(self, action: str, definition: object) -> bool:
+        """Validate and stage one canonical hotkey definition."""
+
+        try:
+            parsed = _hotkey_action(action)
+            settings = self._hotkey_settings_controller.capture(parsed, definition)
+        except (HotkeyValidationError, TypeError, ValueError) as error:
+            self._set_error(error)
+            return False
+        return self._update_config(replace(self._config, hotkeys=settings))
+
+    @Slot(str, int, int, result=bool)
+    def captureHotkey(
+        self,
+        action: str,
+        key_code: int,
+        modifier_flags: int,
+    ) -> bool:
+        """Capture a Qt Quick key event through the typed hotkey boundary."""
+
+        try:
+            definition = _qml_hotkey_definition(key_code, modifier_flags)
+        except (TypeError, ValueError, HotkeyValidationError) as error:
+            self._set_error(error)
+            return False
+        return self.setHotkey(action, definition)
+
+    @Slot(str, result=bool)
+    def resetHotkey(self, action: str) -> bool:
+        """Restore one action to its shared default definition."""
+
+        try:
+            parsed = _hotkey_action(action)
+            settings = self._hotkey_settings_controller.reset(parsed)
+        except (HotkeyValidationError, TypeError, ValueError) as error:
+            self._set_error(error)
+            return False
+        self.cancelHotkeyCapture()
+        return self._update_config(replace(self._config, hotkeys=settings))
+
+    @Slot(result=bool)
+    def resetAllHotkeys(self) -> bool:
+        """Restore every action and the recording activation mode."""
+
+        settings = self._hotkey_settings_controller.reset_all()
+        self.cancelHotkeyCapture()
+        return self._update_config(replace(self._config, hotkeys=settings))
+
+    @Slot(str, result=bool)
+    def setHotkeyActivationMode(self, mode: str) -> bool:
+        """Stage the recording activation mode using shared validation."""
+
+        try:
+            settings = self._hotkey_settings_controller.set_activation_mode(mode)
+        except (HotkeyValidationError, TypeError, ValueError) as error:
+            self._set_error(error)
+            return False
+        return self._update_config(replace(self._config, hotkeys=settings))
 
     @Slot(object, result=bool)
     def setMicrophone(self, value: object) -> bool:
@@ -1063,13 +1273,28 @@ class QmlSettingsController(QObject):
 
     @Slot(result=bool)
     def save(self) -> bool:
+        persisted_before: AppConfig | None = None
+        hotkeys_applied = False
         try:
+            persisted_before = self._config_repository.load()
+            if (
+                self._hotkey_applier is not None
+                and persisted_before.hotkeys != self._config.hotkeys
+            ):
+                self._hotkey_applier(self._config.hotkeys)
+                hotkeys_applied = True
             persisted_config = _apply_config_with_autostart_transaction(
                 self._config,
                 self.repositories,
                 self._autostart_registry,
             )
         except Exception as error:  # Validation/storage errors are user-facing.
+            if hotkeys_applied and self._hotkey_applier is not None:
+                try:
+                    assert persisted_before is not None
+                    self._hotkey_applier(persisted_before.hotkeys)
+                except Exception:
+                    pass
             self._set_error(error)
             return False
         self._replace_loaded_config(persisted_config)
@@ -1114,6 +1339,23 @@ class QmlSettingsController(QObject):
         return self._update_config(
             replace(self._config, local_asr_cloud_refinement=bool(value))
         )
+
+    def _hotkey_mapping(self, action: HotkeyAction) -> dict[str, Any]:
+        settings = self._hotkey_settings_controller.settings
+        try:
+            definition = settings.definition(action)
+        except KeyError:
+            # Legacy profiles can omit the post-release voice action. Keep it
+            # visible and editable without claiming it is active until Save.
+            definition = HotkeySettings.defaults().definition(action)
+        mapping = definition.to_mapping()
+        return {
+            "id": action.value,
+            "label": _HOTKEY_ACTION_LABELS[action],
+            "display": definition.display,
+            "key": mapping["key"],
+            "modifiers": list(mapping["modifiers"]),
+        }
 
     def _provider_config(self, provider_id: str):
         return getattr(self._config, provider_id)
@@ -1464,6 +1706,7 @@ class QmlSettingsController(QObject):
         self._set_error(None)
         if config == self._config:
             return True
+        hotkeys_changed = config.hotkeys != self._config.hotkeys
         microphone_changed = (
             config.microphone != self._config.microphone
             or config.recording_controls != self._config.recording_controls
@@ -1472,10 +1715,15 @@ class QmlSettingsController(QObject):
             self._selected_scope
         )
         self._config = config
+        if hotkeys_changed:
+            self._hotkey_settings_controller.replace(config.hotkeys)
+            self._hotkey_capture_action = ""
         if not self._dirty:
             self._dirty = True
             self.dirtyChanged.emit()
         self.configChanged.emit()
+        if hotkeys_changed:
+            self.hotkeyChanged.emit()
         if microphone_changed:
             self.microphoneChanged.emit()
         if route_changed:
@@ -1498,6 +1746,8 @@ class QmlSettingsController(QObject):
         return True
 
     def _replace_loaded_config(self, config: AppConfig) -> None:
+        hotkeys_changed = config.hotkeys != self._config.hotkeys
+        capture_changed = bool(self._hotkey_capture_action)
         microphone_changed = (
             config.microphone != self._config.microphone
             or config.recording_controls != self._config.recording_controls
@@ -1507,6 +1757,8 @@ class QmlSettingsController(QObject):
         )
         config_changed = config != self._config
         self._config = config
+        self._hotkey_settings_controller.replace(config.hotkeys)
+        self._hotkey_capture_action = ""
         self._provider_api_key_draft = ""
         self._provider_base_url_draft = self._config_provider_base_url(
             self._selected_provider_id
@@ -1515,6 +1767,8 @@ class QmlSettingsController(QObject):
             self.configChanged.emit()
         if microphone_changed:
             self.microphoneChanged.emit()
+        if hotkeys_changed or capture_changed:
+            self.hotkeyChanged.emit()
         self.providerStateChanged.emit()
         if route_changed:
             self.routeChanged.emit()
