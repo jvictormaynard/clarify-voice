@@ -215,6 +215,7 @@ class PySide6QmlFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
     def test_branding_icon_loads_from_source_and_frozen_bundle_paths(self):
+        self._qt_app = QApplication.instance() or QApplication([])
         source_icon = ROOT / "assets" / "branding" / "clarify.ico"
         self.assertEqual(_branding_icon_path(), source_icon)
         source_qicon = _load_branding_icon()
