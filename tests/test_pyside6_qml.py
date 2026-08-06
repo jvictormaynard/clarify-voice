@@ -48,7 +48,29 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertNotIn("#4f83e8", qml_source)
         self.assertIn("text: languageCode", main_source)
         self.assertIn('Accessible.name: "Language: "', main_source)
-        self.assertIn('languageCode === "EN"', main_source)
+        self.assertIn(
+            "readonly property var supportedLanguages: [\n"
+            '                                "en", "pt", "es", "de", "ru"\n'
+            "                            ]",
+            main_source,
+        )
+        for language, name in (
+            ("en", "English"),
+            ("pt", "Portuguese"),
+            ("es", "Spanish"),
+            ("de", "German"),
+            ("ru", "Russian"),
+        ):
+            self.assertIn(f'"{language}": "{name}"', main_source)
+        self.assertIn(
+            "var currentIndex = supportedLanguages.indexOf(workflow.language)",
+            main_source,
+        )
+        self.assertIn(
+            "var nextIndex = (currentIndex + 1) % supportedLanguages.length",
+            main_source,
+        )
+        self.assertNotIn('languageCode === "EN"', main_source)
         self.assertIn(
             "property string languageCode: workflow.language.toUpperCase()",
             main_source,

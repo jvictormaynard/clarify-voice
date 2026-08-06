@@ -199,16 +199,27 @@ ApplicationWindow {
                         PilotButton {
                             id: languageButton
                             objectName: "languageButton"
+                            readonly property var supportedLanguages: [
+                                "en", "pt", "es", "de", "ru"
+                            ]
+                            readonly property var languageNames: ({
+                                "en": "English",
+                                "pt": "Portuguese",
+                                "es": "Spanish",
+                                "de": "German",
+                                "ru": "Russian"
+                            })
                             property string languageCode: workflow.language.toUpperCase()
                             text: languageCode
                             theme: theme
                             Layout.preferredWidth: 32
                             Layout.preferredHeight: 26
                             Accessible.name: "Language: "
-                                              + (languageCode === "EN"
-                                                 ? "English" : "Portuguese")
+                                              + languageNames[workflow.language]
                             onClicked: {
-                                workflow.setLanguage(languageCode === "EN" ? "pt" : "en")
+                                var currentIndex = supportedLanguages.indexOf(workflow.language)
+                                var nextIndex = (currentIndex + 1) % supportedLanguages.length
+                                workflow.setLanguage(supportedLanguages[nextIndex])
                             }
                         }
 
