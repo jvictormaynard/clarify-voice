@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -188,6 +189,118 @@ class QmlSettingsControllerTests(unittest.TestCase):
                     (root / "config.json").read_text(encoding="utf-8"),
                 )
             finally:
+                controller.shutdown()
+
+    def test_provider_selection_loads_persisted_custom_endpoint(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret_store = MemorySecretStore()
+            repositories = ApplicationRepositories(
+                config=LocalConfigRepository(
+                    root / "config.json",
+                    secret_store=secret_store,
+                ),
+                usage_stats=LocalUsageStatsRepository(root / "usage.json"),
+            )
+            repositories.config.save(
+                AppConfig.from_mapping(
+                    {
+                        "openai_api_key": "saved-key",
+                        "openai_base_url": "https://proxy.example/v1",
+                    }
+                )
+            )
+            controller = QmlSettingsController(repositories)
+            try:
+                self.assertTrue(controller.selectProvider("openai"))
+                self.assertEqual(
+                    controller.providerBaseUrl,
+                    "https://proxy.example/v1",
+                )
+            finally:
+                controller.shutdown()
+
+    def test_provider_validation_keeps_unrelated_qml_draft_out_of_persistence(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            controller = QmlSettingsController(repositories)
+            try:
+                controller.setAutostart(True)
+                self.assertTrue(controller.selectWorkflow("rewrite"))
+                controller.setRoutePrompt("draft-only prompt")
+                self.assertTrue(controller.selectProvider("openai"))
+                controller.setProviderApiKey("draft-provider-key")
+
+                with patch.object(
+                    qml_settings.PROVIDER_REGISTRY,
+                    "discover_models",
+                    return_value=ModelCatalog(
+                        audio_models=("whisper-1",),
+                        text_models=("gpt-test",),
+                    ),
+                ):
+                    self.assertTrue(controller.validateProvider())
+                    for _ in range(100):
+                        self.qt_app.processEvents()
+                        if controller.providerStatus == "active":
+                            break
+                        time.sleep(0.01)
+
+                persisted = repositories.config.load()
+                self.assertTrue(controller.autostart)
+                self.assertEqual(controller.routePrompt, "draft-only prompt")
+                self.assertFalse(persisted.startup.autostart)
+                self.assertNotEqual(
+                    persisted.workflow("rewrite").prompt,
+                    "draft-only prompt",
+                )
+                self.assertEqual(persisted.openai.api_key, "draft-provider-key")
+            finally:
+                controller.shutdown()
+
+    def test_clearing_provider_invalidates_pending_validation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret_store = MemorySecretStore()
+            repositories = ApplicationRepositories(
+                config=LocalConfigRepository(
+                    root / "config.json",
+                    secret_store=secret_store,
+                ),
+                usage_stats=LocalUsageStatsRepository(root / "usage.json"),
+            )
+            repositories.config.save(
+                AppConfig.from_mapping({"openai_api_key": "saved-key"})
+            )
+            controller = QmlSettingsController(repositories)
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocked_discovery(*_args):
+                started.set()
+                release.wait(timeout=2)
+                return ModelCatalog(audio_models=("whisper-1",))
+
+            try:
+                controller.selectProvider("openai")
+                with patch.object(
+                    qml_settings.PROVIDER_REGISTRY,
+                    "discover_models",
+                    side_effect=blocked_discovery,
+                ):
+                    self.assertTrue(controller.validateProvider())
+                    self.assertTrue(started.wait(timeout=2))
+                    self.assertTrue(controller.clearProvider())
+                    release.set()
+                    for _ in range(100):
+                        self.qt_app.processEvents()
+                        time.sleep(0.01)
+
+                self.assertFalse(controller.providerHasApiKey)
+                self.assertIsNone(secret_store.get("openai"))
+                self.assertEqual(repositories.config.load().openai.api_key, "")
+            finally:
+                release.set()
                 controller.shutdown()
 
     def test_properties_and_slots_update_one_typed_draft(self):

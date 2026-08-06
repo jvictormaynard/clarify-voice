@@ -237,7 +237,7 @@ class QmlSettingsController(QObject):
             else PROVIDER_REGISTRY.provider_ids[0]
         )
         self._provider_api_key_draft = ""
-        self._provider_base_url_draft = self._default_provider_base_url(
+        self._provider_base_url_draft = self._config_provider_base_url(
             self._selected_provider_id
         )
         self._dirty = False
@@ -634,7 +634,7 @@ class QmlSettingsController(QObject):
             return True
         self._selected_provider_id = normalized
         self._provider_api_key_draft = ""
-        self._provider_base_url_draft = self._default_provider_base_url(normalized)
+        self._provider_base_url_draft = self._config_provider_base_url(normalized)
         self._set_error(None)
         self.providerStateChanged.emit()
         return True
@@ -737,17 +737,20 @@ class QmlSettingsController(QObject):
         provider_id = self._selected_provider_id
         if provider_id == LOCAL_ASR_PROVIDER_ID:
             return False
+        generation = self._provider_generations.get(provider_id, 0) + 1
+        self._provider_generations[provider_id] = generation
+        pending = self._provider_tokens.pop(provider_id, None)
+        if pending is not None:
+            pending.cancel()
         try:
-            updated = replace(
-                self._config,
-                **{
-                    provider_id: replace(
-                        self._provider_config(provider_id),
-                        api_key="",
-                    )
-                },
+            persisted = self._config_repository.load()
+            persisted_provider = getattr(persisted, provider_id)
+            self._persist_provider_credentials(
+                provider_id,
+                "",
+                persisted_provider.base_url,
+                persisted_config=persisted,
             )
-            self._config = self._config_repository.apply(updated)
         except Exception as error:
             self._set_error(error)
             return False
@@ -759,7 +762,6 @@ class QmlSettingsController(QObject):
             "busy": False,
         }
         self._provider_api_key_draft = ""
-        self._dirty = False
         self._set_error(None)
         self.configChanged.emit()
         self.providerStateChanged.emit()
@@ -948,18 +950,11 @@ class QmlSettingsController(QObject):
             self.providerStateChanged.emit()
             return
         try:
-            current = self._provider_config(provider_id)
-            updated = replace(
-                self._config,
-                **{
-                    provider_id: replace(
-                        current,
-                        api_key=str(data.get("api_key") or ""),
-                        base_url=str(data.get("base_url") or ""),
-                    )
-                },
+            self._persist_provider_credentials(
+                provider_id,
+                str(data.get("api_key") or ""),
+                str(data.get("base_url") or ""),
             )
-            self._config = self._config_repository.apply(updated)
         except Exception as error:
             self._provider_activity[provider_id] = {
                 "status": "error",
@@ -980,7 +975,6 @@ class QmlSettingsController(QObject):
         }
         self._provider_api_key_draft = ""
         self._provider_base_url_draft = self._config_provider_base_url(provider_id)
-        self._dirty = False
         self._set_error(None)
         self.configChanged.emit()
         self.providerStateChanged.emit()
@@ -988,6 +982,45 @@ class QmlSettingsController(QObject):
     def _config_provider_base_url(self, provider_id: str) -> str:
         config = self._provider_config(provider_id)
         return config.base_url or self._default_provider_base_url(provider_id)
+
+    def _persist_provider_credentials(
+        self,
+        provider_id: str,
+        api_key: str,
+        base_url: str,
+        *,
+        persisted_config: AppConfig | None = None,
+    ) -> AppConfig:
+        """Persist only provider credentials, without applying the QML draft."""
+
+        persisted = persisted_config or self._config_repository.load()
+        persisted_provider = getattr(persisted, provider_id)
+        updated_persisted = replace(
+            persisted,
+            **{
+                provider_id: replace(
+                    persisted_provider,
+                    api_key=str(api_key or "").strip(),
+                    base_url=str(base_url or "").strip(),
+                )
+            },
+        )
+        saved = self._config_repository.apply(updated_persisted)
+
+        # Keep unrelated unsaved Settings edits in the local draft while
+        # reflecting the credential that was just persisted.
+        draft_provider = self._provider_config(provider_id)
+        self._config = replace(
+            self._config,
+            **{
+                provider_id: replace(
+                    draft_provider,
+                    api_key=str(api_key or "").strip(),
+                    base_url=str(base_url or "").strip(),
+                )
+            },
+        )
+        return saved
 
     def _publish_local_state(self, state: LocalASRProductState) -> None:
         self._localStatePublished.emit(state)
