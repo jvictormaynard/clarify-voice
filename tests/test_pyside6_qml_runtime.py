@@ -573,6 +573,34 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
         handler.assert_called_once_with()
         self.assertEqual(service.commands, [])
 
+    def test_voice_translation_hotkey_dismisses_files_only_when_starting(self):
+        for voice_active, expected_surface in ((False, "idle"), (True, "files")):
+            with self.subTest(voice_active=voice_active):
+                service = DeterministicWorkflowService()
+                handler = Mock()
+                controller = SimpleNamespace(active=False, stateChanged=Mock())
+                dispatched_surfaces = []
+                bridge = None
+
+                def dispatch_runner(callback):
+                    dispatched_surfaces.append(bridge.surface)
+                    callback()
+
+                bridge = QmlWorkflowBridge(
+                    service,
+                    dispatch_runner=dispatch_runner,
+                    voice_translation_handler=handler,
+                    voice_translation_controller=controller,
+                )
+                bridge.openFiles()
+                self.assertEqual(bridge.surface, "files")
+
+                controller.active = voice_active
+                self.assertTrue(bridge.handleHotkey("voice_translation_hotkey"))
+                self.assertEqual(dispatched_surfaces, [expected_surface])
+                self.assertEqual(bridge.surface, expected_surface)
+                handler.assert_called_once_with()
+
     def test_bridge_keeps_audio_import_exclusive_until_it_stops(self):
         class SignalProxy:
             def __init__(self):

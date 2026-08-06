@@ -424,9 +424,12 @@ class QmlWorkflowBridge(QObject):
             # translation as dictation or selected-text translation.
             if self._voice_translation_handler is None:
                 return False
-            if self.busy and not bool(
+            voice_active = bool(
                 getattr(self._voice_translation_controller, "active", False)
-            ):
+            )
+            if self.busy and not voice_active:
+                return False
+            if not voice_active and not self._dismiss_files_before_workflow():
                 return False
             self._submit(self._voice_translation_handler)
             return True
