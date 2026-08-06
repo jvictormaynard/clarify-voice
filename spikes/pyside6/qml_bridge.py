@@ -16,8 +16,12 @@ from PySide6.QtCore import Property, QObject, Signal, Slot
 try:
     from workflows import (
         CancelDictation,
+        CancelTranslation,
+        ChooseTranslationLanguage,
         DismissMicrophoneUnavailable,
         StartDictation,
+        StartRewrite,
+        StartTranslation,
         StopDictation,
         WorkflowPhase,
         WorkflowState,
@@ -25,8 +29,12 @@ try:
 except ImportError:  # PyInstaller may analyze the spike as a standalone file.
     from ...workflows import (  # type: ignore[no-redef]
         CancelDictation,
+        CancelTranslation,
+        ChooseTranslationLanguage,
         DismissMicrophoneUnavailable,
         StartDictation,
+        StartRewrite,
+        StartTranslation,
         StopDictation,
         WorkflowPhase,
         WorkflowState,
@@ -50,6 +58,14 @@ class QmlWorkflowBridge(QObject):
     modeChanged = Signal()
     languageChanged = Signal()
     copyCompleted = Signal(bool)
+
+    _TRANSLATION_OPTIONS = (
+        {"code": "en", "label": "English"},
+        {"code": "pt", "label": "Portuguese"},
+        {"code": "es", "label": "Spanish"},
+        {"code": "de", "label": "German"},
+        {"code": "ru", "label": "Russian"},
+    )
 
     _STATUS = {
         WorkflowPhase.READY: "Ready to capture your voice",
@@ -93,6 +109,7 @@ class QmlWorkflowBridge(QObject):
         app_config: Any | None = None,
         dispatch_runner: Callable[[Callable[[], None]], None] | None = None,
         copy_runner: Callable[[str], Any] | None = None,
+        voice_translation_handler: Callable[[], Any] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -102,6 +119,7 @@ class QmlWorkflowBridge(QObject):
         self._copy_runner = copy_runner or (
             default_copy_runner if callable(default_copy_runner) else lambda _text: None
         )
+        self._voice_translation_handler = voice_translation_handler
         self._state = workflow_service.state
         self._result_visible = False
         self._settings_visible = False
@@ -162,15 +180,22 @@ class QmlWorkflowBridge(QObject):
     def language(self) -> str:
         return self._language
 
+    @Property("QVariantList", constant=True)
+    def translationOptions(self) -> list[dict[str, str]]:
+        """Return the supported target languages in a QML-friendly shape."""
+
+        return [dict(option) for option in self._TRANSLATION_OPTIONS]
+
     @staticmethod
     def _surface_for_phase(phase: WorkflowPhase) -> str:
         if phase is WorkflowPhase.RECORDING:
             return "recording"
+        if phase is WorkflowPhase.TRANSLATION_PICKER:
+            return "translation_picker"
         if phase in (
             WorkflowPhase.PROCESSING,
             WorkflowPhase.REWRITING,
             WorkflowPhase.PREPARING_TRANSLATION,
-            WorkflowPhase.TRANSLATION_PICKER,
             WorkflowPhase.TRANSLATING,
             WorkflowPhase.PUBLISHING,
         ):
@@ -223,6 +248,32 @@ class QmlWorkflowBridge(QObject):
             self._language = normalized
             self.languageChanged.emit()
 
+    @Slot(str, result=bool)
+    def chooseTranslation(self, language: str) -> bool:
+        """Dispatch a real translation-language choice from the picker."""
+
+        if self._state.phase is not WorkflowPhase.TRANSLATION_PICKER:
+            return False
+        normalized = str(language or "").strip().lower()
+        supported = {option["code"] for option in self._TRANSLATION_OPTIONS}
+        if normalized not in supported:
+            return False
+        self._submit(
+            lambda: self._workflow_service.dispatch(
+                ChooseTranslationLanguage(normalized)
+            )
+        )
+        return True
+
+    @Slot(result=bool)
+    def cancelTranslation(self) -> bool:
+        """Cancel the active picker through the workflow service."""
+
+        if self._state.phase is not WorkflowPhase.TRANSLATION_PICKER:
+            return False
+        self._submit(lambda: self._workflow_service.dispatch(CancelTranslation()))
+        return True
+
     @Slot()
     def startRecording(self) -> None:
         if self._state.phase is not WorkflowPhase.READY:
@@ -246,6 +297,50 @@ class QmlWorkflowBridge(QObject):
         if self._state.phase is not WorkflowPhase.RECORDING:
             return
         self._submit(lambda: self._workflow_service.dispatch(CancelDictation()))
+
+    @Slot(str, result=bool)
+    def handleHotkey(self, action: str) -> bool:
+        """Dispatch a native-shell action through the real workflow service."""
+
+        normalized = str(action or "").strip().lower()
+        if normalized == "voice_translation_hotkey":
+            # Dedicated voice translation intentionally lives outside
+            # WorkflowService.  Keep the old runtime's toggle command as an
+            # explicit composition seam rather than silently treating voice
+            # translation as dictation or selected-text translation.
+            if self._voice_translation_handler is None:
+                return False
+            self._submit(self._voice_translation_handler)
+            return True
+
+        if normalized == "recording_hotkey":
+            if self._state.phase is WorkflowPhase.RECORDING:
+                self.stopRecording()
+                return True
+            if self._state.phase is WorkflowPhase.READY:
+                self.startRecording()
+                return True
+            return False
+
+        if normalized == "rewrite_hotkey":
+            if self._state.phase is not WorkflowPhase.READY:
+                return False
+            self._submit(lambda: self._workflow_service.dispatch(StartRewrite()))
+            return True
+
+        if normalized == "translation_hotkey":
+            if self._state.phase is not WorkflowPhase.READY:
+                return False
+            self._submit(lambda: self._workflow_service.dispatch(StartTranslation()))
+            return True
+
+        if normalized == "escape":
+            if self._state.phase is WorkflowPhase.RECORDING:
+                self.cancelRecording()
+                return True
+            if self._state.phase is WorkflowPhase.TRANSLATION_PICKER:
+                return self.cancelTranslation()
+        return False
 
     @Slot()
     def showResult(self) -> None:

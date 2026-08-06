@@ -1119,6 +1119,7 @@ class QtWorkflowRuntime:
         scheduler: QtWorkflowScheduler,
         clipboard: QtClipboardGateway,
         *,
+        repositories: ApplicationRepositories | None = None,
         provider_registry=PROVIDER_REGISTRY,
         history_recorder: QtHistoryRecorder | None = None,
     ) -> None:
@@ -1126,6 +1127,7 @@ class QtWorkflowRuntime:
         self.recording_audio = recording_audio
         self.scheduler = scheduler
         self.clipboard = clipboard
+        self.repositories = repositories
         self.provider_registry = provider_registry
         self.history_recorder = history_recorder
         self._shutdown = False
@@ -1185,6 +1187,7 @@ def create_real_workflow_runtime(
         recording_audio,
         scheduler,
         clipboard,
+        repositories=active,
         history_recorder=history_recorder,
     )
 

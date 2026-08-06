@@ -1,6 +1,34 @@
 import ast
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+try:
+    from PySide6.QtCore import QObject, QTimer, Signal
+    from PySide6.QtGui import QIcon
+    from PySide6.QtQml import QQmlApplicationEngine
+    from PySide6.QtWidgets import QApplication
+    from spikes.pyside6 import qml_app
+    from spikes.pyside6.qml_app import (
+        ShellStartResult,
+        _connect_preference_sync,
+        _connect_shutdown,
+        _branding_icon_path,
+        _load_branding_icon,
+        _register_qml_context,
+        _hidden_start_requested,
+        _show_translation_picker_if_needed,
+        _sync_recording_escape_hotkey,
+        _start_shell_if_available,
+    )
+    from spikes.pyside6.qml_bridge import QmlWorkflowBridge
+    from spikes.pyside6.qml_settings import QmlSettingsController
+except (ImportError, ModuleNotFoundError):
+    PYSIDE6_AVAILABLE = False
+else:
+    PYSIDE6_AVAILABLE = True
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,6 +130,31 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("workflow.setLanguage", main_source)
         self.assertIn("workflow.setMode", main_source)
         self.assertIn("workflow.copyResult()", main_source)
+        self.assertNotIn("Global shortcuts and settings will be connected", main_source)
+        self.assertIn('objectName: "settingsPage"', main_source)
+        for binding in (
+            "settings.mode",
+            "settings.language",
+            "settings.autostart",
+            "settings.historyEnabled",
+            "settings.historyRetentionDays",
+            "settings.selectedScope",
+            "settings.routeProviderId",
+            "settings.routeModelId",
+            "settings.routePrompt",
+            "settings.routeCustomEndpoint",
+            "settings.routeEnabled",
+            "settings.lastError",
+            "settings.dirty",
+            "settings.load()",
+            "settings.save()",
+        ):
+            self.assertIn(binding, main_source)
+        self.assertIn('workflow.surface === "translation_picker"', main_source)
+        self.assertIn('objectName: "translationPickerPage"', main_source)
+        self.assertIn("workflow.translationOptions", main_source)
+        self.assertIn("workflow.chooseTranslation(modelData.code)", main_source)
+        self.assertIn("workflow.cancelTranslation()", main_source)
         self.assertNotIn("Alt+L", main_source)
 
     def test_qml_entrypoint_uses_qt_quick_and_stays_production_isolated(self):
@@ -123,14 +176,94 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertNotIn("windows_hotkeys", imported_roots)
         self.assertNotIn("windows_clipboard", imported_roots)
         self.assertIn("QQmlApplicationEngine", source)
-        self.assertIn("QGuiApplication", source)
+        self.assertIn("QApplication", source)
+        self.assertNotIn("QGuiApplication", source)
+        self.assertIn("QSystemTrayIcon", source)
+        self.assertIn("QIcon", source)
+        self.assertIn("_branding_icon_path", source)
+        self.assertIn("icon=_load_branding_icon()", source)
+        self.assertIn("_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]", source)
+        self.assertIn("sys.path.insert(0, str(_REPOSITORY_ROOT))", source)
         self.assertIn("create_real_workflow_runtime", source)
+        self.assertIn("QmlSettingsController", source)
+        self.assertIn("loaded_config = repositories.config.load()", source)
+        self.assertIn("app_config=loaded_config", source)
+        self.assertIn('setContextProperty("settings", settings)', source)
+        self.assertIn("runtime.repositories", source)
+        self.assertIn("QtShell", source)
+        self.assertIn("WindowsGlobalHotkeyBackend", source)
+        self.assertIn('if sys.platform == "win32"', source)
+        self.assertIn("shell.hotkeyTriggered.connect(bridge.handleHotkey)", source)
+        self.assertIn("_connect_preference_sync(bridge, settings)", source)
+        self.assertIn("settings.configChanged.connect", source)
+        self.assertIn("syncing_from_settings", source)
+        self.assertIn("settings.persistMode", source)
+        self.assertIn("settings.persistLanguage", source)
+        self.assertIn("bridge.modeChanged.connect", source)
+        self.assertIn("bridge.languageChanged.connect", source)
+        self.assertIn("_show_translation_picker_if_needed", source)
+        self.assertIn("tray_available=tray_available", source)
+        self.assertIn("ShellStartResult.SECONDARY_INSTANCE", source)
         self.assertIn("QmlWorkflowBridge(", source)
         self.assertIn("dispatch_runner=scheduler.run_dispatch", source)
         self.assertIn("copy_runner=runtime.copy_result", source)
+        self.assertIn("app.aboutToQuit.connect(shell.stop)", source)
         self.assertIn("app.aboutToQuit.connect(runtime.shutdown)", source)
+        self.assertLess(
+            source.index("app.aboutToQuit.connect(shell.stop)"),
+            source.index("app.aboutToQuit.connect(runtime.shutdown)"),
+        )
+        self.assertLess(source.index("engine.rootObjects()"), source.index("QtShell("))
+        self.assertIn("_start_shell_if_available", source)
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("--fake", source)
+
+    @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+    def test_escape_hotkey_sync_tracks_recording_surface(self):
+        class Bridge:
+            surface = "idle"
+
+        class Hotkeys:
+            def __init__(self):
+                self.states = []
+
+            def set_recording_active(self, active):
+                self.states.append(active)
+
+        bridge = Bridge()
+        hotkeys = Hotkeys()
+
+        _sync_recording_escape_hotkey(bridge, hotkeys)
+        bridge.surface = "recording"
+        _sync_recording_escape_hotkey(bridge, hotkeys)
+        bridge.surface = "processing"
+        _sync_recording_escape_hotkey(bridge, hotkeys)
+
+        self.assertEqual(hotkeys.states, [False, True, False])
+
+    @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+    def test_branding_icon_loads_from_source_and_frozen_bundle_paths(self):
+        self._qt_app = QApplication.instance() or QApplication([])
+        source_icon = ROOT / "assets" / "branding" / "clarify.ico"
+        self.assertEqual(_branding_icon_path(), source_icon)
+        source_qicon = _load_branding_icon()
+        self.assertIsInstance(source_qicon, QIcon)
+        self.assertFalse(source_qicon.isNull())
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            bundle_root = Path(temporary_directory)
+            frozen_icon = bundle_root / "assets" / "branding" / "clarify.ico"
+            frozen_icon.parent.mkdir(parents=True)
+            shutil.copyfile(source_icon, frozen_icon)
+            with (
+                patch.object(qml_app.sys, "_MEIPASS", str(bundle_root), create=True),
+                patch.object(qml_app.sys, "frozen", True, create=True),
+            ):
+                self.assertEqual(_branding_icon_path(), frozen_icon)
+                frozen_qicon = _load_branding_icon()
+
+            self.assertIsInstance(frozen_qicon, QIcon)
+            self.assertFalse(frozen_qicon.isNull())
 
     def test_qml_bridge_hydrates_persisted_preferences(self):
         bridge_source = (SPIKE / "qml_bridge.py").read_text(encoding="utf-8")
@@ -178,10 +311,31 @@ class PySide6QmlFrontendTests(unittest.TestCase):
             "QtStatisticsGateway",
         ):
             self.assertIn(f"class {symbol}", runtime_source)
+        self.assertIn("self.repositories = repositories", runtime_source)
+        self.assertIn("repositories=active", runtime_source)
         self.assertIn("PROVIDER_REGISTRY", runtime_source)
         self.assertIn("WindowsClipboardAdapter", runtime_source)
         self.assertNotIn("import app", runtime_source)
         self.assertNotIn("to_legacy_mapping", runtime_source)
+
+    def test_qml_bridge_routes_native_hotkeys_to_real_commands(self):
+        bridge_source = (SPIKE / "qml_bridge.py").read_text(encoding="utf-8")
+        self.assertIn("def handleHotkey(self, action: str) -> bool:", bridge_source)
+        self.assertIn('normalized == "recording_hotkey"', bridge_source)
+        self.assertIn('normalized == "rewrite_hotkey"', bridge_source)
+        self.assertIn('normalized == "translation_hotkey"', bridge_source)
+        self.assertIn("StartRewrite()", bridge_source)
+        self.assertIn("StartTranslation()", bridge_source)
+        self.assertIn("CancelTranslation()", bridge_source)
+        self.assertIn("ChooseTranslationLanguage", bridge_source)
+        self.assertIn(
+            "def chooseTranslation(self, language: str) -> bool:", bridge_source
+        )
+        self.assertIn("def cancelTranslation(self) -> bool:", bridge_source)
+        self.assertIn(
+            "def translationOptions(self) -> list[dict[str, str]]:", bridge_source
+        )
+        self.assertIn('return "translation_picker"', bridge_source)
 
     def test_real_entrypoint_has_no_fake_or_legacy_runtime(self):
         source = (SPIKE / "qml_app.py").read_text(encoding="utf-8")
@@ -190,6 +344,225 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("legacy_adapters", runtime_source)
         self.assertNotIn("QmlRuntimeUnavailableError", runtime_source)
+        self.assertIn("_hidden_start_requested", source)
+        self.assertIn("window.hide()", source)
+
+    @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+    def test_qml_entrypoint_accepts_only_the_supported_hidden_start_flag(self):
+        self.assertFalse(_hidden_start_requested([]))
+        self.assertTrue(_hidden_start_requested(["--hidden"]))
+        with self.assertRaises(ValueError):
+            _hidden_start_requested(["--compat"])
+
+
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+class QmlEntrypointIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_uses_qapplication_and_registers_real_context_properties(self):
+        self.assertIsInstance(self.app, QApplication)
+        engine = QQmlApplicationEngine()
+        workflow = QObject()
+        settings = QObject()
+
+        _register_qml_context(engine, workflow, settings)
+
+        self.assertIs(engine.rootContext().contextProperty("workflow"), workflow)
+        self.assertIs(engine.rootContext().contextProperty("settings"), settings)
+
+    def test_shutdown_connections_stop_shell_before_runtime(self):
+        events = []
+
+        class Shell(QObject):
+            def stop(self):
+                events.append("shell")
+
+        class Runtime:
+            def shutdown(self):
+                events.append("runtime")
+
+        shell = Shell()
+        runtime = Runtime()
+        _connect_shutdown(self.app, shell, runtime)
+        QTimer.singleShot(0, self.app.quit)
+        self.app.exec()
+
+        self.assertEqual(events[-2:], ["shell", "runtime"])
+
+    def test_preferences_sync_persists_home_changes_and_keeps_settings_as_draft(self):
+        from repositories import AppConfig
+        from workflows import StartDictation, WorkflowState
+
+        class ConfigRepository:
+            def __init__(self, config):
+                self.config = config
+                self.applied = []
+
+            def load(self):
+                return self.config
+
+            def apply(self, config):
+                self.config = config
+                self.applied.append(config)
+                return config
+
+        class Repositories:
+            def __init__(self, config):
+                self.config = config
+
+        class WorkflowService:
+            def __init__(self):
+                self.state = WorkflowState()
+                self.listeners = []
+                self.commands = []
+
+            def subscribe(self, listener):
+                self.listeners.append(listener)
+
+            def dispatch(self, command):
+                self.commands.append(command)
+                return True
+
+        initial = AppConfig.from_mapping(
+            {
+                "ui_mode": "prompt",
+                "ui_language": "en",
+                "autostart": False,
+                "history_enabled": False,
+                "workflows": {
+                    "rewrite": {
+                        "provider_id": "openai",
+                        "model_id": "gpt-4o-mini",
+                        "prompt": "Persisted prompt",
+                        "enabled": True,
+                    }
+                },
+            }
+        )
+        config_repository = ConfigRepository(initial)
+        settings = QmlSettingsController(Repositories(config_repository))
+        service = WorkflowService()
+        bridge = QmlWorkflowBridge(service, app_config=initial)
+        _connect_preference_sync(bridge, settings)
+
+        settings.setMode("transcription")
+        settings.setLanguage("pt")
+        settings.selectWorkflow("rewrite")
+        settings.setRoutePrompt("Draft prompt")
+        settings.setHistoryEnabled(True)
+        settings.setAutostart(True)
+        self.assertEqual(config_repository.applied, [])
+        bridge.startRecording()
+
+        self.assertIsInstance(service.commands[-1], StartDictation)
+        self.assertEqual(service.commands[-1].mode, "transcription")
+        self.assertEqual(service.commands[-1].language, "pt")
+
+        bridge.setMode("prompt")
+        bridge.setLanguage("de")
+        self.assertEqual(settings.mode, "prompt")
+        self.assertEqual(settings.language, "de")
+        self.assertEqual(len(config_repository.applied), 2)
+        reloaded = QmlSettingsController(Repositories(config_repository))
+        self.assertEqual(reloaded.mode, "prompt")
+        self.assertEqual(reloaded.language, "de")
+        self.assertFalse(reloaded.autostart)
+        self.assertFalse(reloaded.historyEnabled)
+        self.assertEqual(reloaded.routeFor("rewrite")["prompt"], "Persisted prompt")
+        self.assertEqual(settings.routePrompt, "Draft prompt")
+        self.assertTrue(settings.autostart)
+        self.assertTrue(settings.historyEnabled)
+
+        settings.setMode("transcription")
+        settings.setLanguage("pt")
+        self.assertEqual(bridge.mode, "transcription")
+        self.assertEqual(bridge.language, "pt")
+        self.assertTrue(settings.dirty)
+        self.assertEqual(len(config_repository.applied), 2)
+
+        self.assertTrue(settings.save())
+        self.assertEqual(len(config_repository.applied), 3)
+        persisted = config_repository.load()
+        self.assertEqual(persisted.ui.mode, "transcription")
+        self.assertEqual(persisted.ui.language, "pt")
+
+    def test_translation_picker_reveals_a_window_hidden_by_the_tray(self):
+        class Bridge(QObject):
+            surfaceChanged = Signal()
+
+            def __init__(self):
+                super().__init__()
+                self.surface = "idle"
+
+        class Shell:
+            def __init__(self):
+                self.show_calls = 0
+
+            def show_window(self):
+                self.show_calls += 1
+
+        bridge = Bridge()
+        shell = Shell()
+        bridge.surfaceChanged.connect(
+            lambda: _show_translation_picker_if_needed(bridge, shell)
+        )
+
+        bridge.surface = "translation_picker"
+        bridge.surfaceChanged.emit()
+
+        self.assertEqual(shell.show_calls, 1)
+
+    def test_shell_failure_is_distinguished_from_secondary_and_tray_absence(self):
+        class Shell:
+            def __init__(self):
+                self.stop_calls = 0
+                self.start_calls = []
+
+            def start(self, *, tray_available):
+                self.start_calls.append(tray_available)
+                raise RuntimeError("event filter failed")
+
+            def stop(self):
+                self.stop_calls += 1
+
+        shell = Shell()
+        with patch(
+            "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
+            return_value=True,
+        ):
+            result = _start_shell_if_available(shell)
+        self.assertIs(result, ShellStartResult.SETUP_FAILED)
+        self.assertEqual(shell.stop_calls, 0)
+
+        class NoTrayShell:
+            def __init__(self):
+                self.start_calls = []
+
+            def start(self, *, tray_available):
+                self.start_calls.append(tray_available)
+                return True
+
+        shell = NoTrayShell()
+        with patch(
+            "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
+            return_value=False,
+        ):
+            result = _start_shell_if_available(shell)
+        self.assertIs(result, ShellStartResult.STARTED_WITHOUT_TRAY)
+        self.assertEqual(shell.start_calls, [False])
+
+        class SecondaryShell:
+            def start(self, *, tray_available):
+                return False
+
+        with patch(
+            "spikes.pyside6.qml_app.QSystemTrayIcon.isSystemTrayAvailable",
+            return_value=True,
+        ):
+            result = _start_shell_if_available(SecondaryShell())
+        self.assertIs(result, ShellStartResult.SECONDARY_INSTANCE)
 
 
 if __name__ == "__main__":

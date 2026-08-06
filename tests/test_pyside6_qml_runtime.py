@@ -42,9 +42,13 @@ if PYSIDE6_AVAILABLE:
     from workflow_config import WorkflowConfig, WorkflowRoute
     from workflows import (
         CancelDictation,
+        CancelTranslation,
+        ChooseTranslationLanguage,
         DismissMicrophoneUnavailable,
         MicrophoneUnavailableError,
         StartDictation,
+        StartRewrite,
+        StartTranslation,
         StopDictation,
         RecordingSnapshot,
         WorkflowPhase,
@@ -358,6 +362,71 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
 
         self.assertTrue(bridge.copyResult())
         self.assertEqual(completed, [False])
+
+    def test_bridge_routes_shell_hotkeys_to_workflow_commands(self):
+        service = DeterministicWorkflowService()
+        bridge = QmlWorkflowBridge(service)
+
+        self.assertTrue(bridge.handleHotkey("recording_hotkey"))
+        self.assertIsInstance(service.commands[-1], StartDictation)
+        self.assertTrue(bridge.handleHotkey("recording_hotkey"))
+        self.assertIsInstance(service.commands[-1], StopDictation)
+
+        bridge.reset()
+        self.assertTrue(bridge.handleHotkey("rewrite_hotkey"))
+        self.assertIsInstance(service.commands[-1], StartRewrite)
+        self.assertTrue(bridge.handleHotkey("translation_hotkey"))
+        self.assertIsInstance(service.commands[-1], StartTranslation)
+
+        service.publish(
+            WorkflowState(phase=WorkflowPhase.TRANSLATION_PICKER, operation_id=3)
+        )
+        self.assertTrue(bridge.handleHotkey("escape"))
+        self.assertIsInstance(service.commands[-1], CancelTranslation)
+        self.assertFalse(bridge.handleHotkey("toggle_visibility"))
+
+    def test_bridge_routes_voice_translation_hotkey_to_dedicated_handler(self):
+        service = DeterministicWorkflowService()
+        handler = Mock()
+        bridge = QmlWorkflowBridge(
+            service,
+            voice_translation_handler=handler,
+        )
+
+        self.assertTrue(bridge.handleHotkey("voice_translation_hotkey"))
+        handler.assert_called_once_with()
+        self.assertEqual(service.commands, [])
+
+    def test_bridge_exposes_translation_options_and_dispatches_picker_choices(self):
+        service = DeterministicWorkflowService()
+        bridge = QmlWorkflowBridge(service)
+
+        self.assertFalse(bridge.chooseTranslation("de"))
+        self.assertEqual(
+            bridge.translationOptions,
+            [
+                {"code": "en", "label": "English"},
+                {"code": "pt", "label": "Portuguese"},
+                {"code": "es", "label": "Spanish"},
+                {"code": "de", "label": "German"},
+                {"code": "ru", "label": "Russian"},
+            ],
+        )
+
+        service.publish(
+            WorkflowState(phase=WorkflowPhase.TRANSLATION_PICKER, operation_id=4)
+        )
+        self.assertEqual(bridge.surface, "translation_picker")
+        self.assertTrue(bridge.chooseTranslation("DE"))
+        self.assertIsInstance(service.commands[-1], ChooseTranslationLanguage)
+        self.assertEqual(service.commands[-1].language, "de")
+        self.assertFalse(bridge.chooseTranslation("fr"))
+
+        service.publish(
+            WorkflowState(phase=WorkflowPhase.TRANSLATION_PICKER, operation_id=4)
+        )
+        self.assertTrue(bridge.cancelTranslation())
+        self.assertIsInstance(service.commands[-1], CancelTranslation)
 
     def test_bridge_cancel_and_error_states_are_non_terminal_for_qml(self):
         service = DeterministicWorkflowService()
@@ -710,12 +779,15 @@ class QtWorkflowRuntimeTests(unittest.TestCase):
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
 class QmlRuntimeFactoryTests(unittest.TestCase):
     def test_factory_composes_ui_free_runtime_without_importing_legacy_app(self):
+        missing = object()
+        legacy_app_before = sys.modules.get("app", missing)
         with TemporaryDirectory() as directory:
             with patch.dict(os.environ, {"CLARIFYVOICE_DATA_DIR": directory}):
                 runtime = create_real_workflow_runtime(object())
 
         self.assertIsInstance(runtime.workflow_service, WorkflowService)
-        self.assertNotIn("app", sys.modules)
+        self.assertIs(runtime.repositories, runtime.history_recorder.repositories)
+        self.assertIs(sys.modules.get("app", missing), legacy_app_before)
 
     def test_factory_constructs_opt_in_history_recorder(self):
         with TemporaryDirectory() as directory:

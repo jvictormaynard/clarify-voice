@@ -21,5 +21,7 @@ QtObject {
     readonly property int windowHeight: 48
     readonly property int resultWidth: 400
     readonly property int resultHeight: 148
-    readonly property int settingsHeight: 204
+    readonly property int panelWidth: 520
+    readonly property int panelHeight: 430
+    readonly property int settingsHeight: panelHeight
 }
