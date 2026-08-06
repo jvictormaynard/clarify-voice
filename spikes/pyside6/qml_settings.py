@@ -816,7 +816,10 @@ class QmlSettingsController(QObject):
         except (HotkeyValidationError, TypeError, ValueError) as error:
             self._set_error(error)
             return False
-        return self._update_config(replace(self._config, hotkeys=settings))
+        updated = self._update_config(replace(self._config, hotkeys=settings))
+        if updated:
+            self.cancelHotkeyCapture()
+        return updated
 
     @Slot(str, int, int, result=bool)
     def captureHotkey(
@@ -1345,9 +1348,15 @@ class QmlSettingsController(QObject):
         try:
             definition = settings.definition(action)
         except KeyError:
-            # Legacy profiles can omit the post-release voice action. Keep it
-            # visible and editable without claiming it is active until Save.
-            definition = HotkeySettings.defaults().definition(action)
+            # A profile without this binding must not display an inactive
+            # shortcut as if it were registered by the native backend.
+            return {
+                "id": action.value,
+                "label": _HOTKEY_ACTION_LABELS[action],
+                "display": "Not configured",
+                "key": "",
+                "modifiers": [],
+            }
         mapping = definition.to_mapping()
         return {
             "id": action.value,

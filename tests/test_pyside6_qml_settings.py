@@ -328,7 +328,7 @@ class QmlSettingsControllerTests(unittest.TestCase):
             self.assertEqual(controller.routeProviderId, "groq")
             self.assertEqual(controller.routeModelId, "llama-3.3-70b-versatile")
 
-    def test_hotkey_definitions_are_exposed_with_legacy_voice_default(self):
+    def test_unconfigured_legacy_voice_shortcut_is_not_presented_as_active(self):
         with TemporaryDirectory() as directory:
             repositories = _repositories(directory)
             repositories.config.save(
@@ -373,13 +373,34 @@ class QmlSettingsControllerTests(unittest.TestCase):
                     controller.hotkeyDefinitions[HotkeyAction.VOICE_TRANSLATION.value][
                         "display"
                     ],
-                    "Alt+V",
+                    "Not configured",
                 )
                 self.assertEqual(
                     controller.hotkeyActivationModes,
                     ["toggle", "push_to_talk"],
                 )
                 self.assertEqual(controller.hotkeyActivationMode, "toggle")
+            finally:
+                controller.shutdown()
+
+    def test_hotkey_capture_clears_when_definition_is_unchanged(self):
+        with TemporaryDirectory() as directory:
+            controller = QmlSettingsController(_repositories(directory))
+            try:
+                self.assertTrue(
+                    controller.beginHotkeyCapture(HotkeyAction.RECORDING.value)
+                )
+                current = controller.hotkeyDefinitions[HotkeyAction.RECORDING.value]
+                self.assertTrue(
+                    controller.setHotkey(
+                        HotkeyAction.RECORDING.value,
+                        {
+                            "modifiers": current["modifiers"],
+                            "key": current["key"],
+                        },
+                    )
+                )
+                self.assertEqual(controller.hotkeyCaptureAction, "")
             finally:
                 controller.shutdown()
 
