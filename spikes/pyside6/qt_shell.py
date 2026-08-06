@@ -13,6 +13,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Protocol
 
 from PySide6.QtCore import (
@@ -101,10 +102,10 @@ def _supported_shell_hotkey_settings(
 ) -> HotkeySettings:
     """Filter actions with no real QML runtime handler before registration.
 
-    ``QtWorkflowRuntime`` and ``QmlWorkflowBridge`` do not implement voice
-    translation in this slice.  It is deliberately unsupported here, so the
-    Windows shell must not reserve the configured Alt+V binding until a real
-    handler exists.
+    ``QtClipboardGateway`` cannot capture a selection yet, and the QML runtime
+    does not implement voice translation in this slice.  These actions are
+    deliberately unsupported here, so the Windows shell must not reserve
+    their bindings until their boundaries exist.
     """
 
     configured = (
@@ -117,7 +118,12 @@ def _supported_shell_hotkey_settings(
         for action, definition in configured.hotkeys.items()
         if action not in _UNSUPPORTED_SHELL_HOTKEY_ACTIONS
     }
-    return HotkeySettings(supported, configured.activation_mode)
+    filtered = HotkeySettings(supported, configured.activation_mode)
+    # HotkeySettings normally fills omitted actions with compatibility
+    # defaults.  The shell boundary needs a closed set instead: passing those
+    # defaults downstream would reserve unsupported global shortcuts again.
+    object.__setattr__(filtered, "hotkeys", MappingProxyType(dict(supported)))
+    return filtered
 
 
 class QtSingleInstanceGuard:

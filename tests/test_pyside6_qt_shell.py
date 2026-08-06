@@ -324,6 +324,13 @@ class WindowsGlobalHotkeyBackendTests(unittest.TestCase):
             HotkeyAction.VOICE_TRANSLATION,
             registration_settings[0].hotkeys,
         )
+        for unsupported_action in (
+            HotkeyAction.REWRITE,
+            HotkeyAction.TRANSLATION,
+            HotkeyAction.VOICE_TRANSLATION,
+        ):
+            with self.assertRaises(KeyError):
+                registration_settings[0].definition(unsupported_action)
         self.assertEqual(backend.registered_ids, {0x5101, 0x5104})
 
         backend.stop()
