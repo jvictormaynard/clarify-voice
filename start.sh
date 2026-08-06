@@ -21,4 +21,4 @@ if [[ ! -x .venv/bin/python ]]; then
   .venv/bin/python -m pip install -r requirements.txt -c requirements-lock-linux.txt
 fi
 
-exec .venv/bin/python app.py
+exec .venv/bin/python spikes/pyside6/qml_app.py

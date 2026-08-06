@@ -31,7 +31,15 @@ class RepositorySafetyTests(unittest.TestCase):
 
     def test_deploy_stages_all_python_modules(self):
         content = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
-        self.assertIn('Join-Path $repoRoot "*.py"', content)
+        self.assertIn(
+            '$sourceQmlPython = Join-Path $sourceDir "spikes\\pyside6"', content
+        )
+        self.assertIn('Get-ChildItem $repoQmlPython -Filter "qml_*.py" -File', content)
+        self.assertIn('Join-Path $repoQmlPython "qt_shell.py"', content)
+        self.assertNotIn('Join-Path $repoRoot "*.py"', content)
+        self.assertIn('$repoQml = Join-Path $repoQmlPython "qml"', content)
+        self.assertIn("Copy-Item $repoQml $qml -Recurse -Force", content)
+        self.assertIn('"${qml};qml"', content)
         self.assertIn("${distribution};distribution", content)
         self.assertIn('Join-Path $repoRoot "local_asr_manifest.json"', content)
         self.assertIn('Join-Path $repoRoot "licenses"', content)
@@ -53,6 +61,36 @@ class RepositorySafetyTests(unittest.TestCase):
             '"requests", "sounddevice", "customtkinter", "Pillow", "pyinstaller"',
             content,
         )
+        self.assertIn("'PySide6'", content)
+
+    def test_production_entrypoint_and_dependencies_are_qml_only(self):
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        build = (ROOT / "scripts" / "build.ps1").read_text(encoding="utf-8")
+        deploy = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+        start_bat = (ROOT / "start.bat").read_text(encoding="utf-8")
+        start_sh = (ROOT / "start.sh").read_text(encoding="utf-8")
+        package = (ROOT / "package.json").read_text(encoding="utf-8")
+
+        self.assertIn("PySide6>=6.8,<7", requirements)
+        self.assertNotIn("customtkinter", requirements.casefold())
+        for content in (build, deploy):
+            self.assertIn("qml_app.py", content)
+            self.assertNotIn('Join-Path $repoRoot "app.py"', content)
+        for content in (start_bat, start_sh):
+            self.assertIn("qml_app.py", content)
+            self.assertNotIn(" app.py", content)
+        self.assertIn('"--add-data", "${qmlRoot};qml"', build)
+        self.assertIn('"--add-data", "${qml};qml"', deploy)
+        for module in ("qml_bridge", "qml_runtime", "qml_settings", "qt_shell"):
+            self.assertIn(f'"--hidden-import", "{module}"', build)
+            self.assertIn(f'"--hidden-import", "{module}"', deploy)
+        self.assertIn('Get-ChildItem $qmlPythonRoot -Filter "qml_*.py" -File', build)
+        self.assertIn('Get-ChildItem $repoQmlPython -Filter "qml_*.py" -File', deploy)
+        for content in (build, deploy):
+            self.assertIn('if ($qmlModule.BaseName -ne "qml_app")', content)
+        self.assertIn("spikes/pyside6/qml", package)
+        self.assertIn("Main.qml", package)
+        self.assertNotIn("compileall -q app.py", package)
 
     def test_build_setup_bootstraps_the_locked_toolchain_inside_venv(self):
         content = (ROOT / "scripts" / "setup.ps1").read_text(encoding="utf-8")
@@ -253,6 +291,22 @@ class RepositorySafetyTests(unittest.TestCase):
         self.assertIn("version.py", ci)
         self.assertIn("version.py", release)
 
+    def test_ci_and_release_compile_the_qml_frontend(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        for workflow in (ci, release):
+            self.assertIn("spikes/pyside6/qml_app.py", workflow)
+            self.assertIn("spikes/pyside6/qml_runtime.py", workflow)
+            self.assertIn("spikes/pyside6/qml_audio_batch.py", workflow)
+            self.assertIn("spikes/pyside6/qml_clipboard.py", workflow)
+            self.assertIn("spikes/pyside6/qml_voice_translation.py", workflow)
+            self.assertIn("spikes/pyside6/qml", workflow)
+            self.assertIn("Main.qml", workflow)
+        self.assertIn("-ArgumentList @('--hidden')", ci)
+        self.assertNotIn("secret-store-self-test', '--result-file", ci)
+
     def test_open_source_community_files_exist(self):
         required = [
             "LICENSE",
@@ -413,7 +467,7 @@ class RepositorySafetyTests(unittest.TestCase):
             )
             self.assertIsNotNone(block, step_name)
             assert block is not None
-            self.assertIn(f"run: {command}", block.group(1), step_name)
+            self.assertIn(command, block.group(1), step_name)
             self.assertNotIn("run: |", block.group(1), step_name)
 
     def test_release_sbom_uses_runtime_only_lock(self):

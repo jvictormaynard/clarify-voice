@@ -8,7 +8,7 @@ if not exist ".venv\Scripts\python.exe" (
     if errorlevel 1 goto :error
 )
 
-".venv\Scripts\python.exe" app.py
+".venv\Scripts\python.exe" spikes\pyside6\qml_app.py
 if errorlevel 1 goto :error
 exit /b 0
 

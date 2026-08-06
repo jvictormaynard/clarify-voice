@@ -36,16 +36,12 @@ colorama==0.4.6
     # via
     #   build
     #   click
-customtkinter==6.0.0
-    # via -r requirements.txt
 cyclonedx-bom==7.3.1
     # via -r requirements-dev.txt
 cyclonedx-python-lib==11.11.0
     # via
     #   cyclonedx-bom
     #   pip-audit
-darkdetect==0.8.0
-    # via customtkinter
 defusedxml==0.7.1
     # via py-serializable
 filelock==3.32.2
@@ -89,7 +85,6 @@ packageurl-python==0.17.6
 packaging==26.2
     # via
     #   build
-    #   customtkinter
     #   cyclonedx-bom
     #   pip-audit
     #   pip-requirements-parser
@@ -130,6 +125,14 @@ pyproject-hooks==1.2.0
     # via
     #   build
     #   pip-tools
+pyside6==6.11.1
+    # via -r requirements.txt
+pyside6-addons==6.11.1
+    # via pyside6
+pyside6-essentials==6.11.1
+    # via
+    #   pyside6
+    #   pyside6-addons
 python-dateutil==2.9.0.post0
     # via arrow
 pywin32-ctypes==0.2.3
@@ -158,6 +161,11 @@ rpds-py==2026.6.3
     #   referencing
 ruff==0.16.1
     # via -r requirements-dev.txt
+shiboken6==6.11.1
+    # via
+    #   pyside6
+    #   pyside6-addons
+    #   pyside6-essentials
 six==1.17.0
     # via
     #   python-dateutil

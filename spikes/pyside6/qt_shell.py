@@ -32,6 +32,7 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 from hotkey_config import HotkeyAction, HotkeySettings
 from windows_hotkeys import (
     ESCAPE_HOTKEY_ID,
+    HotkeyRegistrationError,
     WM_HOTKEY,
     action_for_hotkey_id,
     register_escape_hotkey,
@@ -46,13 +47,10 @@ ACTIVATION_EVENT_NAME = r"Local\ClarifyVoice.ShowExisting.v1"
 _WINDOWS_NATIVE_EVENT_TYPES = frozenset(
     {"windows_generic_MSG", "windows_dispatcher_MSG"}
 )
-_UNSUPPORTED_SHELL_HOTKEY_ACTIONS = frozenset(
-    {
-        HotkeyAction.REWRITE,
-        HotkeyAction.TRANSLATION,
-        HotkeyAction.VOICE_TRANSLATION,
-    }
-)
+# Every persisted action now has a real QML bridge handler.  Keep the filter as
+# an explicit composition seam for future actions, but do not silently drop
+# existing rewrite, translation, or voice-translation shortcuts.
+_UNSUPPORTED_SHELL_HOTKEY_ACTIONS = frozenset()
 
 
 class QtShellError(RuntimeError):
@@ -97,8 +95,13 @@ class GlobalHotkeyBackend(Protocol):
     """Injectable lifecycle boundary for shell global shortcuts."""
 
     triggered: Any
+    restarted: Any
 
     def start(self, window: WindowTarget) -> set[int]: ...
+
+    def reconfigure(
+        self, settings: HotkeySettings | Mapping[str, Any] | None = None
+    ) -> set[int]: ...
 
     def stop(self) -> None: ...
 
@@ -146,13 +149,7 @@ class _WindowsSingleInstanceActivationApi:
 def _supported_shell_hotkey_settings(
     settings: HotkeySettings | Mapping[str, Any] | None,
 ) -> HotkeySettings:
-    """Filter actions with no real QML runtime handler before registration.
-
-    ``QtClipboardGateway`` cannot capture a selection yet, and the QML runtime
-    does not implement voice translation in this slice.  These actions are
-    deliberately unsupported here, so the Windows shell must not reserve
-    their bindings until their boundaries exist.
-    """
+    """Filter only actions without a real QML runtime handler."""
 
     configured = (
         settings
@@ -348,6 +345,7 @@ class WindowsGlobalHotkeyBackend(QObject):
     """Native RegisterHotKey adapter with injectable OS and Qt seams."""
 
     triggered = Signal(str)
+    restarted = Signal()
 
     def __init__(
         self,
@@ -382,6 +380,7 @@ class WindowsGlobalHotkeyBackend(QObject):
         self._hwnd: int | None = None
         self._recording_active = False
         self._escape_registered = False
+        self._recovery_window: WindowTarget | None = None
 
     @property
     def is_running(self) -> bool:
@@ -432,7 +431,7 @@ class WindowsGlobalHotkeyBackend(QObject):
             self._registered = registered
             self._event_filter = event_filter
             self._set_escape_hotkey(self._recording_active)
-        except BaseException:
+        except BaseException as error:
             try:
                 self._set_escape_hotkey(False)
             finally:
@@ -444,8 +443,64 @@ class WindowsGlobalHotkeyBackend(QObject):
                     self._registered.clear()
                     self._hwnd = None
                     self._event_filter = None
+            if isinstance(error, HotkeyRegistrationError):
+                self._recovery_window = window
+            else:
+                self._recovery_window = None
             raise
 
+        self._recovery_window = None
+        return set(self.registered_ids)
+
+    def reconfigure(
+        self,
+        settings: HotkeySettings | Mapping[str, Any] | None = None,
+    ) -> set[int]:
+        """Apply shortcuts, recovering a collision-failed startup if needed."""
+
+        selected = _supported_shell_hotkey_settings(settings)
+        if not self.is_running:
+            self._settings = selected
+            recovery_window = self._recovery_window
+            if recovery_window is not None:
+                registered = self.start(recovery_window)
+                self.restarted.emit()
+                return registered
+            return set(self.registered_ids)
+
+        user32 = self._user32 if self._user32 is not None else _load_user32()
+        previous = self._settings
+        current_registered = set(self._registered)
+        self._unregister_hotkeys(user32, self._hwnd, current_registered)
+        self._registered.clear()
+        try:
+            registered = set(
+                self._register_hotkeys(
+                    user32,
+                    self._hwnd,
+                    selected,
+                    strict=True,
+                )
+            )
+        except BaseException:
+            self._settings = previous
+            try:
+                restored = set(
+                    self._register_hotkeys(
+                        user32,
+                        self._hwnd,
+                        previous,
+                        strict=True,
+                    )
+                )
+            except BaseException:
+                self._registered.clear()
+                raise
+            self._registered = restored
+            raise
+
+        self._settings = selected
+        self._registered = registered
         return set(self.registered_ids)
 
     def stop(self) -> None:
@@ -467,6 +522,7 @@ class WindowsGlobalHotkeyBackend(QObject):
                 self._recording_active = False
                 self._hwnd = None
                 self._event_filter = None
+                self._recovery_window = None
 
     def _set_escape_hotkey(self, enabled: bool) -> None:
         if self._hwnd is None:
@@ -536,7 +592,9 @@ class QtShell(QObject):
         self._hotkeys_connected = False
         self._hotkeys_started = False
         self._window_close_filter_installed = False
+        self._tray_available = False
         self.activationRequested.connect(self.show_window)
+        self._connect_hotkey_restart()
 
     @property
     def is_running(self) -> bool:
@@ -558,6 +616,7 @@ class QtShell(QObject):
         if not self._instance_guard.acquire():
             return False
 
+        self._tray_available = bool(tray_available)
         hotkeys_start_attempted = False
         try:
             self._instance_guard.start_activation_listener(self._request_activation)
@@ -709,6 +768,33 @@ class QtShell(QObject):
         """Queue a primary-window activation on Qt's GUI thread."""
 
         self.activationRequested.emit()
+
+    def _connect_hotkey_restart(self) -> None:
+        if self._hotkeys is None:
+            return
+        restarted = getattr(self._hotkeys, "restarted", None)
+        connect = getattr(restarted, "connect", None)
+        if callable(connect):
+            connect(self._handle_hotkeys_restarted)
+
+    def _handle_hotkeys_restarted(self) -> None:
+        """Restore shell resources after a failed startup is corrected."""
+
+        if self._started or not self._instance_guard.is_primary:
+            return
+
+        try:
+            if self._tray_available:
+                self._create_tray()
+                self._install_window_close_filter()
+        except BaseException:
+            self._remove_window_close_filter()
+            self._cleanup_tray()
+            raise
+
+        self._hotkeys_started = True
+        self._started = True
+        self.started.emit()
 
 
 class _NativeMessage(ctypes.Structure):

@@ -25,6 +25,7 @@ from voice_translation import (
 class VoiceTranslationRecording(Protocol):
     """Minimal recording owner implemented by the desktop adapter."""
 
+    def set_boundary_callback(self, callback: Callable[[Any], None] | None) -> None: ...
     def start(self) -> None: ...
     def wait_until_started(self) -> None: ...
     def stop(self) -> Any: ...
@@ -158,6 +159,13 @@ class VoiceTranslationRuntime:
             self._recording = recording
             self._target = target
             self._cancel_event = threading.Event()
+        set_boundary_callback = getattr(recording, "set_boundary_callback", None)
+        if callable(set_boundary_callback):
+            set_boundary_callback(
+                lambda _reason=None, operation_id=operation_id: (
+                    self.stop() if self._current(operation_id) else False
+                )
+            )
         self._emit(VoiceTranslationPhase.RECORDING)
         self._run_recording(
             recording,
@@ -171,7 +179,13 @@ class VoiceTranslationRuntime:
         try:
             recording.start()
         except Exception as error:
-            if self._current(operation_id):
+            with self._lock:
+                current = (
+                    self._active
+                    and self._operation_id == operation_id
+                    and self._phase is VoiceTranslationPhase.RECORDING
+                )
+            if current:
                 try:
                     recording.fail(error)
                 except Exception:
@@ -193,6 +207,10 @@ class VoiceTranslationRuntime:
                 return False
             recording = self._recording
             operation_id = self._operation_id
+            # Claim the recording-to-processing transition while holding the
+            # lifecycle lock. A boundary callback and a manual hotkey can
+            # arrive together; only the first caller may enqueue stop().
+            self._phase = VoiceTranslationPhase.TRANSCRIBING
         if recording is None:
             return False
         self._emit(VoiceTranslationPhase.TRANSCRIBING)
@@ -282,8 +300,7 @@ class VoiceTranslationRuntime:
                 return
             with self._lock:
                 cancelled = bool(
-                    self._cancel_event is not None
-                    and self._cancel_event.is_set()
+                    self._cancel_event is not None and self._cancel_event.is_set()
                 )
             try:
                 recording.cancel() if cancelled else recording.fail(error)
@@ -312,6 +329,10 @@ class VoiceTranslationRuntime:
             phase = self._phase
             if event is not None:
                 event.set()
+            # Publish the cancellation claim before releasing the lock so a
+            # concurrent duration/VAD callback cannot also claim stop().
+            if phase is VoiceTranslationPhase.RECORDING:
+                self._phase = VoiceTranslationPhase.CANCELLED
         if recording is not None:
             try:
                 recording.request_cancel()

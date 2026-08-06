@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 try:
@@ -17,6 +18,8 @@ try:
         _connect_shutdown,
         _branding_icon_path,
         _load_branding_icon,
+        _qml_root,
+        _record_voice_translation_usage,
         _register_qml_context,
         _hidden_start_requested,
         _show_translation_picker_if_needed,
@@ -27,6 +30,10 @@ try:
     from spikes.pyside6.qml_settings import QmlSettingsController
 except (ImportError, ModuleNotFoundError):
     PYSIDE6_AVAILABLE = False
+    QObject = object
+
+    def Signal(*args, **kwargs):
+        return None
 else:
     PYSIDE6_AVAILABLE = True
 
@@ -43,6 +50,8 @@ class PySide6QmlFrontendTests(unittest.TestCase):
 
         qml_files = sorted(QML_ROOT.rglob("*.qml"))
         self.assertTrue(qml_files, "the QML frontend must contain QML assets")
+        self.assertTrue((QML_ROOT / "AppButton.qml").is_file())
+        self.assertFalse((QML_ROOT / "PilotButton.qml").exists())
         main_files = [path for path in qml_files if path.name.casefold() == "main.qml"]
         self.assertEqual(main_files, [QML_ROOT / "Main.qml"])
         qml_source = "\n".join(path.read_text(encoding="utf-8") for path in qml_files)
@@ -63,6 +72,9 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("readonly property int windowHeight: 48", theme_source)
 
         main_source = (QML_ROOT / "Main.qml").read_text(encoding="utf-8")
+        self.assertIn('objectName: "clarifyVoiceMainWindow"', main_source)
+        self.assertIn('objectName: "appPages"', main_source)
+        self.assertNotIn("PilotButton", main_source)
         status_pill_source = (QML_ROOT / "StatusPill.qml").read_text(encoding="utf-8")
         self.assertIn('color: "transparent"', main_source)
         self.assertIn(
@@ -130,6 +142,11 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("workflow.setLanguage", main_source)
         self.assertIn("workflow.setMode", main_source)
         self.assertIn("workflow.copyResult()", main_source)
+        self.assertIn("modelData.text", main_source)
+        self.assertIn("TextArea", main_source)
+        self.assertIn("selectByMouse: true", main_source)
+        self.assertIn("audioBatch.copyFile(fileResultRow.modelData.path)", main_source)
+        self.assertIn('text: "Select text to reuse"', main_source)
         self.assertNotIn("Global shortcuts and settings will be connected", main_source)
         self.assertIn('objectName: "settingsPage"', main_source)
         for binding in (
@@ -138,18 +155,45 @@ class PySide6QmlFrontendTests(unittest.TestCase):
             "settings.autostart",
             "settings.historyEnabled",
             "settings.historyRetentionDays",
+            "settings.microphoneDevices",
+            "settings.selectedMicrophoneId",
+            "settings.microphoneStatus",
+            "settings.microphoneTestStatus",
+            "settings.recordingControls",
+            "settings.refreshMicrophoneInventory()",
+            "settings.testMicrophone()",
+            "settings.setRecordingControls",
             "settings.selectedScope",
             "settings.routeProviderId",
             "settings.routeModelId",
             "settings.routePrompt",
             "settings.routeCustomEndpoint",
             "settings.routeEnabled",
+            "settings.providerIds",
+            "settings.selectedProviderId",
+            "settings.providerApiKey",
+            "settings.providerBaseUrl",
+            "settings.validateProvider()",
+            "settings.installLocalAsr()",
+            "settings.removeLocalAsr()",
             "settings.lastError",
             "settings.dirty",
             "settings.load()",
             "settings.save()",
+            "settings.hotkeyActions",
+            "settings.captureHotkey",
+            "settings.resetHotkey",
+            "settings.resetAllHotkeys",
+            "settings.setHotkeyActivationMode",
+            "hotkeyCaptureItem.forceActiveFocus()",
         ):
             self.assertIn(binding, main_source)
+        self.assertIn(
+            "def hotkeyDefinitions",
+            (SPIKE / "qml_settings.py").read_text(encoding="utf-8"),
+        )
+        self.assertIn("settings.hotkeyCaptureAction", main_source)
+        self.assertIn("Keyboard shortcuts", main_source)
         self.assertIn('workflow.surface === "translation_picker"', main_source)
         self.assertIn('objectName: "translationPickerPage"', main_source)
         self.assertIn("workflow.translationOptions", main_source)
@@ -207,8 +251,20 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("QmlWorkflowBridge(", source)
         self.assertIn("dispatch_runner=scheduler.run_dispatch", source)
         self.assertIn("copy_runner=runtime.copy_result", source)
+        self.assertIn("QtStatisticsGateway", source)
+        self.assertIn(
+            "on_usage=partial(_record_voice_translation_usage, usage_statistics)",
+            source,
+        )
+        self.assertIn(
+            "microphone_backend=runtime.recording_audio.recorder",
+            source,
+        )
+        self.assertIn("hotkey_applier=apply_qml_hotkeys", source)
+        self.assertIn("hotkeys.reconfigure(settings)", source)
         self.assertIn("app.aboutToQuit.connect(shell.stop)", source)
         self.assertIn("app.aboutToQuit.connect(runtime.shutdown)", source)
+        self.assertIn("app.aboutToQuit.connect(settings.shutdown)", source)
         self.assertLess(
             source.index("app.aboutToQuit.connect(shell.stop)"),
             source.index("app.aboutToQuit.connect(runtime.shutdown)"),
@@ -265,6 +321,21 @@ class PySide6QmlFrontendTests(unittest.TestCase):
             self.assertIsInstance(frozen_qicon, QIcon)
             self.assertFalse(frozen_qicon.isNull())
 
+    @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+    def test_qml_assets_load_from_source_and_frozen_bundle_paths(self):
+        self.assertEqual(_qml_root(), QML_ROOT)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            bundle_root = Path(temporary_directory)
+            frozen_qml = bundle_root / "qml"
+            frozen_qml.mkdir()
+            shutil.copyfile(QML_ROOT / "Main.qml", frozen_qml / "Main.qml")
+            with (
+                patch.object(qml_app.sys, "_MEIPASS", str(bundle_root), create=True),
+                patch.object(qml_app.sys, "frozen", True, create=True),
+            ):
+                self.assertEqual(_qml_root(), frozen_qml)
+
     def test_qml_bridge_hydrates_persisted_preferences(self):
         bridge_source = (SPIKE / "qml_bridge.py").read_text(encoding="utf-8")
         self.assertIn("app_config: Any | None = None", bridge_source)
@@ -314,7 +385,7 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("self.repositories = repositories", runtime_source)
         self.assertIn("repositories=active", runtime_source)
         self.assertIn("PROVIDER_REGISTRY", runtime_source)
-        self.assertIn("WindowsClipboardAdapter", runtime_source)
+        self.assertIn("QmlClipboardGateway", runtime_source)
         self.assertNotIn("import app", runtime_source)
         self.assertNotIn("to_legacy_mapping", runtime_source)
 
@@ -353,6 +424,142 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertTrue(_hidden_start_requested(["--hidden"]))
         with self.assertRaises(ValueError):
             _hidden_start_requested(["--compat"])
+
+    @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+    def test_voice_translation_usage_callback_records_both_legs(self):
+        class UsageRepository:
+            def __init__(self):
+                self.events = []
+
+            def append(self, event):
+                self.events.append(event)
+
+        usage_repository = UsageRepository()
+        statistics = qml_app.QtStatisticsGateway(
+            SimpleNamespace(usage_stats=usage_repository)
+        )
+        config = SimpleNamespace(
+            route=SimpleNamespace(provider_id="openai", model_id="gpt-4o-mini"),
+            target_language="en-US",
+        )
+        state = SimpleNamespace(
+            transcription_provider="gemini",
+            transcription_model="gemini-audio",
+            raw_transcript="Olá",
+            translated_text="Hello",
+        )
+
+        _record_voice_translation_usage(statistics, config, state, 12.5)
+
+        self.assertEqual(len(usage_repository.events), 1)
+        event = usage_repository.events[0]
+        self.assertEqual(event["type"], "voice_translation")
+        self.assertEqual(event["duration_seconds"], 12.5)
+        self.assertEqual(event["target_language"], "en-US")
+        self.assertEqual(
+            [
+                (entry["provider"], entry["model"], entry["purpose"])
+                for entry in event["models"]
+            ],
+            [
+                ("gemini", "gemini-audio", "transcription"),
+                ("openai", "gpt-4o-mini", "translation"),
+            ],
+        )
+
+
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+class QmlWorkflowBridgeHotkeyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    class WorkflowService:
+        def __init__(self):
+            from workflows import WorkflowState
+
+            self.state = WorkflowState()
+            self.commands = []
+            self.listeners = []
+
+        def subscribe(self, listener):
+            self.listeners.append(listener)
+
+        def publish(self, state):
+            self.state = state
+            for listener in tuple(self.listeners):
+                listener(state)
+
+        def dispatch(self, command):
+            self.commands.append(command)
+            return True
+
+    class VoiceTranslationController(QObject):
+        stateChanged = Signal(object)
+
+        def __init__(self, active):
+            super().__init__()
+            self.active = active
+            self.state = None
+
+    class AudioBatchController(QObject):
+        runningChanged = Signal()
+
+        def __init__(self, running):
+            super().__init__()
+            self.running = running
+
+    def _bridge(self, *, voice_active=False, audio_running=False, handler=None):
+        service = self.WorkflowService()
+        voice = self.VoiceTranslationController(voice_active)
+        audio = self.AudioBatchController(audio_running)
+        bridge = QmlWorkflowBridge(
+            service,
+            voice_translation_handler=handler,
+            voice_translation_controller=voice,
+            audio_batch_controller=audio,
+        )
+        return service, bridge
+
+    def test_global_hotkeys_are_blocked_by_voice_or_audio_busy_state(self):
+        for busy_kwargs in (
+            {"voice_active": True},
+            {"audio_running": True},
+        ):
+            with self.subTest(busy_kwargs=busy_kwargs):
+                service, bridge = self._bridge(**busy_kwargs)
+
+                self.assertTrue(bridge.busy)
+                for action in (
+                    "recording_hotkey",
+                    "rewrite_hotkey",
+                    "translation_hotkey",
+                ):
+                    with self.subTest(action=action):
+                        self.assertFalse(bridge.handleHotkey(action))
+                self.assertEqual(service.commands, [])
+
+    def test_voice_translation_hotkey_stops_active_voice_workflow(self):
+        calls = []
+        service, bridge = self._bridge(
+            voice_active=True,
+            handler=lambda: calls.append("toggle"),
+        )
+
+        self.assertTrue(bridge.busy)
+        self.assertTrue(bridge.handleHotkey("voice_translation_hotkey"))
+        self.assertEqual(calls, ["toggle"])
+        self.assertEqual(service.commands, [])
+
+    def test_recording_hotkey_stops_active_workflow_even_when_busy(self):
+        from workflows import StopDictation, WorkflowPhase, WorkflowState
+
+        service, bridge = self._bridge(audio_running=True)
+        service.publish(WorkflowState(phase=WorkflowPhase.RECORDING))
+
+        self.assertTrue(bridge.busy)
+        self.assertTrue(bridge.handleHotkey("recording_hotkey"))
+        self.assertIsInstance(service.commands[-1], StopDictation)
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")

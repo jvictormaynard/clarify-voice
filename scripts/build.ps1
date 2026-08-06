@@ -21,7 +21,9 @@ if (-not (Test-Path (Join-Path $repoRoot ".venv\Scripts\python.exe"))) {
 }
 
 $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
-$entryPoint = Join-Path $repoRoot "app.py"
+$entryPoint = Join-Path $repoRoot "spikes\pyside6\qml_app.py"
+$qmlRoot = Join-Path $repoRoot "spikes\pyside6\qml"
+$qmlPythonRoot = Join-Path $repoRoot "spikes\pyside6"
 $versionSource = Join-Path $repoRoot "version.py"
 $repoExtra = Join-Path $repoRoot "extra"
 $assets = Join-Path $repoRoot "assets"
@@ -47,12 +49,18 @@ function ConvertTo-ProcessArgument {
 }
 
 foreach ($requiredPath in @(
-    $entryPoint, $versionSource, $repoExtra, $assets, $distribution, $icon,
+    $entryPoint, $qmlRoot, $versionSource, $repoExtra, $assets, $distribution, $icon,
     $soxManifestPath, $localAsrManifest, $localAsrLicenses
 )) {
     if (-not (Test-Path $requiredPath)) {
         throw "Required build input is missing: $requiredPath"
     }
+}
+if (-not (Test-Path (Join-Path $qmlRoot "Main.qml") -PathType Leaf)) {
+    throw "Required QML entry asset is missing: $(Join-Path $qmlRoot 'Main.qml')"
+}
+if (@(Get-ChildItem $qmlRoot -Filter "*.qml" -File).Count -eq 0) {
+    throw "The QML asset directory is empty: $qmlRoot"
 }
 
 New-Item $OutputDirectory, $workDir, $specDir -ItemType Directory -Force | Out-Null
@@ -78,15 +86,21 @@ $pyInstallerArgs = @(
     "--workpath", $workDir,
     "--specpath", $specDir,
     "--paths", $repoRoot,
+    "--paths", $qmlPythonRoot,
     "--add-data", "${extra};extra",
     "--add-data", "${assets};assets",
     "--add-data", "${distribution};distribution",
+    "--add-data", "${qmlRoot};qml",
     # The local provider is optional at runtime, but its pinned manifest and
     # license notices must travel inside the signed executable so an attacker
     # cannot redirect the product to an unreviewed asset definition.
     "--add-data", "${localAsrManifest};.",
     "--add-data", "${localAsrLicenses};licenses",
     "--hidden-import", "version",
+    "--hidden-import", "qml_bridge",
+    "--hidden-import", "qml_runtime",
+    "--hidden-import", "qml_settings",
+    "--hidden-import", "qt_shell",
     "--hidden-import", "sounddevice",
     "--hidden-import", "_sounddevice_data",
     "--exclude-module", "numpy",
@@ -94,6 +108,11 @@ $pyInstallerArgs = @(
     # fallback must not become a global hook in the packaged executable.
     "--exclude-module", "keyboard"
 )
+foreach ($qmlModule in @(Get-ChildItem $qmlPythonRoot -Filter "qml_*.py" -File)) {
+    if ($qmlModule.BaseName -ne "qml_app") {
+        $pyInstallerArgs += @("--hidden-import", $qmlModule.BaseName)
+    }
+}
 if ($PayloadIdentity) {
     # This test-only build marker is bundled inside the one-file archive, so CI
     # gets a valid but byte-distinct historical payload without mutating source.

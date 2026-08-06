@@ -1,7 +1,7 @@
 import QtQuick 6.5
 
 QtObject {
-    // Keep these values aligned with app.py's compact black-and-white shell.
+    // Keep these values aligned with compact black-and-white shell.
     readonly property color card: "#0a0a0a"
     readonly property color resultSurface: "#050505"
     readonly property color border: "#1c1c1c"

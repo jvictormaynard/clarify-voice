@@ -231,7 +231,10 @@ MSIs must come from the protected signing workflow.
 ## Project structure
 
 ```text
-app.py                         Main UI and desktop workflows
+spikes/pyside6/qml_app.py      Production Qt Quick/QML entrypoint
+spikes/pyside6/qml/            Production QML surfaces and theme
+spikes/pyside6/qml_runtime.py  Qt adapters for providers, audio, clipboard, and storage
+spikes/pyside6/qml_bridge.py   QML-facing workflow state and commands
 provider_types.py              Typed provider requests, results, and capabilities
 provider_adapters.py           Gemini and OpenAI-compatible adapters
 provider_registry.py           Provider metadata and request routing registry
@@ -259,8 +262,10 @@ legacy/electron-prototype/     Archived first implementation, not built
 .agents/skills/                Repository-specific maintainer workflows
 ```
 
-The current application is Python. The Electron prototype is kept only for
-historical context and is excluded from builds. See
+The current application is Python with PySide6/Qt Quick. `start.bat`, the
+portable build, and the release workflow all use the QML entrypoint; the old
+CustomTkinter entrypoint is not part of the runtime or package. The Electron
+prototype is kept only for historical context and is excluded from builds. See
 [Architecture](docs/architecture.md) before making structural changes.
 
 Local Whisper is an explicit provider in the current product runtime. The

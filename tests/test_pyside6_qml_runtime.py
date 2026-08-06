@@ -28,6 +28,7 @@ if PYSIDE6_AVAILABLE:
         QtRecorder,
         QtRecordingSession,
         QtHistoryRecorder,
+        QtStatisticsGateway,
         QtWorkflowRuntime,
         QtWorkflowConfig,
         QtWorkflowScheduler,
@@ -145,6 +146,8 @@ class QtRecordingSessionTests(unittest.TestCase):
 
                 self.assertIs(snapshot.cancel_token, session.provider_cancel_token)
                 self.assertFalse(snapshot.cancel_token.cancelled)
+                self.assertIsNotNone(snapshot.duration_seconds)
+                self.assertGreaterEqual(snapshot.duration_seconds, 0.0)
                 self.assertTrue(session.audio_path.exists())
 
                 session.complete()
@@ -210,6 +213,27 @@ class QtRecordingSessionTests(unittest.TestCase):
         )
         recorder.stop()
 
+    def test_recorder_resolves_sox_from_a_frozen_bundle(self):
+        from spikes.pyside6 import qml_runtime
+
+        with TemporaryDirectory() as directory:
+            bundle_root = Path(directory)
+            bundled_sox = bundle_root / "extra" / "sox-14.4.2" / "sox.exe"
+            bundled_sox.parent.mkdir(parents=True)
+            bundled_sox.write_bytes(b"sox")
+            with (
+                patch.object(
+                    qml_runtime.sys, "_MEIPASS", str(bundle_root), create=True
+                ),
+                patch.object(qml_runtime.sys, "frozen", True, create=True),
+                patch.object(qml_runtime.platform, "system", return_value="Windows"),
+                patch.object(qml_runtime, "_sounddevice", None),
+                patch.object(qml_runtime.shutil, "which", return_value=None),
+            ):
+                recorder = QtRecorder()
+
+        self.assertEqual(recorder.sox, str(bundled_sox))
+
     def test_recorder_rejects_waveaudio_prefix_collision(self):
         from microphone_controls import MicrophoneDevice, MicrophoneInventory
 
@@ -256,6 +280,95 @@ class QtRecordingSessionTests(unittest.TestCase):
         ):
             with self.assertRaises(MicrophoneUnavailableError):
                 recorder.start(Path("capture.wav"), threading.Event())
+
+    def test_recorder_exposes_only_sox_safe_microphones_to_qml(self):
+        from microphone_controls import MicrophoneDevice, MicrophoneInventory
+
+        prefix = "x" * 31
+        colliding_a = MicrophoneDevice(
+            stable_id="a",
+            name=prefix + "-a",
+            input_channels=1,
+            backend_index=4,
+        )
+        colliding_b = MicrophoneDevice(
+            stable_id="b",
+            name=prefix + "-b",
+            input_channels=1,
+            backend_index=5,
+        )
+        safe = MicrophoneDevice(
+            stable_id="safe",
+            name="USB microphone",
+            input_channels=1,
+            backend_index=6,
+        )
+        inventory = MicrophoneInventory.from_records(
+            [colliding_a, colliding_b, safe], default_id="safe"
+        )
+
+        with patch(
+            "spikes.pyside6.qml_runtime.platform.system", return_value="Windows"
+        ):
+            recorder = QtRecorder()
+            selectable = recorder.selectable_microphone_devices(inventory)
+
+        self.assertEqual([device.stable_id for device in selectable], ["safe"])
+
+    def test_qml_microphone_test_uses_the_selected_backend_handle_and_closes_stream(
+        self,
+    ):
+        from array import array
+        from microphone_controls import MicrophoneDevice, MicrophoneInventory
+        from spikes.pyside6 import qml_runtime
+
+        selected = MicrophoneDevice(
+            stable_id="selected",
+            name="USB microphone",
+            input_channels=1,
+            backend_index=4,
+        )
+        inventory = MicrophoneInventory.from_records([selected], default_id="selected")
+
+        class InventorySource:
+            def snapshot(self):
+                return inventory
+
+        class Stream:
+            instance = None
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.started = False
+                self.stopped = False
+                self.closed = False
+                Stream.instance = self
+
+            def start(self):
+                self.started = True
+                self.kwargs["callback"](array("h", [1024, -1024]), 2, None, None)
+
+            def stop(self):
+                self.stopped = True
+
+            def close(self):
+                self.closed = True
+
+        recorder = QtRecorder(None, InventorySource())
+        selection = inventory.resolve("selected")
+        fake_sounddevice = SimpleNamespace(RawInputStream=Stream)
+        with (
+            patch.object(qml_runtime, "_sounddevice", fake_sounddevice),
+            patch.object(qml_runtime.platform, "system", return_value="Windows"),
+            patch.object(qml_runtime.time, "sleep"),
+        ):
+            peak = recorder.test_microphone(selection, inventory)
+
+        self.assertGreater(peak, 0.0)
+        self.assertEqual(Stream.instance.kwargs["device"], 4)
+        self.assertTrue(Stream.instance.started)
+        self.assertTrue(Stream.instance.stopped)
+        self.assertTrue(Stream.instance.closed)
 
     def test_recording_session_stops_at_configured_max_duration(self):
         from microphone_controls import RecordingBoundaryReason, RecordingControls
@@ -385,6 +498,69 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
         self.assertIsInstance(service.commands[-1], CancelTranslation)
         self.assertFalse(bridge.handleHotkey("toggle_visibility"))
 
+    def test_workflow_hotkeys_dismiss_files_before_dispatch(self):
+        cases = (
+            ("recording_hotkey", StartDictation),
+            ("rewrite_hotkey", StartRewrite),
+            ("translation_hotkey", StartTranslation),
+        )
+
+        for action, command_type in cases:
+            with self.subTest(action=action):
+                service = DeterministicWorkflowService()
+                dispatched_surfaces = []
+                bridge = None
+
+                def dispatch_runner(callback):
+                    dispatched_surfaces.append(bridge.surface)
+                    callback()
+
+                bridge = QmlWorkflowBridge(
+                    service,
+                    dispatch_runner=dispatch_runner,
+                )
+                bridge.openFiles()
+                self.assertEqual(bridge.surface, "files")
+
+                self.assertTrue(bridge.handleHotkey(action))
+                self.assertEqual(dispatched_surfaces, ["idle"])
+                self.assertNotEqual(bridge.surface, "files")
+                self.assertIsInstance(service.commands[-1], command_type)
+
+    def test_workflow_hotkeys_do_not_overlap_a_running_file_batch(self):
+        class SignalProxy:
+            def connect(self, callback):
+                self.callback = callback
+
+            def emit(self):
+                self.callback()
+
+        class AudioBatch:
+            def __init__(self):
+                self.running = False
+                self.runningChanged = SignalProxy()
+
+        service = DeterministicWorkflowService()
+        audio_batch = AudioBatch()
+        bridge = QmlWorkflowBridge(
+            service,
+            audio_batch_controller=audio_batch,
+        )
+        bridge.openFiles()
+        audio_batch.running = True
+        audio_batch.runningChanged.emit()
+
+        for action in (
+            "recording_hotkey",
+            "rewrite_hotkey",
+            "translation_hotkey",
+        ):
+            with self.subTest(action=action):
+                self.assertFalse(bridge.handleHotkey(action))
+
+        self.assertEqual(bridge.surface, "files")
+        self.assertEqual(service.commands, [])
+
     def test_bridge_routes_voice_translation_hotkey_to_dedicated_handler(self):
         service = DeterministicWorkflowService()
         handler = Mock()
@@ -396,6 +572,71 @@ class QmlWorkflowBridgeTests(unittest.TestCase):
         self.assertTrue(bridge.handleHotkey("voice_translation_hotkey"))
         handler.assert_called_once_with()
         self.assertEqual(service.commands, [])
+
+    def test_voice_translation_hotkey_dismisses_files_only_when_starting(self):
+        for voice_active, expected_surface in ((False, "idle"), (True, "files")):
+            with self.subTest(voice_active=voice_active):
+                service = DeterministicWorkflowService()
+                handler = Mock()
+                controller = SimpleNamespace(active=False, stateChanged=Mock())
+                dispatched_surfaces = []
+                bridge = None
+
+                def dispatch_runner(callback):
+                    dispatched_surfaces.append(bridge.surface)
+                    callback()
+
+                bridge = QmlWorkflowBridge(
+                    service,
+                    dispatch_runner=dispatch_runner,
+                    voice_translation_handler=handler,
+                    voice_translation_controller=controller,
+                )
+                bridge.openFiles()
+                self.assertEqual(bridge.surface, "files")
+
+                controller.active = voice_active
+                self.assertTrue(bridge.handleHotkey("voice_translation_hotkey"))
+                self.assertEqual(dispatched_surfaces, [expected_surface])
+                self.assertEqual(bridge.surface, expected_surface)
+                handler.assert_called_once_with()
+
+    def test_bridge_keeps_audio_import_exclusive_until_it_stops(self):
+        class SignalProxy:
+            def __init__(self):
+                self.callbacks = []
+
+            def connect(self, callback):
+                self.callbacks.append(callback)
+
+            def emit(self):
+                for callback in tuple(self.callbacks):
+                    callback()
+
+        class AudioBatch:
+            def __init__(self):
+                self.running = False
+                self.runningChanged = SignalProxy()
+
+        service = DeterministicWorkflowService()
+        audio_batch = AudioBatch()
+        bridge = QmlWorkflowBridge(
+            service,
+            audio_batch_controller=audio_batch,
+        )
+
+        bridge.openFiles()
+        self.assertEqual(bridge.surface, "files")
+        audio_batch.running = True
+        audio_batch.runningChanged.emit()
+        self.assertTrue(bridge.busy)
+        bridge.closeFiles()
+        self.assertEqual(bridge.surface, "files")
+
+        audio_batch.running = False
+        audio_batch.runningChanged.emit()
+        bridge.closeFiles()
+        self.assertEqual(bridge.surface, "idle")
 
     def test_bridge_exposes_translation_options_and_dispatches_picker_choices(self):
         service = DeterministicWorkflowService()
@@ -710,6 +951,28 @@ class QtWorkflowSchedulerTests(unittest.TestCase):
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
 class QtWorkflowRuntimeTests(unittest.TestCase):
+    def test_audio_file_selection_rejects_disabled_transcription_route(self):
+        current = AppConfig()
+        disabled_workflows = replace(
+            current.workflows,
+            transcription=replace(current.workflows.transcription, enabled=False),
+        )
+        repositories = SimpleNamespace(
+            config=SimpleNamespace(
+                load=lambda: replace(current, workflows=disabled_workflows)
+            )
+        )
+        runtime = QtWorkflowRuntime(
+            None,
+            None,
+            None,
+            None,
+            repositories=repositories,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "transcription workflow is disabled"):
+            runtime.audio_file_selection()
+
     def test_shutdown_cancels_waits_and_closes_provider_registry(self):
         calls = []
 
@@ -799,6 +1062,101 @@ class QmlRuntimeFactoryTests(unittest.TestCase):
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
+class QtStatisticsGatewayTests(unittest.TestCase):
+    class UsageRepository:
+        def __init__(self):
+            self.events = []
+
+        def append(self, event):
+            self.events.append(event)
+
+    def test_workflow_statistics_use_the_production_event_schema(self):
+        repository = self.UsageRepository()
+        statistics = QtStatisticsGateway(SimpleNamespace(usage_stats=repository))
+
+        with patch("spikes.pyside6.qml_runtime.time.time", return_value=1234.5):
+            statistics.record_dictation(
+                {
+                    "provider": "openai",
+                    "model": "whisper-1",
+                    "mode": "prompt",
+                },
+                12.5,
+                "Uma transcrição",
+            )
+            statistics.record_rewrite("openai", "gpt-4o-mini", "source", "rewritten")
+            statistics.record_translation(
+                "openai", "gpt-4o-mini", "source", "traduzido", "en-US"
+            )
+
+        self.assertEqual(
+            [event["type"] for event in repository.events],
+            ["recording", "rewrite", "translation"],
+        )
+        self.assertEqual(repository.events[0]["duration_seconds"], 12.5)
+        self.assertEqual(repository.events[0]["mode"], "prompt")
+        self.assertEqual(repository.events[1]["models"][0]["purpose"], "refinement")
+        self.assertEqual(repository.events[2]["target_language"], "en-US")
+
+    def test_voice_translation_matches_usage_summary_schema_and_keeps_both_legs(self):
+        from app import _usage_summary
+
+        repository = self.UsageRepository()
+        statistics = QtStatisticsGateway(SimpleNamespace(usage_stats=repository))
+        config = SimpleNamespace(
+            route=SimpleNamespace(provider_id="openai", model_id="gpt-4o-mini"),
+            target_language="de-DE",
+        )
+        state = SimpleNamespace(
+            transcription_provider="openai",
+            transcription_model="whisper-1",
+            raw_transcript="Olá do microfone",
+            translated_text="Hallo vom Mikrofon",
+        )
+
+        with patch("spikes.pyside6.qml_runtime.time.time", return_value=1234.5):
+            statistics.record_voice_translation(config, state, 45.5)
+
+        self.assertEqual(len(repository.events), 1)
+        event = repository.events[0]
+        self.assertEqual(event["timestamp"], 1234.5)
+        self.assertEqual(event["type"], "voice_translation")
+        self.assertEqual(event["mode"], "voice_translation")
+        self.assertEqual(event["workflow"], "voice_translation")
+        self.assertEqual(event["duration_seconds"], 45.5)
+        self.assertEqual(event["transcription_provider"], "openai")
+        self.assertEqual(event["transcription_model"], "whisper-1")
+        self.assertEqual(event["translation_provider"], "openai")
+        self.assertEqual(event["translation_model"], "gpt-4o-mini")
+        self.assertEqual(event["target_language"], "de-DE")
+        self.assertEqual(event["word_count"], 3)
+        self.assertEqual(event["character_count"], len("Olá do microfone"))
+        self.assertEqual(
+            event["translation_character_count"], len("Hallo vom Mikrofon")
+        )
+        self.assertGreater(event["estimated_cost_usd"], 0.0045)
+        self.assertTrue(event["cost_complete"])
+        self.assertEqual(
+            [
+                (entry["provider"], entry["model"], entry["purpose"])
+                for entry in event["models"]
+            ],
+            [
+                ("openai", "whisper-1", "transcription"),
+                ("openai", "gpt-4o-mini", "translation"),
+            ],
+        )
+
+        summary = _usage_summary([event], now=1234.5)
+        self.assertEqual(summary["recordings"], 1)
+        self.assertEqual(summary["translations"], 1)
+        self.assertEqual(summary["total_seconds"], 45.5)
+        self.assertEqual(summary["total_words"], 3)
+        self.assertEqual(summary["model_calls"], 2)
+        self.assertEqual(summary["total_cost_usd"], event["estimated_cost_usd"])
+
+
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
 class QtHistoryRecorderTests(unittest.TestCase):
     def test_terminal_dictation_preserves_raw_and_refined_history(self):
         from workflows import WorkflowKind
@@ -849,15 +1207,11 @@ class QtClipboardGatewayTests(unittest.TestCase):
     def test_xclip_failure_is_reported_to_copy_bridge(self):
         from spikes.pyside6.qml_runtime import QtClipboardGateway
 
-        gateway = QtClipboardGateway()
-        gateway.adapter.is_windows = False
         failure = subprocess.CalledProcessError(1, ["xclip", "-selection", "clipboard"])
-        with (
-            patch("spikes.pyside6.qml_runtime.platform.system", return_value="Linux"),
-            patch(
-                "spikes.pyside6.qml_runtime.subprocess.run", side_effect=failure
-            ) as run,
-        ):
+        with patch(
+            "spikes.pyside6.qml_clipboard.subprocess.run", side_effect=failure
+        ) as run:
+            gateway = QtClipboardGateway(is_windows=False, platform_name="Linux")
             with self.assertRaises(subprocess.CalledProcessError):
                 gateway.write_dictation_result(None, "Visible result")
 

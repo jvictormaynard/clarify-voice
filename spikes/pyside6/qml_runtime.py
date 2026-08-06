@@ -7,10 +7,12 @@ legacy frontend or any Tk/CustomTkinter module.
 
 from __future__ import annotations
 
+import math
 import os
 import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -25,6 +27,13 @@ except (ImportError, OSError):
     _sounddevice = None
 
 try:
+    from audio_file_batch import (
+        AudioFileBatchService,
+        DictionaryAwareAudioTranscriptionGateway,
+        FileTranscriptionSelection,
+        RegistryAudioTranscriptionGateway,
+        SoxAudioConverter,
+    )
     from dictionary_snippets import (
         DictionarySnippetService,
         LocalDictionarySnippetsRepository,
@@ -44,6 +53,7 @@ try:
     )
     from local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID
     from microphone_controls import (
+        MicrophoneInventory,
         MicrophoneSelectionState,
         RecordingBoundaryPolicy,
         RecordingBoundaryReason,
@@ -58,19 +68,23 @@ try:
     )
     from workflow_config import WorkflowScope
     from workflows import (
-        ClipboardGateway,
         MicrophoneUnavailableError,
         NoUsableAudioError,
         RecordingSessionGateway,
         RecordingSnapshot,
         SelectionDisposition,
-        SelectionTarget,
         WorkflowKind,
         WorkflowPhase,
         WorkflowService,
     )
-    from windows_clipboard import WindowsClipboardAdapter
 except ImportError:  # PyInstaller analyzes this file as a standalone entry point.
+    from ...audio_file_batch import (  # type: ignore[no-redef]
+        AudioFileBatchService,
+        DictionaryAwareAudioTranscriptionGateway,
+        FileTranscriptionSelection,
+        RegistryAudioTranscriptionGateway,
+        SoxAudioConverter,
+    )
     from ...dictionary_snippets import (  # type: ignore[no-redef]
         DictionarySnippetService,
         LocalDictionarySnippetsRepository,
@@ -80,6 +94,7 @@ except ImportError:  # PyInstaller analyzes this file as a standalone entry poin
     from ...provider_http import CancellationToken  # type: ignore[no-redef]
     from ...local_asr import PROVIDER_ID as LOCAL_ASR_PROVIDER_ID  # type: ignore[no-redef]
     from ...microphone_controls import (  # type: ignore[no-redef]
+        MicrophoneInventory,
         MicrophoneSelectionState,
         RecordingBoundaryPolicy,
         RecordingBoundaryReason,
@@ -104,18 +119,20 @@ except ImportError:  # PyInstaller analyzes this file as a standalone entry poin
     )
     from ...workflow_config import WorkflowScope  # type: ignore[no-redef]
     from ...workflows import (  # type: ignore[no-redef]
-        ClipboardGateway,
         MicrophoneUnavailableError,
         NoUsableAudioError,
         RecordingSessionGateway,
         RecordingSnapshot,
         SelectionDisposition,
-        SelectionTarget,
         WorkflowKind,
         WorkflowPhase,
         WorkflowService,
     )
-    from ...windows_clipboard import WindowsClipboardAdapter  # type: ignore[no-redef]
+
+try:
+    from .qml_clipboard import QmlClipboardGateway
+except ImportError:  # PyInstaller analyzes this module as top-level source.
+    from qml_clipboard import QmlClipboardGateway
 
 
 FAITHFUL_REWRITE_INSTRUCTION = (
@@ -588,14 +605,23 @@ class QtRecorder:
         config: QtWorkflowConfig | None = None,
         microphone_inventory_source: Any | None = None,
     ) -> None:
-        root = Path(__file__).resolve().parents[2]
-        bundled = (
-            root
-            / "extra"
-            / "sox-14.4.2"
-            / ("sox.exe" if platform.system() == "Windows" else "sox")
+        roots: list[Path] = []
+        bundled_root = getattr(sys, "_MEIPASS", None)
+        if bundled_root:
+            roots.append(Path(bundled_root))
+        if getattr(sys, "frozen", False):
+            roots.append(Path(sys.executable).resolve().parent)
+        roots.append(Path(__file__).resolve().parents[2])
+        sox_name = "sox.exe" if platform.system() == "Windows" else "sox"
+        bundled = next(
+            (
+                root / "extra" / "sox-14.4.2" / sox_name
+                for root in roots
+                if (root / "extra" / "sox-14.4.2" / sox_name).is_file()
+            ),
+            None,
         )
-        self.sox = str(bundled if bundled.is_file() else shutil.which("sox") or "")
+        self.sox = str(bundled or shutil.which("sox") or "")
         self.config = config
         self.microphone_inventory_source = microphone_inventory_source
         if self.microphone_inventory_source is None and _sounddevice is not None:
@@ -634,6 +660,109 @@ class QtRecorder:
                 )
             return "default"
         return device.name
+
+    def microphone_inventory(self) -> Any:
+        """Return the same safe inventory boundary used by recording.
+
+        Settings must be able to recover a stale saved identity without
+        reaching into PortAudio directly.  Keep enumeration owned by the
+        recorder's injected source so the QML surface and a recording session
+        observe the same backend snapshot contract.
+        """
+
+        if self.microphone_inventory_source is None:
+            return MicrophoneInventory.unavailable("portaudio_unavailable")
+        return self.microphone_inventory_source.snapshot()
+
+    @staticmethod
+    def supports_explicit_microphone_selection(system: str | None = None) -> bool:
+        """Return whether the active SoX driver can honor an input name."""
+
+        return (system or platform.system()) in {"Windows", "Darwin"}
+
+    def selectable_microphone_devices(self, inventory: Any) -> tuple[Any, ...]:
+        """Expose only endpoint names the active SoX route can disambiguate."""
+
+        if not self.supports_explicit_microphone_selection():
+            return ()
+        return tuple(
+            device
+            for device in inventory.available_devices
+            if _sox_microphone_name_is_unambiguous(inventory, device, platform.system())
+        )
+
+    def test_microphone(self, selection: Any, inventory: Any) -> float:
+        """Capture a short local-only level sample for the Settings test."""
+
+        if _sounddevice is None:
+            raise QtRuntimeError("Input test unavailable without PortAudio")
+        if selection is None or not selection.can_record:
+            raise MicrophoneUnavailableError("No safe microphone to test")
+
+        system = platform.system()
+        stream_device = None
+        if selection.state is MicrophoneSelectionState.SELECTED:
+            device = selection.device
+            if device is None:
+                raise MicrophoneUnavailableError("No safe microphone to test")
+            if not self.supports_explicit_microphone_selection(system):
+                is_default = (
+                    device.is_default or inventory.default_id == device.stable_id
+                )
+                if not is_default:
+                    raise MicrophoneUnavailableError(
+                        "Explicit microphone selection is unavailable with SoX PulseAudio"
+                    )
+            elif device not in self.selectable_microphone_devices(inventory):
+                raise MicrophoneUnavailableError(
+                    "Selected microphone has no unambiguous backend name"
+                )
+            else:
+                stream_device = (
+                    device.backend_index
+                    if device.backend_index is not None
+                    else device.name
+                )
+
+        peak = 0.0
+        stream = None
+
+        def callback(indata, _frames, _time_info, _status):
+            nonlocal peak
+            raw_samples = memoryview(indata)
+            samples = (
+                raw_samples
+                if raw_samples.format in {"h", "<h", "=h", "@h"}
+                and raw_samples.ndim == 1
+                else memoryview(raw_samples.tobytes()).cast("h")
+            )
+            if samples:
+                rms = math.sqrt(
+                    sum(sample * sample for sample in samples) / len(samples)
+                )
+                peak = max(peak, min(1.0, rms / 32768.0 * 16))
+
+        try:
+            kwargs = {
+                "channels": 1,
+                "samplerate": 16000,
+                "blocksize": 256,
+                "dtype": "int16",
+                "callback": callback,
+            }
+            if stream_device is not None:
+                kwargs["device"] = stream_device
+            stream = _sounddevice.RawInputStream(**kwargs)
+            stream.start()
+            time.sleep(0.25)
+        finally:
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+        return peak
 
     def start(self, path: Path, cancel_event: threading.Event) -> None:
         if not self.sox:
@@ -724,6 +853,7 @@ class QtRecordingSession(RecordingSessionGateway):
         self._workers: set[threading.Thread] = set()
         self._lock = threading.RLock()
         self._started = False
+        self._started_at: float | None = None
         self._terminal = False
         self._error: Exception | None = None
         self._boundary_callback: Callable[[Any], None] | None = None
@@ -828,6 +958,7 @@ class QtRecordingSession(RecordingSessionGateway):
             self.recorder.start(self.audio_path, self.cancel_event)
             with self._lock:
                 self._started = True
+                self._started_at = time.monotonic()
             self._start_boundary_monitor(controls)
         except Exception as error:
             with self._lock:
@@ -845,6 +976,7 @@ class QtRecordingSession(RecordingSessionGateway):
         self.wait_until_started()
         self._stop_boundary_monitor()
         self.recorder.stop()
+        stopped_at = time.monotonic()
         time.sleep(0.3)
         try:
             audio_bytes = self.audio_path.read_bytes()
@@ -854,10 +986,16 @@ class QtRecordingSession(RecordingSessionGateway):
         if len(audio_bytes) < 1000:
             self.fail(NoUsableAudioError("Recording produced no audio"))
             raise NoUsableAudioError("Recording produced no audio")
+        with self._lock:
+            started_at = self._started_at
+        duration_seconds = (
+            max(0.0, stopped_at - started_at) if started_at is not None else 0.0
+        )
         return RecordingSnapshot(
             self.audio_path,
             audio_bytes,
             cancel_token=self.provider_cancel_token,
+            duration_seconds=duration_seconds,
         )
 
     def cancel(self) -> None:
@@ -924,50 +1062,237 @@ class QtRecordingAudioGateway:
         return active.shutdown_complete.wait(timeout=max(0.0, float(timeout_seconds)))
 
 
-class QtClipboardGateway(ClipboardGateway):
-    """Copy results without taking focus from the QML shell."""
+class QtClipboardGateway(QmlClipboardGateway):
+    """Runtime-named facade over the concrete QML clipboard transaction."""
 
-    def __init__(self) -> None:
-        self.adapter = WindowsClipboardAdapter()
 
-    def capture_target(self) -> SelectionTarget | None:
-        return None
+_QT_AUDIO_COST_USD_PER_MINUTE = {
+    ("openai", "whisper-1"): 0.006,
+    ("openai", "gpt-4o-mini-transcribe"): 0.003,
+    ("openai", "gpt-4o-transcribe"): 0.006,
+    ("openai", "gpt-4o-transcribe-diarize"): 0.006,
+    ("groq", "whisper-large-v3-turbo"): 0.04 / 60,
+    ("groq", "whisper-large-v3"): 0.111 / 60,
+    # Gemini audio is token-priced; this uses the same 32 audio tokens/sec
+    # approximation as the production statistics implementation.
+    ("gemini", "gemini-2.5-flash"): 1.00 * 32 * 60 / 1_000_000,
+    ("gemini", "gemini-2.5-flash-lite"): 0.30 * 32 * 60 / 1_000_000,
+}
 
-    def is_target_current(self, target: SelectionTarget) -> bool:
-        return False
+_QT_TEXT_COST_USD_PER_MILLION_TOKENS = {
+    ("openai", "gpt-4o-mini"): (0.15, 0.60),
+    ("groq", "llama-3.3-70b-versatile"): (0.59, 0.79),
+    ("gemini", "gemini-2.5-flash"): (0.30, 2.50),
+    ("gemini", "gemini-2.5-flash-lite"): (0.10, 0.40),
+}
 
-    def capture_selection(self, target: SelectionTarget):
-        return None
 
-    def restore(self, capture) -> None:
-        return None
+def _qt_word_count(text: str) -> int:
+    return len(str(text or "").split())
 
-    def apply_result(self, capture, result: str) -> SelectionDisposition:
-        self.write_dictation_result(None, result)
-        return SelectionDisposition.COPIED
 
-    def write_dictation_result(
-        self,
-        target: SelectionTarget | None,
-        text: str,
-    ) -> SelectionDisposition:
-        if self.adapter.is_windows:
-            self.adapter.write_text(text)
-        elif platform.system() == "Darwin":
-            subprocess.run(["pbcopy"], input=text.encode(), check=True)
-        else:
-            subprocess.run(
-                ["xclip", "-selection", "clipboard"],
-                input=text.encode(),
-                check=True,
-            )
-        return SelectionDisposition.COPIED
+def _qt_estimated_text_cost(
+    provider: str,
+    model: str,
+    input_characters: int,
+    output_characters: int,
+) -> tuple[float, bool]:
+    rates = _QT_TEXT_COST_USD_PER_MILLION_TOKENS.get((provider, model))
+    if rates is None:
+        return 0.0, False
+    input_tokens = max(0, input_characters) / 4
+    output_tokens = max(0, output_characters) / 4
+    return (
+        (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000,
+        True,
+    )
 
-    def activate(self, target: SelectionTarget) -> None:
-        return None
 
-    def alt_pressed(self) -> bool:
-        return False
+def _build_qt_recording_usage_event(
+    context: dict[str, Any],
+    duration_seconds: float,
+    result: str,
+) -> dict[str, Any]:
+    """Build the production usage event for a completed dictation."""
+
+    context = dict(context or {})
+    provider = str(context.get("provider", "") or "")
+    model = str(context.get("model", "") or "")
+    result = str(result or "")
+    duration = max(0.0, float(duration_seconds))
+    models = [{"provider": provider, "model": model, "purpose": "transcription"}]
+    audio_rate = _QT_AUDIO_COST_USD_PER_MINUTE.get((provider, model))
+    cost = 0.0 if audio_rate is None else audio_rate * duration / 60
+    cost_complete = audio_rate is not None
+
+    output_characters = len(result)
+    refinement_provider = str(context.get("refinement_provider", "") or "")
+    refinement_model = str(context.get("refinement_model", "") or "")
+    if refinement_provider and refinement_model:
+        models.append(
+            {
+                "provider": refinement_provider,
+                "model": refinement_model,
+                "purpose": "refinement",
+            }
+        )
+        text_cost, text_complete = _qt_estimated_text_cost(
+            refinement_provider,
+            refinement_model,
+            output_characters,
+            output_characters,
+        )
+        cost += text_cost
+        cost_complete = cost_complete and text_complete
+    elif PROVIDER_REGISTRY.supports(provider, ProviderCapability.MULTIMODAL_AUDIO):
+        text_cost, text_complete = _qt_estimated_text_cost(
+            provider,
+            model,
+            0,
+            output_characters,
+        )
+        cost += text_cost
+        cost_complete = cost_complete and text_complete
+
+    return {
+        "timestamp": time.time(),
+        "type": "recording",
+        "duration_seconds": round(duration, 3),
+        "mode": str(context.get("mode", "transcription") or "transcription"),
+        "execution": str(context.get("execution", "cloud") or "cloud"),
+        "refinement_execution": str(context.get("refinement_execution", "") or ""),
+        "models": models,
+        "word_count": _qt_word_count(result),
+        "character_count": output_characters,
+        "estimated_cost_usd": round(cost, 8),
+        "cost_complete": cost_complete,
+    }
+
+
+def _build_qt_rewrite_usage_event(
+    provider: str,
+    model: str,
+    source: str,
+    result: str,
+) -> dict[str, Any]:
+    """Build the production usage event for a rewrite operation."""
+
+    provider = str(provider or "")
+    model = str(model or "")
+    source = str(source or "")
+    result = str(result or "")
+    cost, cost_complete = _qt_estimated_text_cost(
+        provider,
+        model,
+        len(source),
+        len(result),
+    )
+    return {
+        "timestamp": time.time(),
+        "type": "rewrite",
+        "duration_seconds": 0.0,
+        "mode": "rewrite",
+        "models": [{"provider": provider, "model": model, "purpose": "refinement"}],
+        "word_count": _qt_word_count(result),
+        "character_count": len(result),
+        "estimated_cost_usd": round(cost, 8),
+        "cost_complete": cost_complete,
+    }
+
+
+def _build_qt_translation_usage_event(
+    provider: str,
+    model: str,
+    source: str,
+    result: str,
+    target_language: str,
+) -> dict[str, Any]:
+    """Build the production usage event for a text translation."""
+
+    event = _build_qt_rewrite_usage_event(provider, model, source, result)
+    event.update(
+        {
+            "type": "translation",
+            "mode": "translation",
+            "target_language": str(target_language or ""),
+        }
+    )
+    return event
+
+
+def _build_qt_voice_translation_usage_event(
+    transcription_provider: str,
+    transcription_model: str,
+    translation_provider: str,
+    translation_model: str,
+    duration_seconds: float,
+    source: str,
+    result: str,
+    target_language: str,
+) -> dict[str, Any]:
+    """Build the production-compatible anonymous voice-translation event."""
+
+    transcription_provider = str(transcription_provider or "")
+    transcription_model = str(transcription_model or "")
+    translation_provider = str(translation_provider or "")
+    translation_model = str(translation_model or "")
+    source = str(source or "")
+    result = str(result or "")
+    target_language = str(target_language or "")
+    duration = max(0.0, float(duration_seconds))
+
+    transcription_cost = _QT_AUDIO_COST_USD_PER_MINUTE.get(
+        (transcription_provider, transcription_model)
+    )
+    cost = 0.0 if transcription_cost is None else transcription_cost * duration / 60
+    cost_complete = transcription_cost is not None
+    if PROVIDER_REGISTRY.supports(
+        transcription_provider, ProviderCapability.MULTIMODAL_AUDIO
+    ):
+        multimodal_cost, multimodal_complete = _qt_estimated_text_cost(
+            transcription_provider, transcription_model, 0, len(source)
+        )
+        cost += multimodal_cost
+        cost_complete = cost_complete and multimodal_complete
+
+    translation_cost, translation_complete = _qt_estimated_text_cost(
+        translation_provider,
+        translation_model,
+        len(source),
+        len(result),
+    )
+    cost += translation_cost
+    cost_complete = cost_complete and translation_complete
+
+    return {
+        "timestamp": time.time(),
+        "type": "voice_translation",
+        "mode": "voice_translation",
+        "workflow": "voice_translation",
+        "duration_seconds": round(duration, 3),
+        "transcription_provider": transcription_provider,
+        "transcription_model": transcription_model,
+        "translation_provider": translation_provider,
+        "translation_model": translation_model,
+        "target_language": target_language,
+        "models": [
+            {
+                "provider": transcription_provider,
+                "model": transcription_model,
+                "purpose": "transcription",
+            },
+            {
+                "provider": translation_provider,
+                "model": translation_model,
+                "purpose": "translation",
+            },
+        ],
+        "word_count": _qt_word_count(source),
+        "character_count": len(source),
+        "translation_character_count": len(result),
+        "estimated_cost_usd": round(cost, 8),
+        "cost_complete": cost_complete,
+    }
 
 
 class QtStatisticsGateway:
@@ -983,29 +1308,12 @@ class QtStatisticsGateway:
         duration_seconds: float,
         result: str,
     ) -> None:
-        self._record(
-            {
-                "event": "dictation",
-                "provider": context.get("provider", ""),
-                "model": context.get("model", ""),
-                "mode": context.get("mode", ""),
-                "duration_seconds": max(0.0, float(duration_seconds)),
-                "result_characters": len(result),
-            }
-        )
+        self._record(_build_qt_recording_usage_event(context, duration_seconds, result))
 
     def record_rewrite(
         self, provider: str, model: str, source: str, result: str
     ) -> None:
-        self._record(
-            {
-                "event": "rewrite",
-                "provider": provider,
-                "model": model,
-                "source_characters": len(source),
-                "result_characters": len(result),
-            }
-        )
+        self._record(_build_qt_rewrite_usage_event(provider, model, source, result))
 
     def record_translation(
         self,
@@ -1016,15 +1324,35 @@ class QtStatisticsGateway:
         target_language: str,
     ) -> None:
         self._record(
-            {
-                "event": "translation",
-                "provider": provider,
-                "model": model,
-                "source_characters": len(source),
-                "result_characters": len(result),
-                "target_language": target_language,
-            }
+            _build_qt_translation_usage_event(
+                provider,
+                model,
+                source,
+                result,
+                target_language,
+            )
         )
+
+    def record_voice_translation(
+        self,
+        config: Any,
+        state: Any,
+        duration_seconds: float,
+    ) -> None:
+        """Persist one production-schema event containing both provider legs."""
+
+        route = getattr(config, "route", None)
+        event = _build_qt_voice_translation_usage_event(
+            getattr(state, "transcription_provider", ""),
+            getattr(state, "transcription_model", ""),
+            getattr(route, "provider_id", ""),
+            getattr(route, "model_id", ""),
+            duration_seconds,
+            getattr(state, "raw_transcript", ""),
+            getattr(state, "translated_text", ""),
+            getattr(config, "target_language", ""),
+        )
+        self._record(event)
 
 
 def _history_path_for_repositories(repositories: ApplicationRepositories) -> Path:
@@ -1122,6 +1450,7 @@ class QtWorkflowRuntime:
         repositories: ApplicationRepositories | None = None,
         provider_registry=PROVIDER_REGISTRY,
         history_recorder: QtHistoryRecorder | None = None,
+        audio_batch_service: AudioFileBatchService | None = None,
     ) -> None:
         self.workflow_service = workflow_service
         self.recording_audio = recording_audio
@@ -1130,7 +1459,67 @@ class QtWorkflowRuntime:
         self.repositories = repositories
         self.provider_registry = provider_registry
         self.history_recorder = history_recorder
+        self.audio_batch_service = audio_batch_service
         self._shutdown = False
+
+    def audio_file_selection(
+        self,
+        provider_id: str = "",
+        model: str = "",
+        language: str = "",
+        mode: str = "transcription",
+    ) -> FileTranscriptionSelection:
+        """Build the current persisted transcription route for file imports."""
+
+        if self.repositories is None:
+            raise QtRuntimeError("The QML audio import route requires repositories")
+        current = self.repositories.config.load()
+        route = current.workflow(WorkflowScope.TRANSCRIPTION)
+        if not route.enabled:
+            raise RuntimeError("transcription workflow is disabled")
+        selected_provider = str(provider_id or route.provider_id).strip().lower()
+        selected_model = str(model or route.model_id).strip()
+        selected_language = (
+            str(language or getattr(current.ui, "language", "en") or "en")
+            .strip()
+            .lower()
+        )
+        selected_mode = str(mode or "transcription").strip().lower()
+        if selected_mode not in {"prompt", "transcription"}:
+            selected_mode = "transcription"
+        metadata = self.provider_registry.describe(selected_provider)
+        provider_config = getattr(current, selected_provider)
+        connection = ProviderConnection(
+            api_key=str(getattr(provider_config, "api_key", "") or "").strip(),
+            base_url=(
+                str(getattr(provider_config, "base_url", "") or "").strip()
+                or str(metadata.default_base_url or "").strip()
+            ),
+        )
+        custom_endpoint = (
+            route.custom_endpoint if selected_provider == route.provider_id else ""
+        )
+        connection = self.provider_registry.connection_for_route(
+            selected_provider,
+            connection,
+            custom_endpoint,
+        )
+        language_label = _language_display_name(selected_language)
+        instruction = (
+            TRANSCRIPTION_INSTRUCTION
+            if selected_mode == "transcription"
+            else PROMPT_INSTRUCTION
+        ).format(lang=language_label)
+        return FileTranscriptionSelection(
+            provider_id=selected_provider,
+            model=selected_model,
+            language=selected_language,
+            mode=selected_mode,
+            connection=connection,
+            instruction=instruction,
+            prompt=route.prompt or instruction,
+            temperature=0.0 if selected_mode == "transcription" else 0.1,
+        )
 
     def copy_result(self, text: str) -> SelectionDisposition:
         """Copy a visible QML result through the real clipboard adapter."""
@@ -1172,6 +1561,14 @@ def create_real_workflow_runtime(
     )
     recording_audio = QtRecordingAudioGateway(QtRecorder(config), config)
     clipboard = QtClipboardGateway()
+    audio_batch_gateway = DictionaryAwareAudioTranscriptionGateway(
+        RegistryAudioTranscriptionGateway(PROVIDER_REGISTRY),
+        dictionary_service,
+    )
+    audio_batch_service = AudioFileBatchService(
+        audio_batch_gateway,
+        SoxAudioConverter(),
+    )
     history_recorder = QtHistoryRecorder(active, scheduler)
     service = WorkflowService(
         QtProviderGateway(config, dictionary_service),
@@ -1189,6 +1586,7 @@ def create_real_workflow_runtime(
         clipboard,
         repositories=active,
         history_recorder=history_recorder,
+        audio_batch_service=audio_batch_service,
     )
 
 

@@ -9,6 +9,8 @@ $repoVersion = Join-Path $repoRoot "version.py"
 $repoExtra = Join-Path $repoRoot "extra"
 $repoAssets = Join-Path $repoRoot "assets"
 $repoDistribution = Join-Path $repoRoot "distribution"
+$repoQmlPython = Join-Path $repoRoot "spikes\pyside6"
+$repoQml = Join-Path $repoQmlPython "qml"
 $repoLocalAsrManifest = Join-Path $repoRoot "local_asr_manifest.json"
 $repoLocalAsrLicenses = Join-Path $repoRoot "licenses"
 $buildRoot = Join-Path $env:TEMP "clarify-voice-build"
@@ -128,7 +130,7 @@ Invoke-LoggedProcess $venvPython @(
 
 $versionScript = (
     "from importlib.metadata import version; " +
-    "names=('requests','sounddevice','customtkinter','Pillow','pyinstaller'); " +
+    "names=('requests','sounddevice','PySide6','Pillow','pyinstaller'); " +
     "print(', '.join(name + ' ' + version(name) for name in names))"
 )
 $versionArguments = @("-c", $versionScript)
@@ -145,7 +147,9 @@ New-Item $sourceDir, $distDir, $workDir, $specDir -ItemType Directory -Force | O
 
 # PyInstaller cannot reliably analyze source files over a WSL UNC path, so
 # stage the required inputs on the Windows filesystem before building.
-$source = Join-Path $sourceDir "app.py"
+$sourceQmlPython = Join-Path $sourceDir "spikes\pyside6"
+$source = Join-Path $sourceQmlPython "qml_app.py"
+$qml = Join-Path $sourceDir "qml"
 $extra = Join-Path $sourceDir "extra"
 $assets = Join-Path $sourceDir "assets"
 $distribution = Join-Path $sourceDir "distribution"
@@ -153,13 +157,45 @@ $localAsrManifest = Join-Path $sourceDir "local_asr_manifest.json"
 $localAsrLicenses = Join-Path $sourceDir "licenses"
 foreach ($requiredPath in @(
     $repoVersion, $repoExtra, $repoAssets, $repoDistribution,
-    $repoLocalAsrManifest, $repoLocalAsrLicenses
+    $repoQml, $repoLocalAsrManifest, $repoLocalAsrLicenses
 )) {
     if (-not (Test-Path $requiredPath)) {
         throw "Required packaged input is missing: $requiredPath"
     }
 }
-Copy-Item (Join-Path $repoRoot "*.py") $sourceDir -Force
+New-Item $sourceQmlPython -ItemType Directory -Force | Out-Null
+foreach ($qmlModule in @(Get-ChildItem $repoQmlPython -Filter "qml_*.py" -File)) {
+    Copy-Item $qmlModule.FullName $sourceQmlPython -Force
+}
+Copy-Item (Join-Path $repoQmlPython "qt_shell.py") $sourceQmlPython -Force
+foreach ($backendModule in @(
+    "audio_file_batch.py",
+    "audio_file_batch_ui.py",
+    "dictionary_settings.py",
+    "dictionary_snippets.py",
+    "history_store.py",
+    "hotkey_config.py",
+    "local_asr.py",
+    "local_asr_product.py",
+    "microphone_controls.py",
+    "provider_adapters.py",
+    "provider_http.py",
+    "provider_registry.py",
+    "provider_types.py",
+    "repositories.py",
+    "secret_store.py",
+    "version.py",
+    "voice_translation.py",
+    "voice_translation_runtime.py",
+    "windows_clipboard.py",
+    "windows_hotkeys.py",
+    "workflow_config.py",
+    "workflow_settings.py",
+    "workflows.py"
+)) {
+    Copy-Item (Join-Path $repoRoot $backendModule) $sourceDir -Force
+}
+Copy-Item $repoQml $qml -Recurse -Force
 Copy-Item $repoVersion $sourceDir -Force
 Copy-Item $repoExtra $extra -Recurse -Force
 Copy-Item $repoAssets $assets -Recurse -Force
@@ -185,12 +221,19 @@ $pyinstallerArgs = @(
     "--distpath", $distDir,
     "--workpath", $workDir,
     "--specpath", $specDir,
+    "--paths", $sourceDir,
+    "--paths", $sourceQmlPython,
     "--add-data", "${extra};extra",
     "--add-data", "${assets};assets",
     "--add-data", "${distribution};distribution",
+    "--add-data", "${qml};qml",
     "--add-data", "${localAsrManifest};.",
     "--add-data", "${localAsrLicenses};licenses",
     "--hidden-import", "version",
+    "--hidden-import", "qml_bridge",
+    "--hidden-import", "qml_runtime",
+    "--hidden-import", "qml_settings",
+    "--hidden-import", "qt_shell",
     "--hidden-import", "sounddevice",
     "--hidden-import", "_sounddevice_data",
     "--exclude-module", "numpy",
@@ -198,6 +241,11 @@ $pyinstallerArgs = @(
     # cross-platform source fallback out of the packaged Windows executable.
     "--exclude-module", "keyboard"
 )
+foreach ($qmlModule in @(Get-ChildItem $repoQmlPython -Filter "qml_*.py" -File)) {
+    if ($qmlModule.BaseName -ne "qml_app") {
+        $pyinstallerArgs += @("--hidden-import", $qmlModule.BaseName)
+    }
+}
 
 # Never copy or bundle the repository .env. Public and local executables read
 # provider credentials from the user's ClarifyVoice config directory instead.

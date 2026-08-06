@@ -1,25 +1,24 @@
 # Local audio-file import and bounded batch transcription
 
 `audio_file_batch.py` is the UI-independent service boundary used by the
-desktop file-picker in `app.py`. It is intentionally a local-file workflow,
+Qt/QML file-picker in `spikes/pyside6/qml_audio_batch.py`. It is intentionally a local-file workflow,
 not a download manager and not a second provider implementation.
 
 ## Desktop file-picker
 
-The **Files** button opens a Tk/CustomTkinter window backed by
-`filedialog.askopenfilenames`, so the same surface handles one file or a
-finite batch. Before starting, the user explicitly chooses local or cloud
+The **Files** button opens the QML `FileDialog`, so the same surface handles one
+file or a finite batch. Before starting, the user explicitly chooses local or cloud
 execution, a provider, an audio model, and a source language. The initial
 provider/model/endpoint come from the existing transcription workflow, but
 picker changes are per-batch and are not silently persisted to Settings.
 
 `AudioFileImportController` keeps successful results when the user retries;
 the retry job contains only files that failed. Service callbacks are marshaled
-back onto Tk's event loop, and closing the window requests cooperative
+back onto the Qt event loop, and closing the window requests cooperative
 cancellation without deleting imported originals. The result panel retains
 partial transcripts and per-file errors.
 
-Standard Tk does not provide native drag-and-drop. This follow-up therefore
+The current QML surface does not provide native drag-and-drop. This follow-up therefore
 does not add a new DnD dependency; packaged drag-and-drop support remains a
 separate product decision and acceptance task.
 
@@ -56,7 +55,7 @@ job = service.start(paths, selection, on_update=publish_file_state)
 result = job.wait()
 ```
 
-The UI must marshal `on_update` callbacks back to Tk's event loop. The service
+The UI must marshal `on_update` callbacks back to the Qt event loop. The service
 does not import Tk and does not perform UI work while a provider call is in
 flight.
 

@@ -7,6 +7,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -28,7 +30,14 @@ from repositories import (
     LocalUsageStatsRepository,
 )
 from secret_store import MemorySecretStore
+from provider_types import ModelCatalog
 from workflow_config import WorkflowScope
+from microphone_controls import (
+    MicrophoneDevice,
+    MicrophoneInventory,
+    RecordingControls,
+)
+from hotkey_config import HotkeyAction, HotkeySettings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +53,27 @@ def _repositories(directory: str) -> ApplicationRepositories:
         ),
         usage_stats=LocalUsageStatsRepository(root / "usage_stats.json"),
     )
+
+
+class _MicrophoneBackend:
+    """Small QML-facing backend double that preserves typed inventory seams."""
+
+    def __init__(self, inventory):
+        self.inventory = inventory
+        self.test_started = threading.Event()
+
+    def supports_explicit_microphone_selection(self):
+        return True
+
+    def microphone_inventory(self):
+        return self.inventory
+
+    def selectable_microphone_devices(self, inventory):
+        return inventory.available_devices
+
+    def test_microphone(self, selection, inventory):
+        self.test_started.set()
+        return 0.42
 
 
 class _RegistryKey:
@@ -92,6 +122,159 @@ class QmlSettingsControllerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.qt_app = QCoreApplication.instance() or QCoreApplication([])
+
+    @staticmethod
+    def _microphone_inventory():
+        selected = MicrophoneDevice(
+            stable_id="mic-selected",
+            name="USB microphone",
+            host_api="Windows WASAPI",
+            input_channels=1,
+            backend_index=7,
+        )
+        default = MicrophoneDevice(
+            stable_id="mic-default",
+            name="System microphone",
+            host_api="Windows WASAPI",
+            input_channels=1,
+            is_default=True,
+            backend_index=2,
+        )
+        return MicrophoneInventory.from_records(
+            [selected, default], default_id=default.stable_id
+        )
+
+    def test_microphone_inventory_recovery_uses_stable_ids_and_typed_draft(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            repositories.config.save(
+                AppConfig.from_mapping(
+                    {"microphone": {"selected_id": "stale-microphone"}}
+                )
+            )
+            backend = _MicrophoneBackend(self._microphone_inventory())
+            controller = QmlSettingsController(
+                repositories,
+                microphone_backend=backend,
+            )
+            try:
+                self.assertEqual(controller.selectedMicrophoneId, "stale-microphone")
+                self.assertEqual(
+                    controller.microphoneSelectionState,
+                    "fallback_default",
+                )
+                self.assertIn(
+                    "Saved microphone unavailable", controller.microphoneStatus
+                )
+                self.assertEqual(controller.microphoneSelectionIndex, 0)
+                self.assertEqual(
+                    [option["id"] for option in controller.microphoneDevices],
+                    ["", "mic-selected", "mic-default"],
+                )
+
+                self.assertTrue(controller.selectMicrophone("mic-selected"))
+                self.assertEqual(controller.selectedMicrophoneId, "mic-selected")
+                self.assertTrue(controller.setMicrophone(""))
+                self.assertIsNone(controller.selectedMicrophoneId)
+
+                self.assertTrue(
+                    controller.setRecordingControls(
+                        {
+                            "max_duration_seconds": 45,
+                            "warning_seconds": 5,
+                            "vad": {
+                                "enabled": True,
+                                "level_threshold": 0.03,
+                                "minimum_speech_seconds": 0.4,
+                                "silence_duration_seconds": 1.2,
+                            },
+                        }
+                    )
+                )
+                self.assertTrue(controller.dirty)
+                self.assertTrue(controller.save())
+
+                persisted = repositories.config.load()
+                self.assertIsNone(persisted.microphone.selected_id)
+                self.assertEqual(
+                    persisted.recording_controls.max_duration_seconds,
+                    45,
+                )
+                self.assertTrue(persisted.recording_controls.vad.enabled)
+            finally:
+                controller.shutdown()
+
+    def test_recording_controls_reject_invalid_boundary_without_mutating_draft(self):
+        with TemporaryDirectory() as directory:
+            backend = _MicrophoneBackend(self._microphone_inventory())
+            controller = QmlSettingsController(
+                _repositories(directory),
+                microphone_backend=backend,
+            )
+            try:
+                before = controller.recordingControls
+                self.assertFalse(
+                    controller.setRecordingControls(
+                        {"max_duration_seconds": 2, "warning_seconds": 3}
+                    )
+                )
+                self.assertIn("cannot exceed", controller.lastError)
+                self.assertEqual(controller.recordingControls, before)
+                self.assertEqual(
+                    controller.recordingControls,
+                    RecordingControls.defaults().to_mapping(),
+                )
+            finally:
+                controller.shutdown()
+
+    def test_microphone_test_is_async_and_does_not_persist_audio(self):
+        with TemporaryDirectory() as directory:
+            backend = _MicrophoneBackend(self._microphone_inventory())
+            controller = QmlSettingsController(
+                _repositories(directory),
+                microphone_backend=backend,
+            )
+            try:
+                self.assertTrue(controller.testMicrophone())
+                self.assertTrue(backend.test_started.wait(timeout=1))
+                for _ in range(100):
+                    self.qt_app.processEvents()
+                    if not controller.microphoneTestBusy:
+                        break
+                    time.sleep(0.01)
+                self.assertFalse(controller.microphoneTestBusy)
+                self.assertEqual(
+                    controller.microphoneTestStatus, "Input level peak: 0.42"
+                )
+                self.assertEqual(controller.microphoneTestStatusKind, "ok")
+                self.assertFalse((Path(directory) / "recording.wav").exists())
+            finally:
+                controller.shutdown()
+
+    def test_unavailable_inventory_exposes_recoverable_default_and_fails_closed_test(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            backend = _MicrophoneBackend(
+                MicrophoneInventory.unavailable("enumeration_failed")
+            )
+            controller = QmlSettingsController(
+                _repositories(directory),
+                microphone_backend=backend,
+            )
+            try:
+                self.assertEqual(controller.microphoneDevices[0]["id"], "")
+                self.assertEqual(controller.microphoneSelectionState, "unavailable")
+                self.assertIn(
+                    "Input inventory unavailable", controller.microphoneStatus
+                )
+                self.assertFalse(controller.testMicrophone())
+                self.assertEqual(
+                    controller.microphoneTestStatus,
+                    "No safe microphone to test.",
+                )
+            finally:
+                controller.shutdown()
 
     def test_load_exposes_typed_app_config_and_selected_route(self):
         with TemporaryDirectory() as directory:
@@ -144,6 +327,424 @@ class QmlSettingsControllerTests(unittest.TestCase):
             self.assertTrue(controller.selectWorkflow("rewrite"))
             self.assertEqual(controller.routeProviderId, "groq")
             self.assertEqual(controller.routeModelId, "llama-3.3-70b-versatile")
+
+    def test_unconfigured_legacy_voice_shortcut_is_not_presented_as_active(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            repositories.config.save(
+                AppConfig.from_mapping(
+                    {
+                        "hotkeys": {
+                            "bindings": {
+                                HotkeyAction.RECORDING.value: {
+                                    "modifiers": ["ctrl"],
+                                    "key": "Q",
+                                },
+                                HotkeyAction.REWRITE.value: {
+                                    "modifiers": ["alt"],
+                                    "key": "K",
+                                },
+                                HotkeyAction.TRANSLATION.value: {
+                                    "modifiers": ["alt"],
+                                    "key": "T",
+                                },
+                                HotkeyAction.VISIBILITY.value: {
+                                    "modifiers": ["alt"],
+                                    "key": "R",
+                                },
+                            }
+                        }
+                    }
+                )
+            )
+            controller = QmlSettingsController(repositories)
+            try:
+                self.assertEqual(
+                    [item["id"] for item in controller.hotkeyActions],
+                    [action.value for action in HotkeyAction],
+                )
+                self.assertEqual(
+                    controller.hotkeyDefinitions[HotkeyAction.RECORDING.value][
+                        "display"
+                    ],
+                    "Ctrl+Q",
+                )
+                self.assertEqual(
+                    controller.hotkeyDefinitions[HotkeyAction.VOICE_TRANSLATION.value][
+                        "display"
+                    ],
+                    "Not configured",
+                )
+                self.assertEqual(
+                    controller.hotkeyActivationModes,
+                    ["toggle", "push_to_talk"],
+                )
+                self.assertEqual(controller.hotkeyActivationMode, "toggle")
+            finally:
+                controller.shutdown()
+
+    def test_hotkey_capture_clears_when_definition_is_unchanged(self):
+        with TemporaryDirectory() as directory:
+            controller = QmlSettingsController(_repositories(directory))
+            try:
+                self.assertTrue(
+                    controller.beginHotkeyCapture(HotkeyAction.RECORDING.value)
+                )
+                current = controller.hotkeyDefinitions[HotkeyAction.RECORDING.value]
+                self.assertTrue(
+                    controller.setHotkey(
+                        HotkeyAction.RECORDING.value,
+                        {
+                            "modifiers": current["modifiers"],
+                            "key": current["key"],
+                        },
+                    )
+                )
+                self.assertEqual(controller.hotkeyCaptureAction, "")
+            finally:
+                controller.shutdown()
+
+    def test_hotkey_capture_rejects_conflicts_and_preserves_the_draft(self):
+        with TemporaryDirectory() as directory:
+            controller = QmlSettingsController(_repositories(directory))
+            try:
+                self.assertTrue(
+                    controller.beginHotkeyCapture(HotkeyAction.RECORDING.value)
+                )
+                self.assertEqual(
+                    controller.hotkeyCaptureAction,
+                    HotkeyAction.RECORDING.value,
+                )
+                self.assertFalse(
+                    controller.captureHotkey(
+                        HotkeyAction.RECORDING.value,
+                        ord("K"),
+                        134217728,  # Qt.KeyboardModifier.AltModifier
+                    )
+                )
+                self.assertIn("conflict", controller.lastError.lower())
+                self.assertEqual(
+                    controller.hotkeyDefinitions[HotkeyAction.RECORDING.value][
+                        "display"
+                    ],
+                    "Alt+L",
+                )
+                self.assertTrue(
+                    controller.captureHotkey(
+                        HotkeyAction.RECORDING.value,
+                        ord("Q"),
+                        67108864,  # Qt.KeyboardModifier.ControlModifier
+                    )
+                )
+                self.assertEqual(controller.hotkeyCaptureAction, "")
+                self.assertEqual(
+                    controller.hotkeyDefinitions[HotkeyAction.RECORDING.value][
+                        "display"
+                    ],
+                    "Ctrl+Q",
+                )
+                self.assertTrue(controller.dirty)
+            finally:
+                controller.shutdown()
+
+    def test_hotkey_save_persists_and_reset_restores_shared_defaults(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            controller = QmlSettingsController(repositories)
+            try:
+                self.assertTrue(
+                    controller.setHotkey(
+                        HotkeyAction.RECORDING.value,
+                        {"modifiers": ["ctrl"], "key": "Q"},
+                    )
+                )
+                self.assertTrue(controller.save())
+                self.assertEqual(
+                    repositories.config.load()
+                    .hotkeys.definition(HotkeyAction.RECORDING)
+                    .display,
+                    "Ctrl+Q",
+                )
+
+                self.assertTrue(controller.resetHotkey(HotkeyAction.RECORDING.value))
+                self.assertEqual(
+                    controller.hotkeyDefinitions[HotkeyAction.RECORDING.value][
+                        "display"
+                    ],
+                    HotkeySettings.defaults()
+                    .definition(HotkeyAction.RECORDING)
+                    .display,
+                )
+                self.assertTrue(controller.resetAllHotkeys())
+                self.assertTrue(controller.save())
+                self.assertEqual(
+                    repositories.config.load().hotkeys,
+                    HotkeySettings.defaults(),
+                )
+            finally:
+                controller.shutdown()
+
+    def test_hotkey_save_calls_production_applier_before_persistence(self):
+        with TemporaryDirectory() as directory:
+            applied = []
+            repositories = _repositories(directory)
+            controller = QmlSettingsController(
+                repositories,
+                hotkey_applier=applied.append,
+            )
+            try:
+                self.assertTrue(
+                    controller.setHotkey(
+                        HotkeyAction.RECORDING.value,
+                        {"modifiers": ["ctrl"], "key": "Q"},
+                    )
+                )
+                self.assertTrue(controller.save())
+                self.assertEqual(len(applied), 1)
+                self.assertEqual(
+                    applied[0].definition(HotkeyAction.RECORDING).display,
+                    "Ctrl+Q",
+                )
+            finally:
+                controller.shutdown()
+
+    def test_provider_onboarding_validates_and_persists_key_in_secret_store(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret_store = MemorySecretStore()
+            repositories = ApplicationRepositories(
+                config=LocalConfigRepository(
+                    root / "config.json",
+                    secret_store=secret_store,
+                ),
+                usage_stats=LocalUsageStatsRepository(root / "usage.json"),
+            )
+            controller = QmlSettingsController(repositories)
+            try:
+                self.assertTrue(controller.selectProvider("openai"))
+                self.assertFalse(controller.providerHasApiKey)
+                controller.setProviderApiKey("onboarding-test-key")
+
+                with patch.object(
+                    qml_settings.PROVIDER_REGISTRY,
+                    "discover_models",
+                    return_value=ModelCatalog(
+                        audio_models=("whisper-1",),
+                        text_models=("gpt-test",),
+                    ),
+                ):
+                    self.assertTrue(controller.validateProvider())
+                    for _ in range(100):
+                        self.qt_app.processEvents()
+                        if controller.providerStatus == "active":
+                            break
+                        time.sleep(0.01)
+
+                self.assertEqual(controller.providerStatus, "active")
+                self.assertTrue(controller.providerHasApiKey)
+                self.assertEqual(secret_store.get("openai"), "onboarding-test-key")
+                self.assertEqual(controller.providerApiKey, "")
+                self.assertNotIn(
+                    "onboarding-test-key",
+                    (root / "config.json").read_text(encoding="utf-8"),
+                )
+            finally:
+                controller.shutdown()
+
+    def test_provider_selection_loads_persisted_custom_endpoint(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret_store = MemorySecretStore()
+            repositories = ApplicationRepositories(
+                config=LocalConfigRepository(
+                    root / "config.json",
+                    secret_store=secret_store,
+                ),
+                usage_stats=LocalUsageStatsRepository(root / "usage.json"),
+            )
+            repositories.config.save(
+                AppConfig.from_mapping(
+                    {
+                        "openai_api_key": "saved-key",
+                        "openai_base_url": "https://proxy.example/v1",
+                    }
+                )
+            )
+            controller = QmlSettingsController(repositories)
+            try:
+                self.assertTrue(controller.selectProvider("openai"))
+                self.assertEqual(
+                    controller.providerBaseUrl,
+                    "https://proxy.example/v1",
+                )
+            finally:
+                controller.shutdown()
+
+    def test_provider_validation_preserves_draft_for_newly_selected_provider(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            controller = QmlSettingsController(repositories)
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocked_discovery(*_args):
+                started.set()
+                release.wait(timeout=2)
+                return ModelCatalog(audio_models=("whisper-1",))
+
+            try:
+                self.assertTrue(controller.selectProvider("openai"))
+                controller.setProviderApiKey("provider-a-key")
+                controller.setProviderBaseUrl("https://openai-proxy.example/v1")
+
+                with patch.object(
+                    qml_settings.PROVIDER_REGISTRY,
+                    "discover_models",
+                    side_effect=blocked_discovery,
+                ):
+                    self.assertTrue(controller.validateProvider())
+                    self.assertTrue(started.wait(timeout=2))
+
+                    self.assertTrue(controller.selectProvider("groq"))
+                    controller.setProviderApiKey("provider-b-draft")
+                    controller.setProviderBaseUrl("https://groq-proxy.example/v1")
+                    release.set()
+
+                    for _ in range(100):
+                        self.qt_app.processEvents()
+                        if controller.providerStates["openai"]["status"] == "active":
+                            break
+                        time.sleep(0.01)
+
+                self.assertEqual(
+                    controller.providerStates["openai"]["status"], "active"
+                )
+                self.assertEqual(controller.selectedProviderId, "groq")
+                self.assertEqual(controller.providerApiKey, "provider-b-draft")
+                self.assertEqual(
+                    controller.providerBaseUrl,
+                    "https://groq-proxy.example/v1",
+                )
+            finally:
+                release.set()
+                controller.shutdown()
+
+    def test_provider_validation_keeps_unrelated_qml_draft_out_of_persistence(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            controller = QmlSettingsController(repositories)
+            try:
+                controller.setAutostart(True)
+                self.assertTrue(controller.selectWorkflow("rewrite"))
+                controller.setRoutePrompt("draft-only prompt")
+                self.assertTrue(controller.selectProvider("openai"))
+                controller.setProviderApiKey("draft-provider-key")
+
+                with patch.object(
+                    qml_settings.PROVIDER_REGISTRY,
+                    "discover_models",
+                    return_value=ModelCatalog(
+                        audio_models=("whisper-1",),
+                        text_models=("gpt-test",),
+                    ),
+                ):
+                    self.assertTrue(controller.validateProvider())
+                    for _ in range(100):
+                        self.qt_app.processEvents()
+                        if controller.providerStatus == "active":
+                            break
+                        time.sleep(0.01)
+
+                persisted = repositories.config.load()
+                self.assertTrue(controller.autostart)
+                self.assertEqual(controller.routePrompt, "draft-only prompt")
+                self.assertFalse(persisted.startup.autostart)
+                self.assertNotEqual(
+                    persisted.workflow("rewrite").prompt,
+                    "draft-only prompt",
+                )
+                self.assertEqual(persisted.openai.api_key, "draft-provider-key")
+            finally:
+                controller.shutdown()
+
+    def test_clearing_provider_invalidates_pending_validation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret_store = MemorySecretStore()
+            repositories = ApplicationRepositories(
+                config=LocalConfigRepository(
+                    root / "config.json",
+                    secret_store=secret_store,
+                ),
+                usage_stats=LocalUsageStatsRepository(root / "usage.json"),
+            )
+            repositories.config.save(
+                AppConfig.from_mapping({"openai_api_key": "saved-key"})
+            )
+            controller = QmlSettingsController(repositories)
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocked_discovery(*_args):
+                started.set()
+                release.wait(timeout=2)
+                return ModelCatalog(audio_models=("whisper-1",))
+
+            try:
+                controller.selectProvider("openai")
+                with patch.object(
+                    qml_settings.PROVIDER_REGISTRY,
+                    "discover_models",
+                    side_effect=blocked_discovery,
+                ):
+                    self.assertTrue(controller.validateProvider())
+                    self.assertTrue(started.wait(timeout=2))
+                    self.assertTrue(controller.clearProvider())
+                    release.set()
+                    for _ in range(100):
+                        self.qt_app.processEvents()
+                        time.sleep(0.01)
+
+                self.assertFalse(controller.providerHasApiKey)
+                self.assertIsNone(secret_store.get("openai"))
+                self.assertEqual(repositories.config.load().openai.api_key, "")
+            finally:
+                release.set()
+                controller.shutdown()
+
+    def test_clear_provider_failure_restores_idle_error_state(self):
+        with TemporaryDirectory() as directory:
+            controller = QmlSettingsController(_repositories(directory))
+            pending = qml_settings.CancellationToken()
+            try:
+                controller.selectProvider("openai")
+                controller._provider_generations["openai"] = 4
+                controller._provider_tokens["openai"] = pending
+                controller._provider_activity["openai"] = {
+                    "status": "validating",
+                    "error": "",
+                    "models": [],
+                    "textModels": [],
+                    "busy": True,
+                }
+
+                with patch.object(
+                    controller,
+                    "_persist_provider_credentials",
+                    side_effect=OSError("credential store unavailable"),
+                ):
+                    self.assertFalse(controller.clearProvider())
+
+                self.assertTrue(pending.cancelled)
+                self.assertFalse(controller.providerBusy)
+                self.assertEqual(controller.providerStatus, "error")
+                self.assertEqual(
+                    controller.providerError,
+                    "credential store unavailable",
+                )
+                self.assertIn("credential store unavailable", controller.lastError)
+            finally:
+                controller.shutdown()
 
     def test_properties_and_slots_update_one_typed_draft(self):
         with TemporaryDirectory() as directory:
@@ -467,6 +1068,13 @@ class QmlSettingsControllerTests(unittest.TestCase):
                 "routePrompt",
                 "routeCustomEndpoint",
                 "routeEnabled",
+                "selectedMicrophoneId",
+                "microphoneDevices",
+                "microphoneInventory",
+                "microphoneStatus",
+                "microphoneTestStatus",
+                "microphoneTestBusy",
+                "recordingControls",
                 "dirty",
                 "lastError",
             }.issubset(property_names)
