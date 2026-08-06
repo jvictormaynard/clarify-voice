@@ -171,6 +171,15 @@ def _language_display_name(value: str) -> str:
     return LANGUAGE_NAMES.get(base, text)
 
 
+def _workflow_instruction(base: str, route_prompt: str = "") -> str:
+    """Keep the safety contract while appending the route's policy."""
+
+    policy = str(route_prompt or "").strip()
+    if not policy:
+        return base
+    return f"{base}\n\nWorkflow-specific instruction:\n{policy}"
+
+
 class QtRuntimeError(RuntimeError):
     """The real Qt runtime cannot start with the current local installation."""
 
@@ -427,9 +436,9 @@ class QtProviderGateway:
         )
         if refinement_used:
             refinement_route = self._route(refinement_scope)
-            refinement_instruction = (
-                refinement_route.prompt
-                or TRANSCRIPT_REWRITE_INSTRUCTION.format(lang=language_label)
+            refinement_instruction = _workflow_instruction(
+                TRANSCRIPT_REWRITE_INSTRUCTION.format(lang=language_label),
+                refinement_route.prompt,
             )
             refinement_request = RewriteRequest(
                 text=raw_transcript,
@@ -749,12 +758,12 @@ class QtClipboardGateway(ClipboardGateway):
         if self.adapter.is_windows:
             self.adapter.write_text(text)
         elif platform.system() == "Darwin":
-            subprocess.run(["pbcopy"], input=text.encode(), check=False)
+            subprocess.run(["pbcopy"], input=text.encode(), check=True)
         else:
             subprocess.run(
                 ["xclip", "-selection", "clipboard"],
                 input=text.encode(),
-                check=False,
+                check=True,
             )
         return SelectionDisposition.COPIED
 

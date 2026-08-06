@@ -314,7 +314,9 @@ class QtProviderGatewayTests(unittest.TestCase):
                 provider_id="openai", model_id="whisper"
             ),
             refinement=WorkflowRoute(
-                provider_id="gemini", model_id="editor"
+                provider_id="gemini",
+                model_id="editor",
+                prompt="Rewrite the transcript clearly while preserving its meaning.",
             ),
             rewrite=WorkflowRoute(provider_id="gemini", model_id="editor"),
             translation=WorkflowRoute(provider_id="gemini", model_id="editor"),
@@ -371,6 +373,14 @@ class QtProviderGatewayTests(unittest.TestCase):
         )
         self.assertIn(
             "Output MUST be in Brazilian Portuguese.",
+            registry.rewrite_requests[0][1].instruction,
+        )
+        self.assertIn(
+            "Workflow-specific instruction",
+            registry.rewrite_requests[0][1].instruction,
+        )
+        self.assertIn(
+            "Rewrite the transcript clearly while preserving its meaning.",
             registry.rewrite_requests[0][1].instruction,
         )
 
@@ -543,6 +553,27 @@ class QmlRuntimeFactoryTests(unittest.TestCase):
 
         self.assertIsInstance(runtime.workflow_service, WorkflowService)
         self.assertNotIn("app", sys.modules)
+
+
+@unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")
+class QtClipboardGatewayTests(unittest.TestCase):
+    def test_xclip_failure_is_reported_to_copy_bridge(self):
+        from spikes.pyside6.qml_runtime import QtClipboardGateway
+
+        gateway = QtClipboardGateway()
+        gateway.adapter.is_windows = False
+        failure = subprocess.CalledProcessError(
+            1, ["xclip", "-selection", "clipboard"]
+        )
+        with patch(
+            "spikes.pyside6.qml_runtime.platform.system", return_value="Linux"
+        ), patch(
+            "spikes.pyside6.qml_runtime.subprocess.run", side_effect=failure
+        ) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                gateway.write_dictation_result(None, "Visible result")
+
+        self.assertTrue(run.call_args.kwargs["check"])
 
 
 if __name__ == "__main__":
