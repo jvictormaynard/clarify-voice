@@ -14,6 +14,7 @@ try:
     from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal
     from PySide6.QtWidgets import QSystemTrayIcon
     from spikes.pyside6.qt_shell import (
+        ACTIVATION_EVENT_NAME,
         QtShell,
         QtSingleInstanceGuard,
         WindowsGlobalHotkeyBackend,
@@ -56,6 +57,30 @@ class FakeLock:
         if self.locks.get(self.path) is self:
             del self.locks[self.path]
         self.locked = False
+
+
+class FakeActivationApi:
+    WAIT_OBJECT_0 = 0
+
+    def __init__(self):
+        self.handle = 9001
+        self.create_calls = []
+        self.set_calls = []
+        self.close_calls = []
+
+    def create_event(self, name):
+        self.create_calls.append(name)
+        return self.handle
+
+    def set_event(self, handle):
+        self.set_calls.append(handle)
+        return True
+
+    def wait_for_event(self, _handle):
+        return 1
+
+    def close(self, handle):
+        self.close_calls.append(handle)
 
 
 class FakeWindow:
@@ -228,6 +253,36 @@ class QtSingleInstanceGuardTests(unittest.TestCase):
         first.release()
         self.assertTrue(second.acquire())
         second.release()
+
+    def test_second_guard_signals_the_primary_activation_event(self):
+        activation_api = FakeActivationApi()
+        first = QtSingleInstanceGuard(
+            "clarifyvoice-test",
+            lock_path=Path(tempfile.gettempdir()) / "clarifyvoice-test.lock",
+            lock_factory=FakeLock,
+            activation_api=activation_api,
+        )
+        second = QtSingleInstanceGuard(
+            "clarifyvoice-test",
+            lock_path=Path(tempfile.gettempdir()) / "clarifyvoice-test.lock",
+            lock_factory=FakeLock,
+            activation_api=activation_api,
+        )
+
+        self.assertTrue(first.acquire())
+        self.assertFalse(second.acquire())
+        self.assertEqual(
+            activation_api.create_calls,
+            [ACTIVATION_EVENT_NAME, ACTIVATION_EVENT_NAME],
+        )
+        self.assertEqual(activation_api.set_calls, [activation_api.handle])
+        self.assertEqual(activation_api.close_calls, [activation_api.handle])
+
+        first.release()
+        self.assertEqual(
+            activation_api.close_calls,
+            [activation_api.handle, activation_api.handle],
+        )
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
@@ -503,6 +558,39 @@ class QtShellTests(unittest.TestCase):
 
         shell.stop()
         self.assertFalse(shell._instance_guard.is_primary)
+
+    def test_activation_event_reactivates_a_hidden_primary_window(self):
+        class ActivationGuard:
+            is_primary = False
+
+            def __init__(self):
+                self.callback = None
+                self.released = False
+
+            def acquire(self):
+                self.is_primary = True
+                return True
+
+            def start_activation_listener(self, callback):
+                self.callback = callback
+
+            def release(self):
+                self.is_primary = False
+                self.released = True
+
+        guard = ActivationGuard()
+        shell = self._shell(guard=guard)
+        self.assertTrue(shell.start())
+
+        shell.hide_window()
+        self.assertFalse(shell._window.visible)
+        guard.callback()
+
+        self.assertTrue(shell._window.visible)
+        self.assertEqual(shell._window.calls[-3:], ["show", "raise", "activate"])
+
+        shell.stop()
+        self.assertTrue(guard.released)
 
     def test_primary_shell_owns_tray_hotkeys_and_window_actions(self):
         hotkeys = FakeHotkeys()

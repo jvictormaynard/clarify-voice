@@ -61,6 +61,7 @@ def _autostart_command(executable: str | None = None) -> str:
     arguments = [executable]
     if not getattr(sys, "frozen", False):
         arguments.append(str(_source_qml_entrypoint()))
+    arguments.append("--hidden")
     return subprocess.list2cmdline(arguments)
 
 
@@ -495,6 +496,38 @@ class QmlSettingsController(QObject):
         self.saved.emit()
         return True
 
+    @Slot(str, result=bool)
+    def persistMode(self, value: str) -> bool:
+        """Persist only the UI mode without applying the editable Settings draft."""
+
+        try:
+            normalized = self._choice(value, SUPPORTED_UI_MODES, "mode")
+        except ValueError as error:
+            self._set_error(error)
+            return False
+        return self._persist_ui_preference(
+            lambda config: replace(
+                config,
+                ui=replace(config.ui, mode=normalized),
+            )
+        )
+
+    @Slot(str, result=bool)
+    def persistLanguage(self, value: str) -> bool:
+        """Persist only the UI language without applying the editable Settings draft."""
+
+        try:
+            normalized = self._choice(value, SUPPORTED_LANGUAGES, "language")
+        except ValueError as error:
+            self._set_error(error)
+            return False
+        return self._persist_ui_preference(
+            lambda config: replace(
+                config,
+                ui=replace(config.ui, language=normalized),
+            )
+        )
+
     def _selected_route(self) -> WorkflowRoute:
         return self._config.workflow(self._selected_scope)
 
@@ -555,6 +588,21 @@ class QmlSettingsController(QObject):
         self.configChanged.emit()
         if route_changed:
             self.routeChanged.emit()
+        return True
+
+    def _persist_ui_preference(
+        self,
+        change: Callable[[AppConfig], AppConfig],
+    ) -> bool:
+        """Read-modify-write one persisted preference, leaving the draft intact."""
+
+        try:
+            persisted_config = self._config_repository.load()
+            self._config_repository.apply(change(persisted_config))
+        except Exception as error:  # Repository errors belong in the QML state.
+            self._set_error(error)
+            return False
+        self._set_error(None)
         return True
 
     def _replace_loaded_config(self, config: AppConfig) -> None:

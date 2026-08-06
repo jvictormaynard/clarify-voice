@@ -18,6 +18,7 @@ try:
         _branding_icon_path,
         _load_branding_icon,
         _register_qml_context,
+        _hidden_start_requested,
         _show_translation_picker_if_needed,
         _sync_recording_escape_hotkey,
         _start_shell_if_available,
@@ -196,7 +197,8 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertIn("_connect_preference_sync(bridge, settings)", source)
         self.assertIn("settings.configChanged.connect", source)
         self.assertIn("syncing_from_settings", source)
-        self.assertIn("settings.save()", source)
+        self.assertIn("settings.persistMode", source)
+        self.assertIn("settings.persistLanguage", source)
         self.assertIn("bridge.modeChanged.connect", source)
         self.assertIn("bridge.languageChanged.connect", source)
         self.assertIn("_show_translation_picker_if_needed", source)
@@ -342,6 +344,15 @@ class PySide6QmlFrontendTests(unittest.TestCase):
         self.assertNotIn("FakeWorkflow", source)
         self.assertNotIn("legacy_adapters", runtime_source)
         self.assertNotIn("QmlRuntimeUnavailableError", runtime_source)
+        self.assertIn("_hidden_start_requested", source)
+        self.assertIn("window.hide()", source)
+
+    @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
+    def test_qml_entrypoint_accepts_only_the_supported_hidden_start_flag(self):
+        self.assertFalse(_hidden_start_requested([]))
+        self.assertTrue(_hidden_start_requested(["--hidden"]))
+        with self.assertRaises(ValueError):
+            _hidden_start_requested(["--compat"])
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional QML dependency")
@@ -414,7 +425,22 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
                 self.commands.append(command)
                 return True
 
-        initial = AppConfig.from_mapping({"ui_mode": "prompt", "ui_language": "en"})
+        initial = AppConfig.from_mapping(
+            {
+                "ui_mode": "prompt",
+                "ui_language": "en",
+                "autostart": False,
+                "history_enabled": False,
+                "workflows": {
+                    "rewrite": {
+                        "provider_id": "openai",
+                        "model_id": "gpt-4o-mini",
+                        "prompt": "Persisted prompt",
+                        "enabled": True,
+                    }
+                },
+            }
+        )
         config_repository = ConfigRepository(initial)
         settings = QmlSettingsController(Repositories(config_repository))
         service = WorkflowService()
@@ -423,6 +449,10 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
 
         settings.setMode("transcription")
         settings.setLanguage("pt")
+        settings.selectWorkflow("rewrite")
+        settings.setRoutePrompt("Draft prompt")
+        settings.setHistoryEnabled(True)
+        settings.setAutostart(True)
         self.assertEqual(config_repository.applied, [])
         bridge.startRecording()
 
@@ -438,6 +468,12 @@ class QmlEntrypointIntegrationTests(unittest.TestCase):
         reloaded = QmlSettingsController(Repositories(config_repository))
         self.assertEqual(reloaded.mode, "prompt")
         self.assertEqual(reloaded.language, "de")
+        self.assertFalse(reloaded.autostart)
+        self.assertFalse(reloaded.historyEnabled)
+        self.assertEqual(reloaded.routeFor("rewrite")["prompt"], "Persisted prompt")
+        self.assertEqual(settings.routePrompt, "Draft prompt")
+        self.assertTrue(settings.autostart)
+        self.assertTrue(settings.historyEnabled)
 
         settings.setMode("transcription")
         settings.setLanguage("pt")

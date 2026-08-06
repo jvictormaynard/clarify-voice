@@ -11,7 +11,9 @@ from __future__ import annotations
 import ctypes
 import sys
 import tempfile
+import threading
 from collections.abc import Callable, Mapping
+from ctypes import wintypes
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -40,6 +42,7 @@ from windows_hotkeys import (
 
 
 DEFAULT_INSTANCE_NAME = "clarifyvoice"
+ACTIVATION_EVENT_NAME = r"Local\ClarifyVoice.ShowExisting.v1"
 _WINDOWS_NATIVE_EVENT_TYPES = frozenset(
     {"windows_generic_MSG", "windows_dispatcher_MSG"}
 )
@@ -100,6 +103,46 @@ class GlobalHotkeyBackend(Protocol):
     def stop(self) -> None: ...
 
 
+class _WindowsSingleInstanceActivationApi:
+    """Small Win32 named-event boundary shared by primary and secondary runs."""
+
+    WAIT_OBJECT_0 = 0
+    INFINITE = 0xFFFFFFFF
+
+    def __init__(self) -> None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateEventW.argtypes = [
+            wintypes.LPVOID,
+            wintypes.BOOL,
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        ]
+        kernel32.CreateEventW.restype = wintypes.HANDLE
+        kernel32.SetEvent.argtypes = [wintypes.HANDLE]
+        kernel32.SetEvent.restype = wintypes.BOOL
+        kernel32.WaitForSingleObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+        ]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        self._kernel32 = kernel32
+
+    def create_event(self, name: str) -> Any:
+        return self._kernel32.CreateEventW(None, False, False, name)
+
+    def set_event(self, handle: Any) -> bool:
+        return bool(self._kernel32.SetEvent(handle))
+
+    def wait_for_event(self, handle: Any) -> int:
+        return int(self._kernel32.WaitForSingleObject(handle, self.INFINITE))
+
+    def close(self, handle: Any) -> None:
+        if handle:
+            self._kernel32.CloseHandle(handle)
+
+
 def _supported_shell_hotkey_settings(
     settings: HotkeySettings | Mapping[str, Any] | None,
 ) -> HotkeySettings:
@@ -139,6 +182,7 @@ class QtSingleInstanceGuard:
         lock_path: str | Path | None = None,
         lock_factory: Callable[[str], Any] = QLockFile,
         stale_lock_time_ms: int = 30_000,
+        activation_api: Any | None = None,
     ) -> None:
         normalized_name = str(name).strip()
         if not normalized_name:
@@ -156,6 +200,10 @@ class QtSingleInstanceGuard:
         self._lock = lock_factory(str(self.path))
         self._lock.setStaleLockTime(int(stale_lock_time_ms))
         self._acquired = False
+        self._activation_api = activation_api
+        self._activation_event: Any | None = None
+        self._activation_listener_thread: threading.Thread | None = None
+        self._activation_listening = False
 
     @property
     def is_primary(self) -> bool:
@@ -168,16 +216,92 @@ class QtSingleInstanceGuard:
 
         if self._acquired:
             return True
-        self._acquired = bool(self._lock.tryLock(0))
-        return self._acquired
+        activation_api = self._activation_event_api()
+        activation_event = None
+        if activation_api is not None:
+            activation_event = activation_api.create_event(ACTIVATION_EVENT_NAME)
+            if not activation_event:
+                raise QtShellError(
+                    "could not create the single-instance activation event"
+                )
+
+        try:
+            acquired = bool(self._lock.tryLock(0))
+        except BaseException:
+            if activation_event is not None:
+                activation_api.close(activation_event)
+            raise
+
+        if not acquired:
+            if activation_event is not None:
+                try:
+                    activation_api.set_event(activation_event)
+                finally:
+                    activation_api.close(activation_event)
+            return False
+
+        self._activation_event = activation_event
+        self._acquired = True
+        return True
 
     def release(self) -> None:
         """Release the lock owned by this process."""
 
         if not self._acquired:
             return
-        self._lock.unlock()
-        self._acquired = False
+        self.stop_activation_listener()
+        try:
+            if self._activation_event is not None:
+                self._activation_event_api().close(self._activation_event)
+                self._activation_event = None
+        finally:
+            self._lock.unlock()
+            self._acquired = False
+
+    def start_activation_listener(self, callback: Callable[[], None]) -> None:
+        """Notify a primary Qt shell when a later launch signals its event."""
+
+        if (
+            not self._acquired
+            or self._activation_event is None
+            or not callable(callback)
+            or self._activation_listener_thread is not None
+        ):
+            return
+
+        api = self._activation_event_api()
+        handle = self._activation_event
+        self._activation_listening = True
+
+        def wait_loop() -> None:
+            while self._activation_listening and self._activation_event == handle:
+                result = api.wait_for_event(handle)
+                if result != api.WAIT_OBJECT_0:
+                    return
+                if self._activation_listening:
+                    callback()
+
+        worker = threading.Thread(
+            target=wait_loop,
+            name="ClarifyVoiceSingleInstanceActivation",
+            daemon=True,
+        )
+        self._activation_listener_thread = worker
+        worker.start()
+
+    def stop_activation_listener(self) -> None:
+        """Stop dispatching activation callbacks for this primary process."""
+
+        self._activation_listening = False
+        worker = self._activation_listener_thread
+        self._activation_listener_thread = None
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=0.2)
+
+    def _activation_event_api(self) -> Any | None:
+        if self._activation_api is None and sys.platform == "win32":
+            self._activation_api = _WindowsSingleInstanceActivationApi()
+        return self._activation_api
 
     def __enter__(self) -> "QtSingleInstanceGuard":
         if not self.acquire():
@@ -372,6 +496,7 @@ class QtShell(QObject):
 
     started = Signal()
     stopped = Signal()
+    activationRequested = Signal()
     hotkeyTriggered = Signal(str)
     quitRequested = Signal()
 
@@ -403,6 +528,7 @@ class QtShell(QObject):
         self._hotkeys_connected = False
         self._hotkeys_started = False
         self._window_close_filter_installed = False
+        self.activationRequested.connect(self.show_window)
 
     @property
     def is_running(self) -> bool:
@@ -426,6 +552,7 @@ class QtShell(QObject):
 
         hotkeys_start_attempted = False
         try:
+            self._instance_guard.start_activation_listener(self._request_activation)
             if tray_available:
                 self._create_tray()
                 self._install_window_close_filter()
@@ -570,6 +697,11 @@ class QtShell(QObject):
         if normalized == HotkeyAction.VISIBILITY.value:
             self.toggle_window()
 
+    def _request_activation(self) -> None:
+        """Queue a primary-window activation on Qt's GUI thread."""
+
+        self.activationRequested.emit()
+
 
 class _NativeMessage(ctypes.Structure):
     """Prefix-compatible Windows MSG structure for native event decoding."""
@@ -620,6 +752,7 @@ def _load_user32() -> Any:
 
 
 __all__ = [
+    "ACTIVATION_EVENT_NAME",
     "DEFAULT_INSTANCE_NAME",
     "GlobalHotkeyBackend",
     "HotkeyPlatformError",

@@ -294,7 +294,7 @@ class QmlSettingsControllerTests(unittest.TestCase):
         self.assertTrue(entrypoint.is_absolute())
         self.assertEqual(
             command,
-            subprocess.list2cmdline([executable, str(entrypoint)]),
+            subprocess.list2cmdline([executable, str(entrypoint), "--hidden"]),
         )
 
     def test_frozen_autostart_command_does_not_append_source_script(self):
@@ -303,7 +303,7 @@ class QmlSettingsControllerTests(unittest.TestCase):
         with patch.object(qml_settings.sys, "frozen", True, create=True):
             command = qml_settings._autostart_command(executable)
 
-        self.assertEqual(command, subprocess.list2cmdline([executable]))
+        self.assertEqual(command, subprocess.list2cmdline([executable, "--hidden"]))
 
     def test_windows_save_applies_autostart_run_key_and_config(self):
         with TemporaryDirectory() as directory:
@@ -323,9 +323,53 @@ class QmlSettingsControllerTests(unittest.TestCase):
 
             apply.assert_called_once()
             self.assertIn("qml_app.py", registry.values["ClarifyVoice"])
-            self.assertNotIn("--hidden", registry.values["ClarifyVoice"])
+            self.assertIn("--hidden", registry.values["ClarifyVoice"])
             self.assertTrue(repositories.config.load().startup.autostart)
             self.assertFalse(controller.dirty)
+
+    def test_persist_preference_does_not_apply_the_settings_draft(self):
+        with TemporaryDirectory() as directory:
+            repositories = _repositories(directory)
+            repositories.config.save(
+                AppConfig.from_mapping(
+                    {
+                        "ui_mode": "prompt",
+                        "ui_language": "en",
+                        "autostart": False,
+                        "history_enabled": False,
+                        "workflows": {
+                            "rewrite": {
+                                "provider_id": "openai",
+                                "model_id": "gpt-4o-mini",
+                                "prompt": "Persisted prompt",
+                                "enabled": True,
+                            }
+                        },
+                    }
+                )
+            )
+            controller = QmlSettingsController(repositories)
+            controller.selectWorkflow("rewrite")
+            controller.setRoutePrompt("Draft prompt")
+            controller.setHistoryEnabled(True)
+            controller.setAutostart(True)
+
+            self.assertTrue(controller.persistMode("transcription"))
+
+            persisted = repositories.config.load()
+            self.assertEqual(persisted.ui.mode, "transcription")
+            self.assertEqual(persisted.ui.language, "en")
+            self.assertFalse(persisted.startup.autostart)
+            self.assertFalse(persisted.history_enabled)
+            self.assertEqual(
+                persisted.workflow("rewrite").prompt,
+                "Persisted prompt",
+            )
+            self.assertEqual(controller.mode, "prompt")
+            self.assertEqual(controller.routePrompt, "Draft prompt")
+            self.assertTrue(controller.autostart)
+            self.assertTrue(controller.historyEnabled)
+            self.assertTrue(controller.dirty)
 
     def test_windows_save_removes_autostart_when_disabled(self):
         with TemporaryDirectory() as directory:

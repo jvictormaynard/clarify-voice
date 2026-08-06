@@ -142,18 +142,37 @@ def _connect_preference_sync(bridge, settings) -> None:
         finally:
             syncing_from_settings = False
 
-    def persist_home_preference(setter, value) -> None:
-        setter(value)
+    def persist_home_preference(setter, persister, value) -> None:
+        if not setter(value):
+            return
         if not syncing_from_settings:
-            settings.save()
+            persister(value)
 
     settings.configChanged.connect(sync_bridge_from_settings)
     bridge.modeChanged.connect(
-        lambda: persist_home_preference(settings.setMode, bridge.mode)
+        lambda: persist_home_preference(
+            settings.setMode,
+            settings.persistMode,
+            bridge.mode,
+        )
     )
     bridge.languageChanged.connect(
-        lambda: persist_home_preference(settings.setLanguage, bridge.language)
+        lambda: persist_home_preference(
+            settings.setLanguage,
+            settings.persistLanguage,
+            bridge.language,
+        )
     )
+
+
+def _hidden_start_requested(arguments: list[str]) -> bool:
+    """Accept the supported background launch mode and reject other flags."""
+
+    if not arguments:
+        return False
+    if arguments == ["--hidden"]:
+        return True
+    raise ValueError("unsupported launch arguments")
 
 
 def _show_translation_picker_if_needed(bridge, shell) -> None:
@@ -181,10 +200,11 @@ def main(argv: list[str] | None = None) -> int:
     """Start the real QML frontend; missing runtime dependencies are fatal."""
 
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments:
+    try:
+        start_hidden = _hidden_start_requested(arguments)
+    except ValueError:
         print(
-            "ClarifyVoice QML does not accept compatibility/fake runtime flags; "
-            "start it without arguments.",
+            "ClarifyVoice QML accepts only the optional --hidden launch flag.",
             file=sys.stderr,
         )
         return 2
@@ -231,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     window = engine.rootObjects()[0]
+    if start_hidden:
+        window.hide()
     hotkeys = None
     if sys.platform == "win32":
         hotkeys = WindowsGlobalHotkeyBackend(
