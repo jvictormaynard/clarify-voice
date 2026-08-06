@@ -11,6 +11,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 try:
@@ -41,6 +42,7 @@ if PYSIDE6_AVAILABLE:
     from workflows import (
         CancelDictation,
         DismissMicrophoneUnavailable,
+        MicrophoneUnavailableError,
         StartDictation,
         StopDictation,
         RecordingSnapshot,
@@ -170,11 +172,9 @@ class QtRecordingSessionTests(unittest.TestCase):
 
         class Config:
             def current(self):
-                return type(
-                    "CurrentConfig",
-                    (),
-                    {"microphone": type("Microphone", (), {"selected_id": "selected"})()},
-                )()
+                return SimpleNamespace(
+                    microphone=SimpleNamespace(selected_id="selected")
+                )
 
         class InventorySource:
             def snapshot(self):
@@ -202,6 +202,50 @@ class QtRecordingSessionTests(unittest.TestCase):
             ["sox", "-t", "waveaudio", "USB microphone"],
         )
         recorder.stop()
+
+    def test_recorder_rejects_waveaudio_prefix_collision(self):
+        from microphone_controls import MicrophoneDevice, MicrophoneInventory
+
+        prefix = "x" * 31
+        selected = MicrophoneDevice(
+            stable_id="selected",
+            name=prefix + "-a",
+            is_default=False,
+            backend_index=4,
+        )
+        colliding = MicrophoneDevice(
+            stable_id="colliding",
+            name=prefix + "-b",
+            is_default=False,
+            backend_index=5,
+        )
+        default = MicrophoneDevice(
+            stable_id="default",
+            name="System microphone",
+            is_default=True,
+            backend_index=1,
+        )
+        inventory = MicrophoneInventory.from_records(
+            [selected, colliding, default], default_id="default"
+        )
+
+        class Config:
+            def current(self):
+                return SimpleNamespace(
+                    microphone=SimpleNamespace(selected_id="selected")
+                )
+
+        class InventorySource:
+            def snapshot(self):
+                return inventory
+
+        recorder = QtRecorder(Config(), InventorySource())
+        recorder.sox = "sox"
+        with patch(
+            "spikes.pyside6.qml_runtime.platform.system", return_value="Windows"
+        ):
+            with self.assertRaises(MicrophoneUnavailableError):
+                recorder.start(Path("capture.wav"), threading.Event())
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is an optional spike dependency")

@@ -541,6 +541,33 @@ class QtProviderGateway:
         return result
 
 
+SOX_WAVE_AUDIO_NAME_MAX_CHARS = 31
+
+
+def _sox_microphone_name_key(name: str, system: str) -> str:
+    """Normalize a microphone name using the active SoX device rules."""
+
+    normalized = name.casefold()
+    if system == "Windows" and not normalized.isdigit():
+        return normalized[:SOX_WAVE_AUDIO_NAME_MAX_CHARS]
+    return normalized
+
+
+def _sox_microphone_name_is_unambiguous(
+    inventory: Any,
+    device: Any,
+    system: str,
+) -> bool:
+    """Avoid WaveAudio's 31-character prefix collision for selected inputs."""
+
+    device_key = _sox_microphone_name_key(device.name, system)
+    matching = sum(
+        _sox_microphone_name_key(candidate.name, system) == device_key
+        for candidate in inventory.available_devices
+    )
+    return matching == 1
+
+
 class QtRecorder:
     """Minimal SoX owner for the Qt recording session."""
 
@@ -584,16 +611,21 @@ class QtRecorder:
             )
         if selection.state is not MicrophoneSelectionState.SELECTED:
             return "default"
-        if system not in {"Windows", "Darwin"}:
-            is_default = selection.device.is_default or (
-                inventory.default_id == selection.device.stable_id
+        device = selection.device
+        if device is None or not _sox_microphone_name_is_unambiguous(
+            inventory, device, system
+        ):
+            raise MicrophoneUnavailableError(
+                "Selected microphone has no unambiguous backend name"
             )
+        if system not in {"Windows", "Darwin"}:
+            is_default = device.is_default or inventory.default_id == device.stable_id
             if not is_default:
                 raise MicrophoneUnavailableError(
                     "Explicit microphone selection is unavailable with SoX PulseAudio"
                 )
             return "default"
-        return selection.device.name
+        return device.name
 
     def start(self, path: Path, cancel_event: threading.Event) -> None:
         if not self.sox:
